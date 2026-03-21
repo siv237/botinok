@@ -751,7 +751,6 @@ def main():
                     # В stealth mode используем Markdown для красивого вывода
                     console.print(Markdown(last_assistant_message))
                     break
-            sys.exit(0)
             
             step_num += 1
             

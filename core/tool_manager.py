@@ -1,6 +1,7 @@
 import json
 from tools.web_search import ddg_search
 from tools.open_url import open_url
+from tools.file_system import file_system_tool
 
 class ToolManager:
     def __init__(self):
@@ -24,8 +25,7 @@ class ToolManager:
                         }
                     }
                 }
-            }
-            ,
+            },
             "open_url": {
                 "function": open_url,
                 "description": {
@@ -42,6 +42,61 @@ class ToolManager:
                                 }
                             },
                             "required": ["url"]
+                        }
+                    }
+                }
+            },
+            "file_system": {
+                "function": file_system_tool,
+                "description": {
+                    "type": "function",
+                    "function": {
+                        "name": "file_system",
+                        "description": "Инструмент для работы с файловой системой: листинг, поиск файлов, поиск текста (grep), чтение файлов и получение метаданных.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["list", "search", "grep", "read", "info"],
+                                    "description": "Действие: list (список), search (поиск по имени), grep (поиск текста), read (чтение), info (метаданные)"
+                                },
+                                "path": {
+                                    "type": "string",
+                                    "description": "Путь к директории или файлу (по умолчанию '.')",
+                                    "default": "."
+                                },
+                                "pattern": {
+                                    "type": "string",
+                                    "description": "Паттерн для поиска (например, '*.py' или 'config*')",
+                                    "default": "*"
+                                },
+                                "recursive": {
+                                    "type": "boolean",
+                                    "description": "Рекурсивный поиск в поддиректориях",
+                                    "default": False
+                                },
+                                "content_query": {
+                                    "type": "string",
+                                    "description": "Текст для поиска внутри файлов (используется только для action='grep')"
+                                },
+                                "max_results": {
+                                    "type": "integer",
+                                    "description": "Максимальное количество результатов (по умолчанию 50)",
+                                    "default": 50
+                                },
+                                "offset": {
+                                    "type": "integer",
+                                    "description": "Смещение строк для чтения (по умолчанию 0)",
+                                    "default": 0
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "description": "Количество строк для чтения (по умолчанию 1000)",
+                                    "default": 1000
+                                }
+                            },
+                            "required": ["action"]
                         }
                     }
                 }
