@@ -1,7 +1,9 @@
 import os
 import sys
-import json
 import time
+import json
+import threading
+import queue
 import requests
 import argparse
 from datetime import datetime
@@ -47,6 +49,7 @@ class BotVisualizer:
         self.first_token_time = None
         self.thinking_tokens = 0
         self.response_tokens = 0
+        self.tool_tokens = 0 # Новое поле для учета токенов от инструментов
         self.status = "Initializing..."
         self.vram_info = "Checking VRAM..."
         self.current_vram_used = 0
@@ -62,6 +65,7 @@ class BotVisualizer:
         self.first_token_time = None
         self.thinking_tokens = 0
         self.response_tokens = 0
+        self.tool_tokens = 0
         self.status = "Initializing..."
         self.prompt_eval_count = 0
         self.eval_count = 0
@@ -85,7 +89,7 @@ class BotVisualizer:
 
     @property
     def total_tokens(self):
-        return self.thinking_tokens + self.response_tokens
+        return self.thinking_tokens + self.response_tokens + self.tool_tokens
 
     def update_vram(self, sm):
         status = sm.get_ollama_status()
@@ -134,8 +138,10 @@ class BotVisualizer:
         
         # Индикатор активности (спиннер)
         spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        spinner = spinner_chars[int(time.time() * 10) % len(spinner_chars)]
-        activity = f"[bold magenta]{spinner}[/bold magenta]" if self.status == "Generating..." else ""
+        # Используем фиксированное время для синхронизации анимации
+        spinner_index = int(time.time() * 5) % len(spinner_chars)
+        spinner = spinner_chars[spinner_index]
+        activity = f"[bold magenta]{spinner}[/bold magenta]" if self.status in ["Generating...", "Calling Tools...", "Resuming generation..."] else ""
 
         table = Table(show_header=False, box=None, padding=(0, 1))
         table.add_row("[cyan]Status:[/cyan]", f"[bold]{self.status}[/bold] {activity}")
@@ -143,6 +149,7 @@ class BotVisualizer:
         table.add_row("[cyan]TTFT:[/cyan]", f"[bold yellow]{ttft}[/bold yellow]")
         table.add_row("[cyan]Thinking:[/cyan]", f"[bold yellow]{self.thinking_tokens}[/bold yellow]")
         table.add_row("[cyan]Response:[/cyan]", f"[bold green]{self.response_tokens}[/bold green]")
+        table.add_row("[cyan]Tool Ctx:[/cyan]", f"[bold magenta]{self.tool_tokens}[/bold magenta]")
         table.add_row("[cyan]TPS:[/cyan]", f"[bold green]{tps:.2f}[/bold green]")
         
         # VRAM информация
@@ -213,7 +220,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
         }
     }
 
-    with Live(layout, refresh_per_second=4, screen=False) as live:
+    with Live(layout, refresh_per_second=10, screen=False, auto_refresh=True) as live:
         # Принудительная очистка перед запуском qwen3.5:9b
         if "qwen3.5:9b" in model:
             vis.status = "Forced VRAM Cleanup..."
@@ -286,7 +293,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                                 vis.first_token_time = time.time()
                                 vis.prompt_eval_count = chunk.get("prompt_eval_count", 0)
                             
-                            if vis.total_tokens % 20 == 0:
+                            if vis.total_tokens % 50 == 0:
                                 vis.update_vram(sm)
                             
                             # Обработка процесса мышления
@@ -320,14 +327,17 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                             # Сбор вызовов инструментов
                             if msg.get("tool_calls"):
                                 tool_calls.extend(msg.get("tool_calls"))
-                            
-                            layout["header"].update(vis.get_header())
+
+                            # Обновляем только то, что реально меняется
+                            # layout["header"] и layout["footer"] теперь не обновляются в цикле токенов
                             main_height = console.size.height - 12
                             main_width = int(console.size.width * 0.66)
                             layout["content"].update(vis.get_content_panel(width=main_width, height=max(5, main_height)))
                             layout["stats"].update(vis.get_stats_panel())
-                            layout["tools_panel"].update(vis.get_tools_panel())
-                            live.refresh()
+                            
+                            # Обновляем панель инструментов только если есть активные инструменты
+                            if tool_calls or vis.active_tools:
+                                layout["tools_panel"].update(vis.get_tools_panel())
                             
                             if chunk.get("done"):
                                 vis.status = "Done"
@@ -369,12 +379,36 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     
                     sm.log_tool_call(session_path, func_name, func_args, "STARTED", status="running")
                     
-                    for i in range(3):
-                        vis.status = f"[bold yellow]Tool: {func_name}[/bold yellow] ([cyan]{query_display}[/cyan]) {'.' * (i+1)}"
-                        live.refresh()
-                        time.sleep(0.5)
+                    # Асинхронный запуск инструмента для предотвращения фриза UI
+                    result_queue = queue.Queue()
+                    def run_tool():
+                        try:
+                            res = tm.call_tool(func_name, func_args, session_path=session_path)
+                            result_queue.put(("success", res))
+                        except Exception as e:
+                            result_queue.put(("error", str(e)))
 
-                    result = tm.call_tool(func_name, func_args, session_path=session_path)
+                    tool_thread = threading.Thread(target=run_tool)
+                    tool_thread.start()
+
+                    # Ожидание результата с анимацией спиннера
+                    result = None
+                    while tool_thread.is_alive():
+                        # Обновляем статистику и инструменты для анимации спиннера
+                        layout["stats"].update(vis.get_stats_panel())
+                        layout["tools_panel"].update(vis.get_tools_panel())
+                        # Не вызываем live.refresh(), так как auto_refresh=True
+                        time.sleep(0.1)
+
+                    status, tool_output = result_queue.get()
+                    if status == "error":
+                        result = f"Error calling tool: {tool_output}"
+                    else:
+                        result = tool_output
+                    
+                    # Расчет токенов для инструмента (грубая оценка: 1 токен ~= 4 символа)
+                    res_tokens = len(str(result)) // 4
+                    vis.tool_tokens += res_tokens
                     
                     res_size = len(str(result).encode('utf-8')) / 1024
                     vis.update_tool_activity(func_name, "completed", res_size)
