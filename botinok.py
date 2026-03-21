@@ -22,13 +22,14 @@ OLLAMA_PS_URL = "http://ollama.localnet:11434/api/ps"
 
 console = Console()
 
-TOOL_OUTPUT_MAX_CHARS = 2000
+TOOL_OUTPUT_MAX_CHARS = 5000
 
 HARD_CTX_PCT = 0.90
 REPEAT_LINE_WINDOW = 40
 REPEAT_LINE_MIN_OCCURRENCES = 6
-MAX_TOOL_ROUNDS_PER_TURN = 8
+MAX_TOOL_ROUNDS_PER_TURN = 80
 MAX_AUTO_RECOVERIES_PER_TURN = 2
+MISSING_FINAL_AUTO_CONTINUE_MAX = 2
 
 def _estimate_tokens(text: str) -> int:
     if not text:
@@ -492,6 +493,8 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
             # Цикл для обработки потенциальных вызовов инструментов
             tool_rounds = 0
             auto_recoveries = 0
+            http_retries = 0
+            max_http_retries = 2
             while True:
                 tool_rounds += 1
                 if tool_rounds > MAX_TOOL_ROUNDS_PER_TURN:
@@ -561,7 +564,15 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                 if status == "error":
                     vis.status = f"Connection Error: {req_result}"
                     layout["stats"].update(vis.get_stats_panel())
-                    time.sleep(5)
+                    live.refresh()
+                    if http_retries < max_http_retries:
+                        http_retries += 1
+                        time.sleep(2)
+                        continue
+                    fail_msg = f"Connection Error: {req_result}"
+                    sm.update_context(session_path, "system", fail_msg)
+                    messages.append({"role": "assistant", "content": fail_msg})
+                    time.sleep(2)
                     return messages
                 
                 response = req_result
@@ -620,7 +631,12 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     )
                     layout["stats"].update(vis.get_stats_panel())
                     live.refresh()
-                    time.sleep(10)
+                    if http_retries < max_http_retries:
+                        http_retries += 1
+                        time.sleep(3)
+                        continue
+                    fail_msg = f"Ollama HTTP error {response.status_code}: {error_msg}"
+                    messages.append({"role": "assistant", "content": fail_msg})
                     return messages
 
                 vis.status = "Generating..."
@@ -719,6 +735,35 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                                 sm.log_chunk(session_path, "metrics", "", metrics=metrics)
                         except json.JSONDecodeError:
                             continue
+
+                if (not tool_calls) and (not full_response.strip()) and full_thinking.strip():
+                    aborted_reason = "missing_final_response"
+                    if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
+                        summary, _ = _ollama_summarize_and_reset_context(
+                            sm,
+                            model,
+                            session_path,
+                            messages,
+                            num_ctx,
+                            reason=f"{aborted_reason}_recoveries_exhausted({MAX_AUTO_RECOVERIES_PER_TURN})",
+                        )
+                        sm.update_context(session_path, "assistant", summary)
+                        messages.append({"role": "assistant", "content": summary})
+                        break
+                    auto_recoveries += 1
+                    tool_rounds = 0
+                    cont_user = {
+                        "role": "user",
+                        "content": (
+                            "Сформулируй финальный ответ на последний запрос пользователя. "
+                            "Не повторяй рассуждения и не вызывай инструменты без необходимости.\n\n"
+                            f"last_user_prompt: {turn_prompt}\n"
+                            f"session_path: {session_path}\n"
+                        ),
+                    }
+                    messages.append(cont_user)
+                    sm.update_context(session_path, "user", cont_user["content"])
+                    continue
 
                 if aborted_reason:
                     if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
@@ -920,9 +965,19 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
             return messages # Возвращаем обновленную историю сообщений
             
         except Exception as e:
-            vis.status = f"Error: {str(e)}"
-            layout["stats"].update(vis.get_stats_panel())
-            time.sleep(5)
+            err_msg = f"Error: {str(e)}"
+            try:
+                vis.status = err_msg
+                layout["stats"].update(vis.get_stats_panel())
+            except Exception:
+                pass
+            try:
+                sm.update_context(session_path, "system", err_msg)
+            except Exception:
+                pass
+            messages.append({"role": "assistant", "content": err_msg})
+            time.sleep(2)
+            return messages
 
 def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192):
     sm = SessionManager()
@@ -1142,39 +1197,48 @@ def main():
                 if not prompt.strip():
                     continue
 
-            turn_start_idx = len(messages)
-            messages.append({"role": "user", "content": prompt})
-            
-            # Запускаем генерацию
-            if stealth_mode:
-                # В тихом режиме используем упрощенную логику вывода
-                messages = ask_ollama_stealth(model, messages, session_path, step_num, num_ctx)
-            else:
-                messages = ask_ollama_stream(model, messages, session_path, step_num, num_ctx, vis)
-            
-            # Получаем последний ответ ассистента строго в рамках текущего turn,
-            # чтобы не печатать ответ из предыдущего turn при раннем выходе/ошибке.
-            last_assistant_message = ""
-            for m in reversed(messages[turn_start_idx:]):
-                if m.get("role") == "assistant" and m.get("content"):
-                    last_assistant_message = m["content"]
-                    break
-            
-            if last_assistant_message:
-                if not stealth_mode:
-                    console.print("\n[bold green]Final Response:[/bold green]")
-                    console.print(Markdown(last_assistant_message))
-                    console.print("\n" + "─" * console.width + "\n")
+            missing_final_retries = 0
+            while True:
+                turn_start_idx = len(messages)
+                messages.append({"role": "user", "content": prompt})
+
+                if stealth_mode:
+                    messages = ask_ollama_stealth(model, messages, session_path, step_num, num_ctx)
                 else:
-                    # В stealth mode используем Markdown для красивого вывода
-                    console.print(Markdown(last_assistant_message))
+                    messages = ask_ollama_stream(model, messages, session_path, step_num, num_ctx, vis)
+
+                last_assistant_message = ""
+                for m in reversed(messages[turn_start_idx:]):
+                    if m.get("role") == "assistant" and m.get("content"):
+                        last_assistant_message = m["content"]
+                        break
+
+                if last_assistant_message:
+                    if not stealth_mode:
+                        console.print("\n[bold green]Final Response:[/bold green]")
+                        console.print(Markdown(last_assistant_message))
+                        console.print("\n" + "─" * console.width + "\n")
+                    else:
+                        console.print(Markdown(last_assistant_message))
+                        break
+                    step_num += 1
                     break
-            else:
-                if not stealth_mode:
+
+                if stealth_mode:
+                    break
+
+                if missing_final_retries >= MISSING_FINAL_AUTO_CONTINUE_MAX:
                     console.print("\n[bold red]Final Response отсутствует: текущий turn завершился без нового ответа ассистента (возможно ошибка или ранний выход).[/bold red]")
                     console.print("\n" + "─" * console.width + "\n")
-            
-            step_num += 1
+                    step_num += 1
+                    break
+
+                missing_final_retries += 1
+                sm.update_context(session_path, "system", f"Auto-continue: missing final response (attempt {missing_final_retries}/{MISSING_FINAL_AUTO_CONTINUE_MAX})")
+                prompt = (
+                    "Продолжай и дай финальный ответ на последний запрос пользователя. "
+                    "Не повторяй рассуждения и не вызывай инструменты без необходимости."
+                )
             
     except KeyboardInterrupt:
         console.print("\n[bold red]Interrupted by user[/bold red]")
