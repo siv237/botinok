@@ -474,9 +474,17 @@ def main():
             
             # Запускаем генерацию
             messages = ask_ollama_stream(model, messages, session_path, step_num, num_ctx, vis)
-            step_num += 1
             
-            console.print("\n" + "="*50 + "\n")
+            # Получаем последний ответ ассистента для красивого вывода
+            last_assistant_message = next((m["content"] for m in reversed(messages) if m["role"] == "assistant"), "")
+            
+            if last_assistant_message:
+                from rich.markdown import Markdown
+                console.print("\n[bold green]Final Response:[/bold green]")
+                console.print(Markdown(last_assistant_message))
+                console.print("\n" + "─" * console.width + "\n")
+            
+            step_num += 1
             
     except KeyboardInterrupt:
         console.print("\n[bold red]Interrupted by user[/bold red]")
