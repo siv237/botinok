@@ -193,23 +193,18 @@ EOF
 
 chmod +x "$BIN_DIR/botinok"
 
-# Run Configuration Wizard (Interactive)
-echo
-if [ -r /dev/tty ]; then
-    printf "Would you like to run the Configuration Wizard now? (Y/n): " > /dev/tty
-    read run_wizard < /dev/tty
-    if [ "$run_wizard" = "n" ] || [ "$run_wizard" = "N" ]; then
-        echo_blue "Skipping configuration. You can run it later with: botinok --wizard"
-    else
-        echo_blue "Launching Configuration Wizard..."
-        "$BIN_DIR/botinok" --wizard < /dev/tty > /dev/tty 2> /dev/tty
-    fi
-else
-    echo_blue "To configure BOTINOK, please run the wizard manually:"
-    echo_blue "  botinok --wizard"
-fi
-
 print_banner
 
 echo_green "BOTINOK has been successfully installed!"
-echo -e "You can now run it by typing: ${BLUE}botinok${NC}"
+echo
+echo_blue "Installed version: ${BOTINOK_VERSION}"
+echo_blue "Install directory: ${INSTALL_DIR}"
+echo_blue "Config file:       ${INSTALL_DIR}/config.cfg"
+echo_blue "Sessions dir:      ${SESSIONS_DIR}"
+echo
+echo_blue "Quick start:"
+echo_blue "  botinok"
+echo_blue "  botinok --wizard"
+echo
+echo_blue "Tip: if you need to edit settings manually:"
+echo_blue "  nano ${INSTALL_DIR}/config.cfg"
