@@ -24,6 +24,12 @@ console = Console()
 
 TOOL_OUTPUT_MAX_CHARS = 2000
 
+HARD_CTX_PCT = 0.90
+REPEAT_LINE_WINDOW = 40
+REPEAT_LINE_MIN_OCCURRENCES = 6
+MAX_TOOL_ROUNDS_PER_TURN = 8
+MAX_AUTO_RECOVERIES_PER_TURN = 2
+
 def _estimate_tokens(text: str) -> int:
     if not text:
         return 0
@@ -39,6 +45,11 @@ def _estimate_message_tokens(msg: dict) -> int:
         except Exception:
             t += _estimate_tokens(str(msg["tool_calls"]))
     return t
+
+def _estimate_messages_tokens(msgs: list) -> int:
+    if not msgs:
+        return 0
+    return sum(_estimate_message_tokens(m) for m in msgs)
 
 def _prepare_messages_for_ollama(sm: SessionManager, session_path: str, messages: list, num_ctx: int, reserve_tokens: int = 1200):
     """Trim message history to fit a conservative token budget.
@@ -110,6 +121,117 @@ def _compact_tool_message(tool_name: str, tool_args: dict, result: str, artifact
         msg += f"\n...[TRUNCATED {len(res_str) - TOOL_OUTPUT_MAX_CHARS} chars]"
     return msg
 
+def _ollama_summarize_and_reset_context(
+    sm: SessionManager,
+    model: str,
+    session_path: str,
+    messages: list,
+    num_ctx: int,
+    reason: str,
+    reserve_tokens: int = 1600,
+):
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+
+    artifact_name = f"context_overflow_full_{int(time.time())}.json"
+    try:
+        artifact_path = sm.save_artifact(
+            session_path,
+            artifact_name,
+            json.dumps(messages, ensure_ascii=False, indent=2),
+        )
+    except Exception:
+        artifact_path = f"./artifacts/{artifact_name}"
+
+    summary_system = {
+        "role": "system",
+        "content": (
+            "Ты — BOTINOK. Сформируй краткий протокол сессии для продолжения работы при переполнении контекста. "
+            "Не повторяй длинный текст. Не вызывай инструменты.\n\n"
+            "Формат:\n"
+            "- SESSION_PROTOCOL\n"
+            "- reason: ...\n"
+            "- key_facts: (5-10 пунктов)\n"
+            "- open_questions: (если есть)\n"
+            "- next_steps: (3-7 пунктов)\n"
+        ),
+    }
+    summary_user = {
+        "role": "user",
+        "content": (
+            f"Контекст близок к лимиту или модель зациклилась. reason={reason}. "
+            f"Полная история сохранена в {artifact_path}. "
+            "Сделай протокол сессии, чтобы можно было продолжить работу с чистым контекстом."
+        ),
+    }
+
+    summary_messages = system_msgs + [summary_system, summary_user]
+    summary_messages = _prepare_messages_for_ollama(
+        sm,
+        session_path,
+        summary_messages,
+        num_ctx=num_ctx,
+        reserve_tokens=reserve_tokens,
+    )
+
+    ollama_base_url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+    chat_url = f"{ollama_base_url}/api/chat"
+
+    summary_text = (
+        "SESSION_PROTOCOL\n"
+        f"reason: {reason}\n"
+        f"artifact: {artifact_path}\n"
+        "key_facts:\n"
+        "- (summary generation failed)\n"
+        "next_steps:\n"
+        "- Продолжить с очищенным контекстом\n"
+    )
+    try:
+        payload = {
+            "model": model,
+            "messages": summary_messages,
+            "stream": False,
+            "options": {
+                "num_ctx": num_ctx,
+                "num_predict": 450,
+            },
+        }
+        res = requests.post(
+            chat_url,
+            json=payload,
+            timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300),
+        )
+        if res.status_code == 200:
+            data = res.json()
+            summary_text = data.get("message", {}).get("content") or summary_text
+    except Exception:
+        pass
+
+    protocol_msg = {
+        "role": "system",
+        "content": (
+            "Контекст был очищен из-за риска переполнения/зацикливания. "
+            f"Полная история: {artifact_path}\n\n"
+            f"{summary_text}"
+        ),
+    }
+
+    messages.clear()
+    messages.extend(system_msgs + [protocol_msg])
+
+    return protocol_msg["content"], artifact_path
+
+def _detect_repetition(full_response: str) -> bool:
+    if not full_response:
+        return False
+    lines = [l.strip() for l in full_response.splitlines() if l.strip()]
+    if len(lines) < 10:
+        return False
+    tail = lines[-REPEAT_LINE_WINDOW:]
+    last = tail[-1]
+    if not last:
+        return False
+    return sum(1 for l in tail if l == last) >= REPEAT_LINE_MIN_OCCURRENCES
+
 def create_layout():
     layout = Layout()
     layout.split(
@@ -144,6 +266,7 @@ class BotVisualizer:
         self.total_vram = 8.0
         self.prompt_eval_count = 0
         self.eval_count = 0
+        self.session_ctx_est = 0
         self.active_tools = [] # Список текущих вызовов инструментов
         
     def reset(self, prompt):
@@ -157,6 +280,7 @@ class BotVisualizer:
         self.status = "Initializing..."
         self.prompt_eval_count = 0
         self.eval_count = 0
+        self.session_ctx_est = 0
         self.active_tools = []
 
     def add_tool_activity(self, name, query, status="running", size_kb=0):
@@ -249,13 +373,14 @@ class BotVisualizer:
         vram_style = "green" if vram_pct < 70 else "yellow" if vram_pct < 90 else "red"
         table.add_row("[cyan]VRAM:[/cyan]", f"[{vram_style}]{self.current_vram_used:.2f}GB ({vram_pct:.1f}%)[/{vram_style}]")
         
-        # Context информация
-        # prompt_eval_count и eval_count приходят от Ollama и отражают реальные токены модели.
-        # Локальные счетчики thinking/response/tool - приблизительные и для диагностики UI.
-        total_ctx_used = self.prompt_eval_count + self.eval_count
-        ctx_pct = (total_ctx_used / self.num_ctx) * 100 if self.num_ctx > 0 else 0
-        ctx_style = "green" if ctx_pct < 70 else "yellow" if ctx_pct < 90 else "red"
-        table.add_row("[cyan]Context:[/cyan]", f"[{ctx_style}]{total_ctx_used}/{self.num_ctx} ({ctx_pct:.1f}%)[/{ctx_style}]")
+        session_ctx_pct = (self.session_ctx_est / self.num_ctx) * 100 if self.num_ctx > 0 else 0
+        session_ctx_style = "green" if session_ctx_pct < 70 else "yellow" if session_ctx_pct < 90 else "red"
+        table.add_row("[cyan]SessionCtx:[/cyan]", f"[{session_ctx_style}]{self.session_ctx_est}/{self.num_ctx} ({session_ctx_pct:.1f}%)[/{session_ctx_style}]")
+
+        last_req_ctx_used = self.prompt_eval_count + self.eval_count
+        last_req_ctx_pct = (last_req_ctx_used / self.num_ctx) * 100 if self.num_ctx > 0 else 0
+        last_req_ctx_style = "green" if last_req_ctx_pct < 70 else "yellow" if last_req_ctx_pct < 90 else "red"
+        table.add_row("[cyan]LastReqCtx:[/cyan]", f"[{last_req_ctx_style}]{last_req_ctx_used}/{self.num_ctx} ({last_req_ctx_pct:.1f}%)[/{last_req_ctx_style}]")
         
         return Panel(table, title="[bold yellow]Performance[/bold yellow]", border_style="yellow")
 
@@ -298,6 +423,8 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
         vis = BotVisualizer(model, prompt, num_ctx)
     else:
         vis.reset(prompt)
+
+    turn_prompt = prompt
 
     layout = create_layout()
     
@@ -363,8 +490,55 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
         
         try:
             # Цикл для обработки потенциальных вызовов инструментов
+            tool_rounds = 0
+            auto_recoveries = 0
             while True:
-                payload["messages"] = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=num_ctx)
+                tool_rounds += 1
+                if tool_rounds > MAX_TOOL_ROUNDS_PER_TURN:
+                    if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
+                        summary, _ = _ollama_summarize_and_reset_context(
+                            sm,
+                            model,
+                            session_path,
+                            messages,
+                            num_ctx,
+                            reason=f"max_tool_rounds_exceeded({MAX_TOOL_ROUNDS_PER_TURN})_recoveries_exhausted({MAX_AUTO_RECOVERIES_PER_TURN})",
+                        )
+                        sm.update_context(session_path, "assistant", summary)
+                        messages.append({"role": "assistant", "content": summary})
+                        break
+
+                    summary, artifact_path = _ollama_summarize_and_reset_context(
+                        sm,
+                        model,
+                        session_path,
+                        messages,
+                        num_ctx,
+                        reason=f"max_tool_rounds_exceeded({MAX_TOOL_ROUNDS_PER_TURN})",
+                    )
+                    auto_recoveries += 1
+                    tool_rounds = 0
+                    cont_user = {
+                        "role": "user",
+                        "content": (
+                            "Продолжай выполнение последнего запроса пользователя после авто-очистки контекста. "
+                            "Не повторяй длинные куски текста. Не зацикливайся. Если нужны детали — смотри в артефактах/логах.\n\n"
+                            f"last_user_prompt: {turn_prompt}\n"
+                            f"session_path: {session_path}\n"
+                            f"full_history_artifact: {artifact_path}\n"
+                            "files: response.md, thinking.md, tools.log, session_raw.log, context.json, artifacts/\n"
+                            "Твоя цель: завершить задачу пользователя и дать финальный ответ."
+                        )
+                    }
+                    messages.append(cont_user)
+                    sm.update_context(session_path, "assistant", summary)
+                    sm.update_context(session_path, "user", cont_user["content"])
+                    continue
+
+                prepared = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=num_ctx)
+                payload["messages"] = prepared
+                if vis is not None:
+                    vis.session_ctx_est = _estimate_messages_tokens(prepared)
                 # Создаем поток для выполнения POST запроса, чтобы не блокировать UI на этапе 'Connecting'
                 response_queue = queue.Queue()
                 def make_request():
@@ -393,8 +567,57 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                 response = req_result
                 
                 if response.status_code != 200:
-                    error_msg = response.json().get("error", "Unknown Error")
+                    error_text = ""
+                    error_msg = "Unknown Error"
+                    try:
+                        data = response.json()
+                        if isinstance(data, dict):
+                            error_msg = data.get("error", error_msg)
+                            error_text = json.dumps(data, ensure_ascii=False, indent=2)
+                        else:
+                            error_text = str(data)
+                    except Exception:
+                        try:
+                            error_text = (response.text or "")
+                        except Exception:
+                            error_text = ""
+
                     vis.status = f"Ollama Error: {error_msg}"
+
+                    # Persist error context for debugging.
+                    ts = int(time.time())
+                    try:
+                        err_body_path = sm.save_artifact(
+                            session_path,
+                            f"ollama_http_error_{response.status_code}_{ts}.txt",
+                            (error_text or "")[:200_000],
+                        )
+                    except Exception:
+                        err_body_path = f"./artifacts/ollama_http_error_{response.status_code}_{ts}.txt"
+
+                    try:
+                        req_payload = {
+                            "model": payload.get("model"),
+                            "options": payload.get("options"),
+                            "messages": payload.get("messages"),
+                            "tools_included": bool(payload.get("tools")),
+                        }
+                        req_payload_path = sm.save_artifact(
+                            session_path,
+                            f"ollama_http_error_payload_{ts}.json",
+                            json.dumps(req_payload, ensure_ascii=False, indent=2),
+                        )
+                    except Exception:
+                        req_payload_path = f"./artifacts/ollama_http_error_payload_{ts}.json"
+
+                    sm.update_context(
+                        session_path,
+                        "system",
+                        (
+                            f"Ollama HTTP error {response.status_code}: {error_msg}. "
+                            f"Saved artifacts: {err_body_path}, {req_payload_path}"
+                        ),
+                    )
                     layout["stats"].update(vis.get_stats_panel())
                     live.refresh()
                     time.sleep(10)
@@ -407,6 +630,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                 full_thinking = ""
                 tool_calls = []
                 metrics = {}
+                aborted_reason = None
                 
                 sm.update_context(session_path, "user", prompt)
                 
@@ -460,6 +684,14 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                                 vis.response_tokens += 1
                                 sm.log_chunk(session_path, "response", token)
 
+                                if len(full_response) % 800 == 0 and _detect_repetition(full_response):
+                                    aborted_reason = "repetition_detected"
+                                    try:
+                                        response.close()
+                                    except Exception:
+                                        pass
+                                    break
+
                             # Сбор вызовов инструментов
                             if msg.get("tool_calls"):
                                 tool_calls.extend(msg.get("tool_calls"))
@@ -487,6 +719,89 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                                 sm.log_chunk(session_path, "metrics", "", metrics=metrics)
                         except json.JSONDecodeError:
                             continue
+
+                if aborted_reason:
+                    if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
+                        summary, _ = _ollama_summarize_and_reset_context(
+                            sm,
+                            model,
+                            session_path,
+                            messages,
+                            num_ctx,
+                            reason=f"{aborted_reason}_recoveries_exhausted({MAX_AUTO_RECOVERIES_PER_TURN})",
+                        )
+                        sm.update_context(session_path, "assistant", summary)
+                        messages.append({"role": "assistant", "content": summary})
+                        break
+
+                    summary, artifact_path = _ollama_summarize_and_reset_context(
+                        sm,
+                        model,
+                        session_path,
+                        messages,
+                        num_ctx,
+                        reason=aborted_reason,
+                    )
+                    auto_recoveries += 1
+                    tool_rounds = 0
+                    cont_user = {
+                        "role": "user",
+                        "content": (
+                            "Продолжай выполнение последнего запроса пользователя после авто-очистки контекста. "
+                            "Не повторяй длинные куски текста. Не зацикливайся. Если нужны детали — смотри в артефактах/логах.\n\n"
+                            f"last_user_prompt: {turn_prompt}\n"
+                            f"session_path: {session_path}\n"
+                            f"full_history_artifact: {artifact_path}\n"
+                            "files: response.md, thinking.md, tools.log, session_raw.log, context.json, artifacts/\n"
+                            "Твоя цель: завершить задачу пользователя и дать финальный ответ."
+                        )
+                    }
+                    messages.append(cont_user)
+                    sm.update_context(session_path, "assistant", summary)
+                    sm.update_context(session_path, "user", cont_user["content"])
+                    continue
+
+                ctx_used = metrics.get("prompt_eval_count", 0) + metrics.get("eval_count", 0)
+                if num_ctx > 0 and ctx_used >= int(num_ctx * HARD_CTX_PCT):
+                    if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
+                        summary, _ = _ollama_summarize_and_reset_context(
+                            sm,
+                            model,
+                            session_path,
+                            messages,
+                            num_ctx,
+                            reason=f"hard_ctx_threshold_reached({ctx_used}/{num_ctx})_recoveries_exhausted({MAX_AUTO_RECOVERIES_PER_TURN})",
+                        )
+                        sm.update_context(session_path, "assistant", summary)
+                        messages.append({"role": "assistant", "content": summary})
+                        break
+
+                    summary, artifact_path = _ollama_summarize_and_reset_context(
+                        sm,
+                        model,
+                        session_path,
+                        messages,
+                        num_ctx,
+                        reason=f"hard_ctx_threshold_reached({ctx_used}/{num_ctx})",
+                    )
+                    auto_recoveries += 1
+                    tool_rounds = 0
+                    cont_user = {
+                        "role": "user",
+                        "content": (
+                            "Продолжай выполнение последнего запроса пользователя после авто-очистки контекста. "
+                            "Не повторяй длинные куски текста. Не зацикливайся. Если нужны детали — смотри в артефактах/логах.\n\n"
+                            f"last_user_prompt: {turn_prompt}\n"
+                            f"session_path: {session_path}\n"
+                            f"full_history_artifact: {artifact_path}\n"
+                            "files: response.md, thinking.md, tools.log, session_raw.log, context.json, artifacts/\n"
+                            "Твоя цель: завершить задачу пользователя и дать финальный ответ."
+                        )
+                    }
+                    messages.append(cont_user)
+                    sm.update_context(session_path, "assistant", summary)
+                    sm.update_context(session_path, "user", cont_user["content"])
+                    continue
 
                 # Если нет вызовов инструментов, выходим из цикла генерации
                 if not tool_calls:
