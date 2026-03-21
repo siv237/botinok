@@ -107,14 +107,30 @@ mkdir -p "$SESSIONS_DIR"
 chmod 777 "$SESSIONS_DIR"
 
 # Copy/Clone files
-if [ -d ".git" ]; then
+if [ -d ".git" ] && [ "$PWD" != "$INSTALL_DIR" ]; then
     echo_blue "Copying files from current directory..."
     cp -r . "$INSTALL_DIR/"
 else
-    echo_blue "Cloning repository..."
+    echo_blue "Checking repository in $INSTALL_DIR..."
     if [ -d "$INSTALL_DIR/.git" ]; then
-        cd "$INSTALL_DIR" && git pull
+        echo_blue "Existing repository found. Attempting to update..."
+        if cd "$INSTALL_DIR" && git pull; then
+            echo_green "Successfully updated via git pull."
+        else
+            echo_red "Failed to update repository (possibly local changes or network issue)."
+            read -p "Would you like to perform a clean reinstall? (y/N): " confirm
+            if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                echo_blue "Performing clean reinstall..."
+                rm -rf "$INSTALL_DIR"
+                mkdir -p "$INSTALL_DIR"
+                git clone "$GITHUB_REPO" "$INSTALL_DIR"
+            else
+                echo_red "Update failed. Please resolve conflicts in $INSTALL_DIR manually."
+                exit 1
+            fi
+        fi
     else
+        echo_blue "Cloning repository..."
         git clone "$GITHUB_REPO" "$INSTALL_DIR"
     fi
 fi
