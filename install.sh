@@ -183,8 +183,9 @@ chmod +x "$BIN_DIR/botinok"
 
 # Run Configuration Wizard (Interactive)
 echo
-read -p "Would you like to run the Configuration Wizard now? (Y/n): " run_wizard
-if [[ "$run_wizard" =~ ^[Nn]$ ]]; then
+printf "Would you like to run the Configuration Wizard now? (Y/n): "
+read run_wizard
+if [ "$run_wizard" = "n" ] || [ "$run_wizard" = "N" ]; then
     echo_blue "Skipping configuration. You can run it later with: botinok --wizard"
 else
     echo_blue "Launching Configuration Wizard..."
