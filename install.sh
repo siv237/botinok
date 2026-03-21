@@ -1,0 +1,134 @@
+#!/bin/bash
+
+# BOTINOK INSTALLER (Ollama style)
+# This script installs BOTINOK AGENT to /opt/botinok and creates a symlink in /usr/local/bin
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+INSTALL_DIR="/opt/botinok"
+BIN_DIR="/usr/local/bin"
+SESSIONS_DIR="/var/log/botinok/sessions"
+GITHUB_REPO="https://github.com/user/botinok.git" # Замените на реальный URL
+
+# --- Functions ---
+
+echo_blue() { echo -e "${BLUE}$1${NC}"; }
+echo_green() { echo -e "${GREEN}$1${NC}"; }
+echo_red() { echo -e "${RED}$1${NC}"; }
+
+check_root() {
+    if [ "$EUID" -ne 0 ]; then 
+        echo_red "Please run as root (use sudo)"
+        exit 1
+    fi
+}
+
+install_dependencies() {
+    echo_blue "Checking system dependencies..."
+    apt-get update -y
+    apt-get install -y python3 python3-venv python3-pip lynx curl git
+}
+
+uninstall() {
+    echo_blue "Uninstalling BOTINOK..."
+    rm -f "$BIN_DIR/botinok"
+    rm -rf "$INSTALL_DIR"
+    # Оставляем сессии по умолчанию, но можно добавить флаг --purge
+    echo_green "BOTINOK has been uninstalled."
+    exit 0
+}
+
+# --- Main Logic ---
+
+if [ "$1" == "--uninstall" ]; then
+    check_root
+    uninstall
+fi
+
+check_root
+
+echo_blue "Starting BOTINOK installation/update..."
+
+# Detect OS
+if [ -f /etc/debian_version ]; then
+    echo_green "Debian-based system detected."
+else
+    echo_red "This script is designed for Debian-based distributions."
+    exit 1
+fi
+
+install_dependencies
+
+# Prepare directories
+echo_blue "Preparing directories..."
+mkdir -p "$INSTALL_DIR"
+mkdir -p "$SESSIONS_DIR"
+chmod 777 "$SESSIONS_DIR"
+
+# Copy/Clone files
+if [ -d ".git" ]; then
+    echo_blue "Copying files from current directory..."
+    cp -r . "$INSTALL_DIR/"
+else
+    echo_blue "Cloning repository..."
+    if [ -d "$INSTALL_DIR/.git" ]; then
+        cd "$INSTALL_DIR" && git pull
+    else
+        git clone "$GITHUB_REPO" "$INSTALL_DIR"
+    fi
+fi
+
+# Set up Virtual Environment
+echo_blue "Setting up Python virtual environment..."
+python3 -m venv "$INSTALL_DIR/venv"
+"$INSTALL_DIR/venv/bin/pip" install --upgrade pip
+"$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+
+# Configuration
+CONFIG_FILE="$INSTALL_DIR/config.cfg"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo_blue "Creating initial config.cfg..."
+    cat <<EOF > "$CONFIG_FILE"
+[Ollama]
+BaseUrl = http://ollama.localnet:11434
+DefaultModel = qwen3.5:4b
+DefaultContext = 8192
+RequestTimeout = 300
+
+[Storage]
+SessionsDir = $SESSIONS_DIR
+StepsSubDir = steps
+
+[Tools]
+LynxUserAgent = Mozilla/5.0 (Compatible; Lynx/2.8.9rel.1; Linux)
+LynxMaxChars = 8000
+LynxConnectTimeout = 10
+LynxReadTimeout = 15
+
+[UI]
+ShowVRAM = true
+ShowTPS = true
+EOF
+else
+    echo_blue "Config file already exists, skipping creation."
+fi
+
+# Create executable wrapper
+echo_blue "Creating executable wrapper in $BIN_DIR/botinok..."
+cat <<EOF > "$BIN_DIR/botinok"
+#!/bin/bash
+export BOTINOK_HOME="$INSTALL_DIR"
+cd "\$BOTINOK_HOME"
+./venv/bin/python3 botinok.py "\$@"
+EOF
+
+chmod +x "$BIN_DIR/botinok"
+
+echo_green "BOTINOK has been successfully installed!"
+echo -e "You can now run it by typing: ${BLUE}botinok${NC}"

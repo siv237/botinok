@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+
+# Packaging/build
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Unit test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.pytype/
+.pyre/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Project runtime artifacts
+sessions/
+logs/
+.browser_profile/
+
+# Generic logs
+*.log
+
+# Configuration
+config.cfg
+
+# IDE
+.vscode/
+.idea/
+.windsurf/
+.browser_profile/
