@@ -748,9 +748,10 @@ def main():
                     console.print(Markdown(last_assistant_message))
                     console.print("\n" + "─" * console.width + "\n")
                 else:
-                    # В stealth mode просто печатаем ответ и выходим
-                    print(last_assistant_message)
-                    sys.exit(0)
+                    # В stealth mode используем Markdown для красивого вывода
+                    console.print(Markdown(last_assistant_message))
+                    break
+            sys.exit(0)
             
             step_num += 1
             
