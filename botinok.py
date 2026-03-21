@@ -535,8 +535,15 @@ def main():
     parser.add_argument("-p", "--prompt", help="Initial prompt")
     parser.add_argument("-m", "--model", default=default_model, help=f"Model name (default: {default_model})")
     parser.add_argument("-c", "--ctx", type=int, default=default_ctx, help=f"Context size (default: {default_ctx})")
+    parser.add_argument("--wizard", action="store_true", help="Запустить мастер настройки")
     
     args = parser.parse_args()
+    
+    if args.wizard:
+        from core.config_wizard import ConfigWizard
+        wizard = ConfigWizard()
+        wizard.run()
+        return
     
     # Определяем параметры из аргументов или конфига
     arg_prompt = args.prompt if args.prompt else args.prompt_pos
@@ -559,26 +566,30 @@ def main():
     # Вывод ASCII арта и версии
     ascii_art = """
     [bold blue]
-                                                          ......................
-                                                          ......................
-                                                          ....................
-                                          .:              ...................
-                          .:     ....:::^?PG7...          ..................
-                          7~7!77??JYY5PPGBB#BPPJ^.        ................
-                          ^!J?JJYY555PGGBBB####J?^^:      ................
-                           ^YJJYYYYY5PGGBBBBBB#P7!.~:     ...............
-                           .JJYYJ?JY5GGGGGBBB#B#P?!:.      ..............
-                           .J777?JY555PPGBBGGBBBBBY:       ..............
-                           !J7?JY5P555PGGGGGGBBBBBBPY~:    ..............
-                          .???JYYY555PPPPPGGGGGGBBBBBBPJ~: ...............
-                          ~J!!!7?JJYY55555PPPGGGGGGGGGBBGG!................
-                          ?J~~~~!7?JJY55555555PPPPGGGGGGGGPJ!^.... ........
-                         .?J7!!7JYY5YY5PP5555PPPGGGGPPGGPGGPP5YJJJ?7777??7~.
-                          !JJJY5555PP55PP55PPPPPP555PPPPPPPPPPGGGGPGGBBBBBB5:
-                         :?YY555PPPGGPPGBPPGGPPP555PPP5PPPPGGGGGGGBBBBBB####G!
-                         ~Y5555PPPGGGGGGGGGGGGGGPPGPPPPPPGGGBBBBBBBBB#####BP?^
-                         !555PGPGGGBGBBGBP!~!7?JY5PPGGGGGBBBB#######BGPYJ7~:..
-                         .^^~!!!7!7777777!^^^::^^~~!??JJJJJJJJJJJ?77!~~^^^::::
+                                                           ^^:.                                     
+                                                          !~.~!7^:::::....                          
+                                                        ^?7^7!~~~7~~~~~~!!!!!!~~^^                  
+                                                       :J7:J^!7~ ^           ..:~P^                 
+                                                       7J !?:^~:~^::::........  !Y.                 
+                                                      ~Y::J!!7..~      ........:J?                  
+                                                     ~?7!?!:~!.^.              :Y!                  
+                                                    ~J~!?7!!: ^:               ^5~                  
+                                                  .!?!??~.~!:^:                !Y!                  
+                                                .^???77!?! .^.                 7?7                  
+                                              .~?J7??~.:~^::                   ?!?.                 
+                                           .^7J5J7^:7?~.::.                 .:^J77!                 
+                                         ^!7Y?~~7?! .:::.               :^!!~~^.  ?.                
+                                       .?7J7!?! .^^::.               :~!~^.       !~                
+                                   .:^~~^.?~:~^  ^.                 !7^.          .?                
+                    .:::::::::^^~7~^^.    ~?: ..:~.:::....         7!              ?:               
+                 .~~^:::::::::...!?        !?~~~~7!~!!~~~^::.     ^?.              7:               
+                 7:               !7        ^^::.......:^~!!^::   !7               ?.               
+               .~?..              .?^                      ^7~:^..J!.::::^^^^~~~~!!J!               
+               J7!7!!!~^::..       ~?                 ..:^^~7?777!?777777777!7!!!!~^J:              
+              ^7:::^~!!!!7!7!7!!~~^~J~:^:::::^^^^~~!!7777!!!!~~^^^^::.........      !^              
+              .^!~^!^.:~::^^^^~~!!~!!7!7!7!7!7!7!!!!~^~^^^^~~~^!7^?                 !~              
+                  .:^^~7~^7!:~?:.:~..^~..:^..^!:.:~..!~^::...   ^~J: ^^ :!^ ^~.^?!:^7^              
+                         ...:::^^~!^^~~~^~7^^!!!^~~^^:            :~^~~^~^~^^~^^::::.               
     [/bold blue]
     [bold yellow]BOTINOK AGENT - Version 0.1[/bold yellow]
     """

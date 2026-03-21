@@ -6,10 +6,11 @@ from datetime import datetime
 import requests
 
 class SessionManager:
-    def __init__(self, config_path="config.cfg"):
+    def __init__(self):
         self.config = configparser.ConfigParser()
-        if os.path.exists(config_path):
-            self.config.read(config_path, encoding='utf-8')
+        self.config_path = os.getenv("BOTINOK_CONFIG", "config.cfg")
+        if os.path.exists(self.config_path):
+            self.config.read(self.config_path, encoding='utf-8')
         else:
             # Дефолтные значения, если конфиг не найден
             self.config['Ollama'] = {'BaseUrl': 'http://localhost:11434', 'DefaultModel': 'qwen3.5:9b', 'DefaultContext': '8192'}
@@ -20,6 +21,16 @@ class SessionManager:
         if not os.path.exists(self.base_path):
             os.makedirs(self.base_path)
             
+    def save_config(self):
+        """Сохраняет текущую конфигурацию в файл."""
+        try:
+            with open(self.config_path, 'w', encoding='utf-8') as configfile:
+                self.config.write(configfile)
+            return True
+        except Exception as e:
+            print(f"Error saving config: {e}")
+            return False
+
     def create_session(self, name=""):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         session_name = f"{timestamp}_{name}" if name else timestamp
