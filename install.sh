@@ -181,9 +181,15 @@ EOF
 
 chmod +x "$BIN_DIR/botinok"
 
-# Run Configuration Wizard (Manual)
-echo_blue "To configure BOTINOK, please run the wizard manually:"
-echo_blue "  botinok --wizard"
+# Run Configuration Wizard (Interactive)
+echo
+read -p "Would you like to run the Configuration Wizard now? (Y/n): " run_wizard
+if [[ "$run_wizard" =~ ^[Nn]$ ]]; then
+    echo_blue "Skipping configuration. You can run it later with: botinok --wizard"
+else
+    echo_blue "Launching Configuration Wizard..."
+    "$BIN_DIR/botinok" --wizard
+fi
 
 print_banner
 
