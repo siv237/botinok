@@ -47,6 +47,26 @@
 - `thinking.md` / `response.md`: Раздельные логи размышлений и финальных ответов в формате Markdown.
 - `session_raw.log`: Потоковый лог чанков с таймингами.
 
+## Установка (Installation)
+
+Установка выполняется одной командой (требуются права root):
+
+**через curl:**
+```bash
+curl -sSL https://raw.githubusercontent.com/siv237/botinok/main/install.sh | sudo bash
+```
+
+**через wget (если нет curl):**
+```bash
+wget -qO- https://raw.githubusercontent.com/siv237/botinok/main/install.sh | sudo bash
+```
+
+Скрипт автоматически:
+1. Установит системные зависимости (`python3-venv`, `lynx`, `git`).
+2. Развернет проект в `/opt/botinok`.
+3. Создаст виртуальное окружение и установит библиотеки.
+4. Добавит команду `botinok` в систему.
+
 ## Использование (после установки)
 
 ```bash
@@ -56,21 +76,7 @@ botinok
 Дополнительные параметры:
 - `-m MODEL`: Выбор модели (например, `qwen3.5:4b`).
 - `-c CTX`: Размер контекста (по умолчанию `8192`).
-- `-p "PROMPT"`: Начальный запрос.
-
-## Установка
-
-Для систем на базе Debian/Ubuntu:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/ваш-репозиторий/botinok/main/install.sh | sudo bash
-```
-
-Или локально:
-
-```bash
-sudo ./install.sh
-```
+- `-p "PROMPT"`: Начальный запрос (агент выполнит его и перейдет в интерактив).
 
 ## Настройка
 
