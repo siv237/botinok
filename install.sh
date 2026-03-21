@@ -183,11 +183,7 @@ chmod +x "$BIN_DIR/botinok"
 
 # Run Configuration Wizard
 echo_blue "Launching Configuration Wizard..."
-if [ -t 0 ]; then
-    "$INSTALL_DIR/venv/bin/python3" "$INSTALL_DIR/botinok.py" --wizard < /dev/tty > /dev/tty
-else
-    echo_red "No TTY detected. Skipping interactive wizard."
-fi
+"$INSTALL_DIR/venv/bin/python3" "$INSTALL_DIR/botinok.py" --wizard < /dev/tty > /dev/tty
 
 print_banner
 
