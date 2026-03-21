@@ -591,8 +591,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
             layout["stats"].update(vis.get_stats_panel())
             live.refresh()
 
-            # Сохраняем финальный ответ
-            sm.update_context(session_path, "assistant", full_response, thinking=full_thinking)
+            # Финальный ответ сохраняется в контекст в месте фактического завершения генерации
             
             final_stats = {
                 "total_tokens": vis.total_tokens,
@@ -828,6 +827,7 @@ def main():
                 if not prompt.strip():
                     continue
 
+            turn_start_idx = len(messages)
             messages.append({"role": "user", "content": prompt})
             
             # Запускаем генерацию
@@ -837,9 +837,10 @@ def main():
             else:
                 messages = ask_ollama_stream(model, messages, session_path, step_num, num_ctx, vis)
             
-            # Получаем последний ответ ассистента для красивого вывода
+            # Получаем последний ответ ассистента строго в рамках текущего turn,
+            # чтобы не печатать ответ из предыдущего turn при раннем выходе/ошибке.
             last_assistant_message = ""
-            for m in reversed(messages):
+            for m in reversed(messages[turn_start_idx:]):
                 if m.get("role") == "assistant" and m.get("content"):
                     last_assistant_message = m["content"]
                     break
@@ -853,6 +854,10 @@ def main():
                     # В stealth mode используем Markdown для красивого вывода
                     console.print(Markdown(last_assistant_message))
                     break
+            else:
+                if not stealth_mode:
+                    console.print("\n[bold red]Final Response отсутствует: текущий turn завершился без нового ответа ассистента (возможно ошибка или ранний выход).[/bold red]")
+                    console.print("\n" + "─" * console.width + "\n")
             
             step_num += 1
             
