@@ -22,6 +22,94 @@ OLLAMA_PS_URL = "http://ollama.localnet:11434/api/ps"
 
 console = Console()
 
+TOOL_OUTPUT_MAX_CHARS = 2000
+
+def _estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, len(str(text)) // 4)
+
+def _estimate_message_tokens(msg: dict) -> int:
+    base = 8
+    content = msg.get("content", "")
+    t = base + _estimate_tokens(content)
+    if "tool_calls" in msg and msg["tool_calls"]:
+        try:
+            t += _estimate_tokens(json.dumps(msg["tool_calls"], ensure_ascii=False))
+        except Exception:
+            t += _estimate_tokens(str(msg["tool_calls"]))
+    return t
+
+def _prepare_messages_for_ollama(sm: SessionManager, session_path: str, messages: list, num_ctx: int, reserve_tokens: int = 1200):
+    """Trim message history to fit a conservative token budget.
+
+    We keep all system messages, then include most recent messages until budget.
+    Dropped messages are saved to session artifacts for audit.
+    """
+    if num_ctx <= 0:
+        return messages
+
+    budget = max(256, num_ctx - max(0, reserve_tokens))
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    other_msgs = [m for m in messages if m.get("role") != "system"]
+
+    kept = []
+    used = sum(_estimate_message_tokens(m) for m in system_msgs)
+    dropped = []
+
+    for m in reversed(other_msgs):
+        mt = _estimate_message_tokens(m)
+        if used + mt <= budget:
+            kept.append(m)
+            used += mt
+        else:
+            dropped.append(m)
+
+    kept.reverse()
+    trimmed = system_msgs + kept
+
+    if dropped:
+        artifact_name = f"context_trim_{int(time.time())}.json"
+        try:
+            artifact_path = sm.save_artifact(session_path, artifact_name, json.dumps(list(reversed(dropped)), ensure_ascii=False, indent=2))
+        except Exception:
+            artifact_path = f"./artifacts/{artifact_name}"
+
+        notice = {
+            "role": "system",
+            "content": (
+                "Контекст был автоматически сокращён, чтобы избежать переполнения. "
+                f"Старые сообщения сохранены в артефакт: {artifact_path}"
+            )
+        }
+        trimmed = system_msgs + [notice] + kept
+
+    return trimmed
+
+def _compact_tool_message(tool_name: str, tool_args: dict, result: str, artifact_path: str) -> str:
+    res_str = "" if result is None else str(result)
+    size_kb = len(res_str.encode('utf-8', errors='ignore')) / 1024
+    shown = res_str[:TOOL_OUTPUT_MAX_CHARS]
+    truncated = len(res_str) > TOOL_OUTPUT_MAX_CHARS
+    args_preview = tool_args
+    try:
+        args_preview = json.dumps(tool_args, ensure_ascii=False)
+    except Exception:
+        args_preview = str(tool_args)
+
+    msg = (
+        f"TOOL_RESULT_SUMMARY\n"
+        f"tool: {tool_name}\n"
+        f"args: {args_preview}\n"
+        f"artifact_path: {artifact_path}\n"
+        f"size_kb: {size_kb:.2f}\n"
+        f"truncated_in_context: {str(truncated).lower()}\n"
+        f"content_preview:\n{shown}"
+    )
+    if truncated:
+        msg += f"\n...[TRUNCATED {len(res_str) - TOOL_OUTPUT_MAX_CHARS} chars]"
+    return msg
+
 def create_layout():
     layout = Layout()
     layout.split(
@@ -162,7 +250,9 @@ class BotVisualizer:
         table.add_row("[cyan]VRAM:[/cyan]", f"[{vram_style}]{self.current_vram_used:.2f}GB ({vram_pct:.1f}%)[/{vram_style}]")
         
         # Context информация
-        total_ctx_used = self.prompt_eval_count + self.total_tokens
+        # prompt_eval_count и eval_count приходят от Ollama и отражают реальные токены модели.
+        # Локальные счетчики thinking/response/tool - приблизительные и для диагностики UI.
+        total_ctx_used = self.prompt_eval_count + self.eval_count
         ctx_pct = (total_ctx_used / self.num_ctx) * 100 if self.num_ctx > 0 else 0
         ctx_style = "green" if ctx_pct < 70 else "yellow" if ctx_pct < 90 else "red"
         table.add_row("[cyan]Context:[/cyan]", f"[{ctx_style}]{total_ctx_used}/{self.num_ctx} ({ctx_pct:.1f}%)[/{ctx_style}]")
@@ -274,6 +364,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
         try:
             # Цикл для обработки потенциальных вызовов инструментов
             while True:
+                payload["messages"] = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=num_ctx)
                 # Создаем поток для выполнения POST запроса, чтобы не блокировать UI на этапе 'Connecting'
                 response_queue = queue.Queue()
                 def make_request():
@@ -329,21 +420,14 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                             
                             msg = chunk.get("message", {})
                             
+                            # Обновляем реальные счетчики токенов Ollama, если они присутствуют в чанке
+                            if "prompt_eval_count" in chunk:
+                                vis.prompt_eval_count = chunk.get("prompt_eval_count", 0)
+                            if "eval_count" in chunk:
+                                vis.eval_count = chunk.get("eval_count", 0)
+
                             if not vis.first_token_time:
                                 vis.first_token_time = time.time()
-                                # Отражаем реальное "заглатывание" контекста Ollama
-                                prompt_eval = chunk.get("prompt_eval_count", 0)
-                                vis.prompt_eval_count = prompt_eval
-                                
-                                # Если был вызов инструментов, большая часть prompt_eval - это их данные
-                                # Мы можем визуально перенести это в Tool Ctx для точности
-                                if vis.tool_tokens > 0 and prompt_eval > 50:
-                                    # Оставляем в prompt_eval только базовый системный промпт (примерно 100-200 токенов)
-                                    # Остальное считаем как Tool Ctx
-                                    base_prompt_est = 200
-                                    actual_tool_tokens = max(0, prompt_eval - base_prompt_est)
-                                    vis.tool_tokens = actual_tool_tokens
-                                    vis.prompt_eval_count = base_prompt_est
                             
                             if vis.total_tokens % 50 == 0:
                                 vis.update_vram(sm)
@@ -470,9 +554,14 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                         result = f"Error calling tool: {tool_output}"
                     else:
                         result = tool_output
-                    
-                    # Расчет реальных токенов
-                    res_tokens = len(str(result)) // 4
+
+                    artifact_file = f"tool_{func_name}_{tool_call.get('id', int(time.time()))}.txt"
+                    artifact_path = sm.save_artifact(session_path, artifact_file, str(result))
+
+                    compact_msg = _compact_tool_message(func_name, func_args, result, artifact_path)
+
+                    # Считаем Tool Ctx по тому, что реально пойдет в контекст (compact_msg)
+                    res_tokens = len(str(compact_msg)) // 4
                     vis.tool_tokens += res_tokens
                     if vis.active_tools:
                         vis.active_tools[-1]["current_tokens"] = res_tokens
@@ -487,7 +576,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     
                     messages.append({
                         "role": "tool",
-                        "content": result,
+                        "content": compact_msg,
                         "tool_call_id": tool_call.get("id")
                     })
                     
@@ -546,6 +635,7 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192):
     
     try:
         while True:
+            payload["messages"] = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=num_ctx)
             response = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300))
             
             if response.status_code != 200:
@@ -606,12 +696,16 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192):
                     result = tm.call_tool(func_name, func_args, session_path=session_path)
                 except Exception as e:
                     result = f"Error calling tool: {str(e)}"
+
+                artifact_file = f"tool_{func_name}_{tool_call.get('id', int(time.time()))}.txt"
+                artifact_path = sm.save_artifact(session_path, artifact_file, str(result))
+                compact_msg = _compact_tool_message(func_name, func_args, result, artifact_path)
                 
                 sm.log_tool_call(session_path, func_name, func_args, result, status="completed")
                 
                 messages.append({
                     "role": "tool",
-                    "content": result,
+                    "content": compact_msg,
                     "tool_call_id": tool_call.get("id")
                 })
                 
@@ -672,7 +766,15 @@ def main():
         "Текущее системное время (локальная таймзона): "
         f"{now.isoformat()} (tzname={now.tzname()})"
     )
-    messages = [{"role": "system", "content": system_time_msg}]
+    tool_policy_msg = (
+        "Политика инструментов:\n"
+        "- Для systemd journal/journalctl используй инструмент 'journal' (а не file_system).\n"
+        "- file_system предназначен для файлов/директорий/grep и чтения файлов."
+    )
+    messages = [
+        {"role": "system", "content": system_time_msg},
+        {"role": "system", "content": tool_policy_msg},
+    ]
     
     vis = BotVisualizer(model, "", num_ctx)
     step_num = 1

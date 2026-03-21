@@ -2,6 +2,7 @@ import json
 from tools.web_search import ddg_search
 from tools.open_url import open_url
 from tools.file_system import file_system_tool
+from tools.journal import journal_tool
 
 class ToolManager:
     def __init__(self):
@@ -58,13 +59,17 @@ class ToolManager:
                             "properties": {
                                 "action": {
                                     "type": "string",
-                                    "enum": ["list", "search", "grep", "read", "info"],
-                                    "description": "Действие: list (список), search (поиск по имени), grep (поиск текста), read (чтение), info (метаданные)"
+                                    "enum": ["list", "search", "grep", "read", "info", "inspect"],
+                                    "description": "Действие: list (список), search (поиск по имени), grep (поиск текста), read (чтение), info (метаданные), inspect (read-only аналитика: fs/du/grep/log/sys/proc/service/journal)"
                                 },
                                 "path": {
                                     "type": "string",
                                     "description": "Путь к директории или файлу (по умолчанию '.')",
                                     "default": "."
+                                },
+                                "command": {
+                                    "type": "string",
+                                    "description": "Подкоманда для action='inspect' (например: fs.tree, du.dir_total, du.top_files, grep.regex, log.tail, sys.meminfo, proc.list, svc.status, journal.unit_tail)"
                                 },
                                 "pattern": {
                                     "type": "string",
@@ -94,6 +99,113 @@ class ToolManager:
                                     "type": "integer",
                                     "description": "Количество строк для чтения (по умолчанию 1000)",
                                     "default": 1000
+                                },
+                                "depth": {
+                                    "type": "integer",
+                                    "description": "Глубина для fs.tree (inspect)",
+                                    "default": 3
+                                },
+                                "sort": {
+                                    "type": "string",
+                                    "description": "Сортировка для list/inspect fs.list: name|size|mtime|type",
+                                    "default": "name"
+                                },
+                                "reverse": {
+                                    "type": "boolean",
+                                    "description": "Реверс сортировки",
+                                    "default": False
+                                },
+                                "max_bytes": {
+                                    "type": "integer",
+                                    "description": "Ограничение размера вывода (байт) для чтения/команд",
+                                    "default": 256000
+                                },
+                                "pid": {
+                                    "type": "integer",
+                                    "description": "PID для proc.info (inspect)"
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "description": "systemd unit для svc.status/journal.unit_tail (inspect)"
+                                },
+                                "since": {
+                                    "type": "string",
+                                    "description": "journalctl --since значение для journal.since (inspect)"
+                                },
+                                "lines": {
+                                    "type": "integer",
+                                    "description": "Количество строк для tail/journal (inspect)",
+                                    "default": 200
+                                }
+                            },
+                            "required": ["action"]
+                        }
+                    }
+                }
+            },
+
+            "journal": {
+                "function": journal_tool,
+                "description": {
+                    "type": "function",
+                    "function": {
+                        "name": "journal",
+                        "description": "Read-only анализ systemd journal через journalctl: tail/unit_tail/since/query/stats с фильтрами и лимитами вывода.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["tail", "unit_tail", "since", "query", "stats"],
+                                    "description": "Действие: tail (последние строки), unit_tail (последние строки unit), since (с момента), query (tail/since + фильтры), stats (статистика уровней)"
+                                },
+                                "unit": {
+                                    "type": "string",
+                                    "description": "systemd unit (например ssh, docker, tor)"
+                                },
+                                "since": {
+                                    "type": "string",
+                                    "description": "journalctl --since значение (например '1 hour ago' или '2026-03-21 18:00:00')"
+                                },
+                                "until": {
+                                    "type": "string",
+                                    "description": "journalctl --until значение"
+                                },
+                                "lines": {
+                                    "type": "integer",
+                                    "description": "Сколько строк запрашивать у journalctl (-n)",
+                                    "default": 200
+                                },
+                                "grep": {
+                                    "type": "string",
+                                    "description": "Фильтр подстрокой (case-insensitive) по полученному тексту"
+                                },
+                                "regex": {
+                                    "type": "string",
+                                    "description": "Фильтр regex (case-insensitive) по полученному тексту"
+                                },
+                                "priority": {
+                                    "type": "string",
+                                    "description": "journalctl -p priority (например err, warning, info, debug или 0..7)"
+                                },
+                                "boot": {
+                                    "type": "integer",
+                                    "description": "journalctl -b <boot> (0 текущий, -1 предыдущий и т.д.)"
+                                },
+                                "output": {
+                                    "type": "string",
+                                    "description": "journalctl -o формат (по умолчанию short-iso)",
+                                    "default": "short-iso"
+                                },
+                                "max_bytes": {
+                                    "type": "integer",
+                                    "description": "Лимит размера вывода (байт)",
+                                    "default": 256000
+                                },
+                                "max_lines": {
+                                    "type": "integer",
+                                    "description": "Лимит количества строк после фильтрации",
+                                    "default": 500
                                 }
                             },
                             "required": ["action"]

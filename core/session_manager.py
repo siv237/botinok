@@ -20,6 +20,19 @@ class SessionManager:
         self.last_chunk_time = None
         if not os.path.exists(self.base_path):
             os.makedirs(self.base_path)
+
+    def ensure_session_subdir(self, session_path: str, subdir_name: str) -> str:
+        subdir_path = os.path.join(session_path, subdir_name)
+        if not os.path.exists(subdir_path):
+            os.makedirs(subdir_path, exist_ok=True)
+        return subdir_path
+
+    def save_artifact(self, session_path: str, file_name: str, content: str) -> str:
+        artifacts_dir = self.ensure_session_subdir(session_path, "artifacts")
+        artifact_path = os.path.join(artifacts_dir, file_name)
+        with open(artifact_path, "w", encoding="utf-8", errors="ignore") as f:
+            f.write(str(content))
+        return artifact_path
             
     def save_config(self):
         """Сохраняет текущую конфигурацию в файл."""
@@ -39,6 +52,7 @@ class SessionManager:
         steps_subdir = self.config.get('Storage', 'StepsSubDir', fallback='steps')
         os.makedirs(session_path)
         os.makedirs(os.path.join(session_path, steps_subdir))
+        os.makedirs(os.path.join(session_path, "artifacts"))
         
         # Начальный контекст
         context = {
