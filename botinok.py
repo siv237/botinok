@@ -11,6 +11,7 @@ from rich.panel import Panel
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
+from rich.markdown import Markdown
 from core.session_manager import SessionManager
 from core.tool_manager import ToolManager
 
@@ -476,10 +477,13 @@ def main():
             messages = ask_ollama_stream(model, messages, session_path, step_num, num_ctx, vis)
             
             # Получаем последний ответ ассистента для красивого вывода
-            last_assistant_message = next((m["content"] for m in reversed(messages) if m["role"] == "assistant"), "")
+            last_assistant_message = ""
+            for m in reversed(messages):
+                if m.get("role") == "assistant" and m.get("content"):
+                    last_assistant_message = m["content"]
+                    break
             
             if last_assistant_message:
-                from rich.markdown import Markdown
                 console.print("\n[bold green]Final Response:[/bold green]")
                 console.print(Markdown(last_assistant_message))
                 console.print("\n" + "─" * console.width + "\n")
