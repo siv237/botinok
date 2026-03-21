@@ -14,7 +14,7 @@ NC='\033[0m' # No Color
 INSTALL_DIR="/opt/botinok"
 BIN_DIR="/usr/local/bin"
 SESSIONS_DIR="/var/log/botinok/sessions"
-GITHUB_REPO="https://github.com/user/botinok.git" # Замените на реальный URL
+GITHUB_REPO="https://github.com/siv237/botinok.git"
 
 # --- Functions ---
 
