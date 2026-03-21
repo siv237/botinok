@@ -195,16 +195,49 @@ chmod +x "$BIN_DIR/botinok"
 
 print_banner
 
-echo_green "BOTINOK has been successfully installed!"
+LOCALE="${LC_ALL:-${LANG:-}}"
+IS_RU=0
+case "$LOCALE" in
+    ru*|*ru_RU*) IS_RU=1 ;;
+esac
+
+if [ "$IS_RU" -eq 1 ]; then
+    MSG_TITLE="BOTINOK успешно установлен"
+    MSG_VERSION="Установленная версия"
+    MSG_INSTALL_DIR="Каталог установки"
+    MSG_CONFIG_FILE="Файл конфигурации"
+    MSG_SESSIONS_DIR="Каталог сессий"
+    MSG_QUICK_START="Быстрый старт"
+    MSG_TIP="Подсказка: если нужно отредактировать настройки вручную"
+    MSG_WIZARD="Мастер настройки"
+    MSG_RUN="Запуск"
+else
+    MSG_TITLE="BOTINOK successfully installed"
+    MSG_VERSION="Installed version"
+    MSG_INSTALL_DIR="Install directory"
+    MSG_CONFIG_FILE="Config file"
+    MSG_SESSIONS_DIR="Sessions dir"
+    MSG_QUICK_START="Quick start"
+    MSG_TIP="Tip: if you need to edit settings manually"
+    MSG_WIZARD="Configuration Wizard"
+    MSG_RUN="Run"
+fi
+
 echo
-echo_blue "Installed version: ${BOTINOK_VERSION}"
-echo_blue "Install directory: ${INSTALL_DIR}"
-echo_blue "Config file:       ${INSTALL_DIR}/config.cfg"
-echo_blue "Sessions dir:      ${SESSIONS_DIR}"
-echo
-echo_blue "Quick start:"
-echo_blue "  botinok"
-echo_blue "  botinok --wizard"
-echo
-echo_blue "Tip: if you need to edit settings manually:"
-echo_blue "  nano ${INSTALL_DIR}/config.cfg"
+cat <<EOF
++--------------------------------------------------------------+
+| $MSG_TITLE
+| 
+| $MSG_VERSION:   ${BOTINOK_VERSION}
+| $MSG_INSTALL_DIR:  ${INSTALL_DIR}
+| $MSG_CONFIG_FILE:  ${INSTALL_DIR}/config.cfg
+| $MSG_SESSIONS_DIR: ${SESSIONS_DIR}
+| 
+| $MSG_QUICK_START:
+|   $MSG_RUN:     botinok
+|   $MSG_WIZARD:  botinok --wizard
+| 
+| $MSG_TIP:
+|   nano ${INSTALL_DIR}/config.cfg
++--------------------------------------------------------------+
+EOF
