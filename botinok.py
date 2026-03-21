@@ -513,7 +513,6 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                 "ttft": vis.first_token_time - vis.start_time if vis.first_token_time else 0,
                 "duration": time.time() - vis.start_time
             }
-            sm.write_file_footer(session_path, "response.md", final_stats)
             sm.log_step(session_path, f"step_{step_num}", payload, {"response": full_response, "thinking": full_thinking}, metrics)
             return messages # Возвращаем обновленную историю сообщений
             
@@ -521,6 +520,109 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
             vis.status = f"Error: {str(e)}"
             layout["stats"].update(vis.get_stats_panel())
             time.sleep(5)
+
+def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192):
+    sm = SessionManager()
+    tm = ToolManager()
+    
+    prompt = messages[-1]["content"] if messages else ""
+    tools = tm.get_tool_definitions()
+    
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "tools": tools,
+        "options": {
+            "num_ctx": num_ctx,
+        }
+    }
+
+    sm.write_file_header(session_path, "thinking.md", model, num_ctx, prompt)
+    sm.write_file_header(session_path, "response.md", model, num_ctx, prompt)
+    
+    ollama_base_url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+    OLLAMA_CHAT_URL = f"{ollama_base_url}/api/chat"
+    
+    try:
+        while True:
+            response = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300))
+            
+            if response.status_code != 200:
+                return messages
+
+            full_response = ""
+            full_thinking = ""
+            tool_calls = []
+            
+            sm.update_context(session_path, "user", prompt)
+            
+            for line in response.iter_lines():
+                if line:
+                    try:
+                        chunk = json.loads(line.decode('utf-8'))
+                        msg = chunk.get("message", {})
+                        
+                        thought = msg.get("thinking", "")
+                        if thought:
+                            full_thinking += thought
+                            sm.log_chunk(session_path, "thinking", thought)
+                        
+                        token = msg.get("content", "")
+                        if token:
+                            full_response += token
+                            sm.log_chunk(session_path, "response", token)
+
+                        if msg.get("tool_calls"):
+                            tool_calls.extend(msg.get("tool_calls"))
+                            
+                        if chunk.get("done"):
+                            metrics = {
+                                "total_duration_ms": chunk.get("total_duration", 0) / 1_000_000,
+                                "load_duration_ms": chunk.get("load_duration", 0) / 1_000_000,
+                                "prompt_eval_count": chunk.get("prompt_eval_count", 0),
+                                "eval_count": chunk.get("eval_count", 0),
+                                "eval_duration_ms": chunk.get("eval_duration", 0) / 1_000_000,
+                            }
+                            sm.log_chunk(session_path, "metrics", "", metrics=metrics)
+                    except json.JSONDecodeError:
+                        continue
+
+            if not tool_calls:
+                sm.update_context(session_path, "assistant", full_response, thinking=full_thinking)
+                messages.append({"role": "assistant", "content": full_response})
+                break
+
+            messages.append({"role": "assistant", "content": full_response, "tool_calls": tool_calls})
+            sm.update_context(session_path, "assistant", full_response, thinking=full_thinking, tool_calls=tool_calls)
+            
+            for tool_call in tool_calls:
+                func_name = tool_call["function"]["name"]
+                func_args = tool_call["function"]["arguments"]
+                
+                sm.log_tool_call(session_path, func_name, func_args, "STARTED", status="running")
+                
+                try:
+                    result = tm.call_tool(func_name, func_args, session_path=session_path)
+                except Exception as e:
+                    result = f"Error calling tool: {str(e)}"
+                
+                sm.log_tool_call(session_path, func_name, func_args, result, status="completed")
+                
+                messages.append({
+                    "role": "tool",
+                    "content": result,
+                    "tool_call_id": tool_call.get("id")
+                })
+                
+                sm.log_step(session_path, f"tool_{func_name}_{int(time.time())}", tool_call, {"result": result}, {})
+
+            payload["messages"] = messages
+            
+        return messages
+            
+    except Exception:
+        return messages
 
 def main():
     parser = argparse.ArgumentParser(description="BOTINOK AGENT - Interactive AI Assistant")
@@ -536,6 +638,7 @@ def main():
     parser.add_argument("-m", "--model", default=default_model, help=f"Model name (default: {default_model})")
     parser.add_argument("-c", "--ctx", type=int, default=default_ctx, help=f"Context size (default: {default_ctx})")
     parser.add_argument("--wizard", action="store_true", help="Запустить мастер настройки")
+    parser.add_argument("--stealth", action="store_true", help="Минимальный вывод, только ответ")
     
     args = parser.parse_args()
     
@@ -549,8 +652,19 @@ def main():
     arg_prompt = args.prompt if args.prompt else args.prompt_pos
     model = args.model
     num_ctx = args.ctx
-    
-    session_path = sm.create_session("visual_run")
+    stealth_mode = args.stealth or not sys.stdin.isatty()
+
+    # Если есть данные в stdin (Pipe mode), добавляем их к промпту
+    stdin_data = ""
+    if not sys.stdin.isatty():
+        stdin_data = sys.stdin.read().strip()
+        if stdin_data:
+            if arg_prompt:
+                arg_prompt = f"{stdin_data}\n\n{arg_prompt}"
+            else:
+                arg_prompt = stdin_data
+
+    session_path = sm.create_session("visual_run" if not stealth_mode else "stealth_run")
     
     # Подготовка начальных сообщений
     now = datetime.now().astimezone()
@@ -563,8 +677,9 @@ def main():
     vis = BotVisualizer(model, "", num_ctx)
     step_num = 1
 
-    # Вывод ASCII арта и версии
-    ascii_art = """
+    # Вывод ASCII арта и версии (только если не stealth_mode)
+    if not stealth_mode:
+        ascii_art = """
     [bold blue]
                                                            ^^:.                                     
                                                           !~.~!7^:::::....                          
@@ -588,12 +703,10 @@ def main():
                J7!7!!!~^::..       ~?                 ..:^^~7?777!?777777777!7!!!!~^J:              
               ^7:::^~!!!!7!7!7!!~~^~J~:^:::::^^^^~~!!7777!!!!~~^^^^::.........      !^              
               .^!~^!^.:~::^^^^~~!!~!!7!7!7!7!7!7!!!!~^~^^^^~~~^!7^?                 !~              
-                  .:^^~7~^7!:~?:.:~..^~..:^..^!:.:~..!~^::...   ^~J: ^^ :!^ ^~.^?!:^7^              
-                         ...:::^^~!^^~~~^~7^^!!!^~~^^:            :~^~~^~^~^^~^^::::.               
     [/bold blue]
     [bold yellow]BOTINOK AGENT - Version 0.1[/bold yellow]
     """
-    console.print(Panel(Text.from_markup(ascii_art), border_style="blue"))
+        console.print(Panel(Text.from_markup(ascii_art), border_style="blue"))
 
     try:
         while True:
@@ -601,6 +714,9 @@ def main():
                 prompt = arg_prompt
                 arg_prompt = None # Используем только один раз
             else:
+                if stealth_mode:
+                    # В stealth mode без начального промпта и без tty выходим
+                    break
                 # В интерактивном режиме запрашиваем ввод
                 console.print(Panel(Text("Введите ваш вопрос (или 'exit' для выхода):", style="bold cyan"), border_style="cyan"))
                 prompt = console.input("[bold green]> [/bold green]")
@@ -613,7 +729,11 @@ def main():
             messages.append({"role": "user", "content": prompt})
             
             # Запускаем генерацию
-            messages = ask_ollama_stream(model, messages, session_path, step_num, num_ctx, vis)
+            if stealth_mode:
+                # В тихом режиме используем упрощенную логику вывода
+                messages = ask_ollama_stealth(model, messages, session_path, step_num, num_ctx)
+            else:
+                messages = ask_ollama_stream(model, messages, session_path, step_num, num_ctx, vis)
             
             # Получаем последний ответ ассистента для красивого вывода
             last_assistant_message = ""
@@ -623,16 +743,22 @@ def main():
                     break
             
             if last_assistant_message:
-                console.print("\n[bold green]Final Response:[/bold green]")
-                console.print(Markdown(last_assistant_message))
-                console.print("\n" + "─" * console.width + "\n")
+                if not stealth_mode:
+                    console.print("\n[bold green]Final Response:[/bold green]")
+                    console.print(Markdown(last_assistant_message))
+                    console.print("\n" + "─" * console.width + "\n")
+                else:
+                    # В stealth mode просто печатаем ответ и выходим
+                    print(last_assistant_message)
+                    sys.exit(0)
             
             step_num += 1
             
     except KeyboardInterrupt:
         console.print("\n[bold red]Interrupted by user[/bold red]")
     finally:
-        console.print(f"\n[bold blue]Session saved to: {session_path}[/bold blue]")
+        if not stealth_mode:
+            console.print(f"\n[bold blue]Session saved to: {session_path}[/bold blue]")
 
 if __name__ == "__main__":
     main()
