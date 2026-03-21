@@ -81,7 +81,7 @@ uninstall() {
 
 # --- Main Logic ---
 
-if [ "$1" == "--uninstall" ]; then
+if [ "$1" = "--uninstall" ]; then
     check_root
     uninstall
 fi
@@ -118,8 +118,9 @@ else
             echo_green "Successfully updated via git pull."
         else
             echo_red "Failed to update repository (possibly local changes or network issue)."
-            read -p "Would you like to perform a clean reinstall? (y/N): " confirm
-            if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            printf "Would you like to perform a clean reinstall? (y/N): "
+            read confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                 echo_blue "Performing clean reinstall..."
                 rm -rf "$INSTALL_DIR"
                 mkdir -p "$INSTALL_DIR"
