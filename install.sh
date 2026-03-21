@@ -184,13 +184,18 @@ chmod +x "$BIN_DIR/botinok"
 
 # Run Configuration Wizard (Interactive)
 echo
-printf "Would you like to run the Configuration Wizard now? (Y/n): "
-read run_wizard
-if [ "$run_wizard" = "n" ] || [ "$run_wizard" = "N" ]; then
-    echo_blue "Skipping configuration. You can run it later with: botinok --wizard"
+if [ -r /dev/tty ]; then
+    printf "Would you like to run the Configuration Wizard now? (Y/n): " > /dev/tty
+    read run_wizard < /dev/tty
+    if [ "$run_wizard" = "n" ] || [ "$run_wizard" = "N" ]; then
+        echo_blue "Skipping configuration. You can run it later with: botinok --wizard"
+    else
+        echo_blue "Launching Configuration Wizard..."
+        "$BIN_DIR/botinok" --wizard
+    fi
 else
-    echo_blue "Launching Configuration Wizard..."
-    "$BIN_DIR/botinok" --wizard
+    echo_blue "To configure BOTINOK, please run the wizard manually:"
+    echo_blue "  botinok --wizard"
 fi
 
 print_banner
