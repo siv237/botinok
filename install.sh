@@ -167,7 +167,7 @@ chmod +x "$BIN_DIR/botinok"
 
 # Run Configuration Wizard
 echo_blue "Launching Configuration Wizard..."
-sudo -u $(logname) "$BIN_DIR/botinok" --wizard
+"$INSTALL_DIR/venv/bin/python3" "$INSTALL_DIR/botinok.py" --wizard
 
 print_banner
 
