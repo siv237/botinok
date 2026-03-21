@@ -136,6 +136,17 @@ else
     fi
 fi
 
+# If this installer is executed via a pipe (e.g. wget|bash), interactive reads may consume script input.
+# Re-exec the installer from the cloned/updated file to ensure correct behavior.
+if [ -z "$BOTINOK_REEXEC" ]; then
+    if [ ! -f "$0" ] || [ "$0" = "bash" ] || [ "$0" = "-" ]; then
+        if [ -f "$INSTALL_DIR/install.sh" ]; then
+            export BOTINOK_REEXEC=1
+            exec bash "$INSTALL_DIR/install.sh" "$@"
+        fi
+    fi
+fi
+
 # Set up Virtual Environment
 echo_blue "Setting up Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
@@ -191,7 +202,7 @@ if [ -r /dev/tty ]; then
         echo_blue "Skipping configuration. You can run it later with: botinok --wizard"
     else
         echo_blue "Launching Configuration Wizard..."
-        "$BIN_DIR/botinok" --wizard
+        "$BIN_DIR/botinok" --wizard < /dev/tty > /dev/tty 2> /dev/tty
     fi
 else
     echo_blue "To configure BOTINOK, please run the wizard manually:"
