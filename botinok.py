@@ -77,7 +77,8 @@ class BotVisualizer:
             "query": query,
             "status": status,
             "size_kb": size_kb,
-            "start_time": time.time()
+            "start_time": time.time(),
+            "current_tokens": 0 # Текущее количество токенов для анимации
         })
 
     def update_tool_activity(self, name, status, size_kb=0):
@@ -141,10 +142,13 @@ class BotVisualizer:
         # Используем фиксированное время для синхронизации анимации
         spinner_index = int(time.time() * 5) % len(spinner_chars)
         spinner = spinner_chars[spinner_index]
-        activity = f"[bold magenta]{spinner}[/bold magenta]" if self.status in ["Generating...", "Calling Tools...", "Resuming generation..."] else ""
+        
+        display_status = self.status
+            
+        activity = f"[bold magenta]{spinner}[/bold magenta]" if self.status in ["Generating...", "Calling Tools...", "Resuming generation...", "Checking Memory...", "Unloading Models...", "Forced VRAM Cleanup...", "Connecting..."] or "Tool:" in self.status else ""
 
         table = Table(show_header=False, box=None, padding=(0, 1))
-        table.add_row("[cyan]Status:[/cyan]", f"[bold]{self.status}[/bold] {activity}")
+        table.add_row("[cyan]Status:[/cyan]", f"[bold]{display_status}[/bold] {activity}")
         table.add_row("[cyan]Elapsed:[/cyan]", f"{elapsed:.1f}s")
         table.add_row("[cyan]TTFT:[/cyan]", f"[bold yellow]{ttft}[/bold yellow]")
         table.add_row("[cyan]Thinking:[/cyan]", f"[bold yellow]{self.thinking_tokens}[/bold yellow]")
@@ -221,34 +225,45 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
     }
 
     with Live(layout, refresh_per_second=10, screen=False, auto_refresh=True) as live:
-        # Принудительная очистка перед запуском qwen3.5:9b
-        if "qwen3.5:9b" in model:
-            vis.status = "Forced VRAM Cleanup..."
-            live.refresh()
-            sm.unload_models()
-            time.sleep(2)
+        # Асинхронная подготовка (VRAM, очистка) чтобы UI не висел
+        prep_queue = queue.Queue()
+        def background_prep():
+            try:
+                if "qwen3.5:9b" in model:
+                    vis.status = "Forced VRAM Cleanup..."
+                    sm.unload_models()
+                    time.sleep(1)
+                
+                vis.status = "Checking Memory..."
+                vis.update_vram(sm)
+                
+                status = sm.get_ollama_status()
+                if status and "models" in status:
+                    for m in status["models"]:
+                        vram = m.get("size_vram", 0) / (1024**3)
+                        if vram > 7.0 or (m['name'] != model and len(status['models']) > 0):
+                            vis.status = "Unloading Models..."
+                            sm.unload_models()
+                            break
+                prep_queue.put("done")
+            except Exception as e:
+                prep_queue.put(f"error: {str(e)}")
 
-        vis.status = "Checking Memory..."
-        vis.update_vram(sm)
+        prep_thread = threading.Thread(target=background_prep)
+        prep_thread.start()
+
+        # Ожидание подготовки с живой анимацией
+        while prep_thread.is_alive():
+            layout["header"].update(vis.get_header())
+            layout["stats"].update(vis.get_stats_panel())
+            time.sleep(0.1)
+
+        vis.status = "Connecting..."
+        # Первичная отрисовка всех панелей
         layout["header"].update(vis.get_header())
         layout["stats"].update(vis.get_stats_panel())
         layout["tools_panel"].update(vis.get_tools_panel())
         layout["footer"].update(vis.get_footer())
-        live.refresh()
-        
-        # Memory pressure check
-        status = sm.get_ollama_status()
-        if status and "models" in status:
-            for m in status["models"]:
-                vram = m.get("size_vram", 0) / (1024**3)
-                if vram > 7.0 or (m['name'] != model and len(status['models']) > 0):
-                    vis.status = "Unloading Models..."
-                    live.refresh()
-                    sm.unload_models()
-                    break
-
-        vis.status = "Connecting..."
-        live.refresh()
         
         # Записываем заголовки файлов
         sm.write_file_header(session_path, "thinking.md", model, num_ctx, prompt)
@@ -259,7 +274,32 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
         try:
             # Цикл для обработки потенциальных вызовов инструментов
             while True:
-                response = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300))
+                # Создаем поток для выполнения POST запроса, чтобы не блокировать UI на этапе 'Connecting'
+                response_queue = queue.Queue()
+                def make_request():
+                    try:
+                        res = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300))
+                        response_queue.put(("success", res))
+                    except Exception as e:
+                        response_queue.put(("error", str(e)))
+
+                req_thread = threading.Thread(target=make_request)
+                req_thread.start()
+
+                # Ждем установки соединения, обновляя UI
+                response = None
+                while req_thread.is_alive():
+                    layout["stats"].update(vis.get_stats_panel())
+                    time.sleep(0.1)
+                
+                status, req_result = response_queue.get()
+                if status == "error":
+                    vis.status = f"Connection Error: {req_result}"
+                    layout["stats"].update(vis.get_stats_panel())
+                    time.sleep(5)
+                    return messages
+                
+                response = req_result
                 
                 if response.status_code != 200:
                     error_msg = response.json().get("error", "Unknown Error")
@@ -291,7 +331,19 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                             
                             if not vis.first_token_time:
                                 vis.first_token_time = time.time()
-                                vis.prompt_eval_count = chunk.get("prompt_eval_count", 0)
+                                # Отражаем реальное "заглатывание" контекста Ollama
+                                prompt_eval = chunk.get("prompt_eval_count", 0)
+                                vis.prompt_eval_count = prompt_eval
+                                
+                                # Если был вызов инструментов, большая часть prompt_eval - это их данные
+                                # Мы можем визуально перенести это в Tool Ctx для точности
+                                if vis.tool_tokens > 0 and prompt_eval > 50:
+                                    # Оставляем в prompt_eval только базовый системный промпт (примерно 100-200 токенов)
+                                    # Остальное считаем как Tool Ctx
+                                    base_prompt_est = 200
+                                    actual_tool_tokens = max(0, prompt_eval - base_prompt_est)
+                                    vis.tool_tokens = actual_tool_tokens
+                                    vis.prompt_eval_count = base_prompt_est
                             
                             if vis.total_tokens % 50 == 0:
                                 vis.update_vram(sm)
@@ -375,7 +427,6 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     vis.add_tool_activity(func_name, query_display, "running")
                     vis.status = f"[bold yellow]Tool: {func_name}[/bold yellow] ([cyan]{query_display}[/cyan])"
                     layout["tools_panel"].update(vis.get_tools_panel())
-                    live.refresh()
                     
                     sm.log_tool_call(session_path, func_name, func_args, "STARTED", status="running")
                     
@@ -383,6 +434,9 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     result_queue = queue.Queue()
                     def run_tool():
                         try:
+                            # Для инструментов, поддерживающих стриминг или порционную отдачу,
+                            # здесь можно было бы реализовать колбэк. Но пока сделаем имитацию
+                            # живого набора токенов во время ожидания.
                             res = tm.call_tool(func_name, func_args, session_path=session_path)
                             result_queue.put(("success", res))
                         except Exception as e:
@@ -391,30 +445,42 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     tool_thread = threading.Thread(target=run_tool)
                     tool_thread.start()
 
-                    # Ожидание результата с анимацией спиннера
+                    # Ожидание результата с анимацией спиннера и "живым" счетчиком
                     result = None
+                    simulated_tokens = 0
                     while tool_thread.is_alive():
-                        # Обновляем статистику и инструменты для анимации спиннера
+                        # Имитируем постепенный рост токенов во время ожидания (например, поиск/загрузка)
+                        # Это дает визуальную обратную связь, что данные "текут"
+                        if simulated_tokens < 500: # Ограничим имитацию до получения реальных данных
+                            simulated_tokens += 5
+                            vis.tool_tokens += 5
+                            if vis.active_tools:
+                                vis.active_tools[-1]["current_tokens"] = simulated_tokens
+                        
                         layout["stats"].update(vis.get_stats_panel())
                         layout["tools_panel"].update(vis.get_tools_panel())
-                        # Не вызываем live.refresh(), так как auto_refresh=True
                         time.sleep(0.1)
 
                     status, tool_output = result_queue.get()
+                    
+                    # Убираем имитированные токены перед добавлением реальных
+                    vis.tool_tokens -= simulated_tokens
+                    
                     if status == "error":
                         result = f"Error calling tool: {tool_output}"
                     else:
                         result = tool_output
                     
-                    # Расчет токенов для инструмента (грубая оценка: 1 токен ~= 4 символа)
+                    # Расчет реальных токенов
                     res_tokens = len(str(result)) // 4
                     vis.tool_tokens += res_tokens
+                    if vis.active_tools:
+                        vis.active_tools[-1]["current_tokens"] = res_tokens
                     
                     res_size = len(str(result).encode('utf-8')) / 1024
                     vis.update_tool_activity(func_name, "completed", res_size)
                     vis.status = f"[bold green]Tool Done:[/bold green] {func_name} ([bold white]{res_size:.2f} KB[/bold white])"
                     layout["tools_panel"].update(vis.get_tools_panel())
-                    live.refresh()
                     time.sleep(1)
                     
                     sm.log_tool_call(session_path, func_name, func_args, result, status="completed")
@@ -489,6 +555,34 @@ def main():
     
     vis = BotVisualizer(model, "", num_ctx)
     step_num = 1
+
+    # Вывод ASCII арта и версии
+    ascii_art = """
+    [bold blue]
+                                                          ......................
+                                                          ......................
+                                                          ....................
+                                          .:              ...................
+                          .:     ....:::^?PG7...          ..................
+                          7~7!77??JYY5PPGBB#BPPJ^.        ................
+                          ^!J?JJYY555PGGBBB####J?^^:      ................
+                           ^YJJYYYYY5PGGBBBBBB#P7!.~:     ...............
+                           .JJYYJ?JY5GGGGGBBB#B#P?!:.      ..............
+                           .J777?JY555PPGBBGGBBBBBY:       ..............
+                           !J7?JY5P555PGGGGGGBBBBBBPY~:    ..............
+                          .???JYYY555PPPPPGGGGGGBBBBBBPJ~: ...............
+                          ~J!!!7?JJYY55555PPPGGGGGGGGGBBGG!................
+                          ?J~~~~!7?JJY55555555PPPPGGGGGGGGPJ!^.... ........
+                         .?J7!!7JYY5YY5PP5555PPPGGGGPPGGPGGPP5YJJJ?7777??7~.
+                          !JJJY5555PP55PP55PPPPPP555PPPPPPPPPPGGGGPGGBBBBBB5:
+                         :?YY555PPPGGPPGBPPGGPPP555PPP5PPPPGGGGGGGBBBBBB####G!
+                         ~Y5555PPPGGGGGGGGGGGGGGPPGPPPPPPGGGBBBBBBBBB#####BP?^
+                         !555PGPGGGBGBBGBP!~!7?JY5PPGGGGGBBBB#######BGPYJ7~:..
+                         .^^~!!!7!7777777!^^^::^^~~!??JJJJJJJJJJJ?77!~~^^^::::
+    [/bold blue]
+    [bold yellow]BOTINOK AGENT - Version 0.1[/bold yellow]
+    """
+    console.print(Panel(Text.from_markup(ascii_art), border_style="blue"))
 
     try:
         while True:
