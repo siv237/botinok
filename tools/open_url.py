@@ -41,7 +41,6 @@ def open_url(url: str, session_path: str = None) -> str:
             return "Ошибка: поддерживаются только ссылки http/https и корректный хост"
 
         env = os.environ.copy()
-        user_agent = "Mozilla/5.0 (Compatible; Lynx/2.8.9rel.1; Linux)"
 
         lynx_base_cmd = [
             "lynx",

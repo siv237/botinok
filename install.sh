@@ -63,7 +63,7 @@ check_root() {
 install_dependencies() {
     echo_blue "Checking system dependencies..."
     apt-get update -y
-    apt-get install -y python3 python3-venv python3-pip lynx curl git
+    apt-get install -y python3 python3-venv python3-pip lynx curl git ca-certificates
 }
 
 uninstall() {
