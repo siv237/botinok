@@ -14,18 +14,61 @@ def shell_exec(
     cwd: Optional[str] = None,
     timeout_sec: int = 120,
     max_bytes: int = 256_000,
+    interactive: bool = True,
 ) -> str:
     if not command or not str(command).strip():
         return "Ошибка: command пустой"
 
     try:
-        argv: List[str] = shlex.split(command)
-    except Exception as e:
-        return f"Ошибка: не удалось распарсить команду: {str(e)}"
-
-    try:
         run_cwd = _project_root() if not cwd else os.path.realpath(cwd)
+        
+        if interactive:
+            # В интерактивном режиме мы не перехватываем stdout/stderr в трубы,
+            # чтобы пользователь мог взаимодействовать (вводить пароли и т.д.).
+            # Но нам нужно вернуть результат агенту. 
+            # Используем временный файл для захвата вывода через 'script' (если доступен) или просто запускаем.
+            print(f"\n--- Запуск интерактивной команды (CWD: {run_cwd}) ---")
+            
+            # Попробуем использовать 'script' для записи сессии, если это Linux
+            import platform
+            log_file = f"/tmp/botinok_shell_{os.getpid()}.log"
+            if platform.system() == "Linux":
+                # script -e -c "команда" -q /tmp/log
+                # -e: возвращать код завершения команды
+                # -c: выполнить команду
+                # -q: quiet (не писать старт/стоп в лог)
+                cmd_to_run = ["script", "-e", "-q", "-c", command, log_file]
+            else:
+                cmd_to_run = shlex.split(command)
 
+            cp = subprocess.run(
+                cmd_to_run,
+                cwd=run_cwd,
+                stdin=None, # Наследует от родителя
+                stdout=None, 
+                stderr=None,
+            )
+            
+            output = ""
+            if os.path.exists(log_file):
+                try:
+                    with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+                        output = f.read()
+                    os.remove(log_file)
+                except Exception:
+                    output = "(не удалось прочитать лог сессии)"
+            
+            res = {
+                "command": command,
+                "cwd": run_cwd,
+                "returncode": cp.returncode,
+                "output": output.strip() if output.strip() else "(interactive session ended)",
+                "mode": "interactive"
+            }
+            return json.dumps(res, ensure_ascii=False, indent=2)
+
+        # Неинтерактивный режим (старый вариант)
+        argv = shlex.split(command)
         cp = subprocess.run(
             argv,
             cwd=run_cwd,
@@ -43,6 +86,7 @@ def shell_exec(
             "cwd": run_cwd,
             "returncode": cp.returncode,
             "output": out.strip() if out.strip() else "(no output)",
+            "mode": "batch"
         }
         return json.dumps(res, ensure_ascii=False, indent=2)
     except FileNotFoundError:

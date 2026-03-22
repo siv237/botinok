@@ -871,7 +871,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     
                     # Логика подтверждения для опасных инструментов
                     if func_name in ("shell_exec", "code_editor") and tm.dangerous_mode:
-                        # Останавливаем Live UI для ввода
+                        # Останавливаем Live UI для ввода и выполнения интерактивных команд
                         live.stop()
                         
                         console.print("\n" + "═" * 80)
@@ -901,10 +901,43 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                                 "name": func_name,
                                 "content": compact_msg
                             })
-                            sm.update_context(session_path, "tool", compact_msg, tool_name=func_name, tool_call_id=tool_call["id"])
+                            sm.update_context(session_path, "tool", compact_msg)
                             continue
                         
-                        # Если разрешено, возвращаем Live UI
+                        # Если это shell_exec, выполняем его ПРЯМО ЗДЕСЬ (синхронно),
+                        # пока Live UI остановлен, чтобы обеспечить интерактивность.
+                        if func_name == "shell_exec":
+                            vis.add_tool_activity(func_name, str(func_args), "running")
+                            try:
+                                # Вызываем напрямую через tm.call_tool, так как Live UI уже остановлен
+                                result = tm.call_tool(func_name, func_args, session_path=session_path)
+                            except Exception as e:
+                                result = f"Error calling tool: {str(e)}"
+                            
+                            # Сохраняем артефакт и результат
+                            artifact_file = f"tool_{func_name}_{int(time.time())}.txt"
+                            artifact_path = sm.save_artifact(session_path, artifact_file, str(result))
+                            
+                            compact_msg = _compact_tool_message(func_name, func_args, result, artifact_path)
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "name": func_name,
+                                "content": compact_msg
+                            })
+                            sm.update_context(session_path, "tool", compact_msg)
+                            
+                            vis.update_tool_activity(func_name, "completed", size_kb=len(str(result))/1024)
+                            
+                            console.print("\n" + "─" * 40)
+                            console.print("[bold green]Команда завершена.[/bold green]")
+                            console.input("[bold cyan]Нажмите Enter для продолжения и возврата в сессию...[/bold cyan]")
+                            
+                            # Перезапускаем Live UI и переходим к следующему инструменту
+                            live.start()
+                            continue
+
+                        # Для code_editor просто возвращаем Live UI, он выполнится асинхронно ниже
                         live.start()
 
                     query_display = func_args.get('query', str(func_args))
