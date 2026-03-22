@@ -251,10 +251,11 @@ def create_layout():
     return layout
 
 class BotVisualizer:
-    def __init__(self, model, prompt, num_ctx):
+    def __init__(self, model, prompt, num_ctx, dangerous_mode: bool = False):
         self.model = model
         self.prompt = prompt
         self.num_ctx = num_ctx
+        self.dangerous_mode = dangerous_mode
         self.response_text = ""
         self.start_time = time.time()
         self.first_token_time = None
@@ -319,8 +320,9 @@ class BotVisualizer:
             self.current_vram_used = 0
 
     def get_header(self):
+        danger_tag = " | DANGEROUS MODE: ON" if self.dangerous_mode else ""
         return Panel(
-            Text(f"BOTINOK AGENT | Model: {self.model} | Context: {self.num_ctx} | {self.vram_info}", justify="center", style="bold white on blue"),
+            Text(f"BOTINOK AGENT{danger_tag} | Model: {self.model} | Context: {self.num_ctx} | {self.vram_info}", justify="center", style="bold white on blue"),
             style="blue"
         )
 
@@ -421,7 +423,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
     # Если визуализатор не передан, создаем новый (для первого запуска)
     prompt = messages[-1]["content"] if messages else ""
     if vis is None:
-        vis = BotVisualizer(model, prompt, num_ctx)
+        vis = BotVisualizer(model, prompt, num_ctx, dangerous_mode=tm.dangerous_mode)
     else:
         vis.reset(prompt)
 
@@ -1102,6 +1104,7 @@ def main():
     parser.add_argument("-c", "--ctx", type=int, default=default_ctx, help=f"Context size (default: {default_ctx})")
     parser.add_argument("--wizard", action="store_true", help="Запустить мастер настройки")
     parser.add_argument("--stealth", action="store_true", help="Минимальный вывод, только ответ")
+    parser.add_argument("--dangerous", action="store_true", help="Разрешить опасные инструменты (редактирование файлов и выполнение команд) только в этой сессии")
     
     args = parser.parse_args()
     
@@ -1116,6 +1119,8 @@ def main():
     model = args.model
     num_ctx = args.ctx
     stealth_mode = args.stealth or not sys.stdin.isatty()
+    if args.dangerous:
+        os.environ["BOTINOK_DANGEROUS"] = "1"
 
     # Если есть данные в stdin (Pipe mode), добавляем их к промпту
     stdin_data = ""
@@ -1140,12 +1145,20 @@ def main():
         "- Для systemd journal/journalctl используй инструмент 'journal' (а не file_system).\n"
         "- file_system предназначен для файлов/директорий/grep и чтения файлов."
     )
+
+    dangerous_mode_msg = (
+        "Dangerous-mode: ON (в этой сессии разрешены опасные инструменты: code_editor, shell_exec). "
+        "shell_exec всегда требует подтверждение пользователя перед выполнением."
+        if args.dangerous else
+        "Dangerous-mode: OFF (опасные инструменты отключены)."
+    )
     messages = [
         {"role": "system", "content": system_time_msg},
         {"role": "system", "content": tool_policy_msg},
+        {"role": "system", "content": dangerous_mode_msg},
     ]
     
-    vis = BotVisualizer(model, "", num_ctx)
+    vis = BotVisualizer(model, "", num_ctx, dangerous_mode=args.dangerous)
     step_num = 1
 
     # Вывод ASCII арта и версии (только если не stealth_mode)

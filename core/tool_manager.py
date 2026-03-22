@@ -1,11 +1,16 @@
 import json
+import os
+import sys
 from tools.web_search import ddg_search
 from tools.open_url import open_url
 from tools.file_system import file_system_tool
 from tools.journal import journal_tool
+from tools.code_editor import code_editor
+from tools.shell_exec import shell_exec
 
 class ToolManager:
     def __init__(self):
+        self.dangerous_mode = os.environ.get("BOTINOK_DANGEROUS", "0") == "1"
         self.tools = {
             "web_search": {
                 "function": ddg_search,
@@ -212,18 +217,92 @@ class ToolManager:
                         }
                     }
                 }
+            },
+
+            "code_editor": {
+                "function": code_editor,
+                "description": {
+                    "type": "function",
+                    "function": {
+                        "name": "code_editor",
+                        "description": "ОПАСНО (только dangerous-mode): чтение/запись/точечная замена текста в файлах внутри проекта. Поддерживает expected_sha256 для защиты от гонок.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["read", "write", "replace", "apply"],
+                                    "description": "read (прочитать), write (перезаписать), replace/apply (заменить old_text на new_text ровно 1 раз)"
+                                },
+                                "path": {"type": "string", "description": "Путь к файлу (только внутри project root)"},
+                                "content": {"type": "string", "description": "Новый контент для write"},
+                                "old_text": {"type": "string", "description": "Фрагмент для replace/apply (должен встретиться ровно 1 раз)"},
+                                "new_text": {"type": "string", "description": "Новый фрагмент для replace/apply"},
+                                "create": {"type": "boolean", "description": "Разрешить создание нового файла", "default": false},
+                                "expected_sha256": {"type": "string", "description": "Если задано — операция разрешена только если sha256 текущего файла совпадает"},
+                                "max_bytes": {"type": "integer", "description": "Ограничение на размер файла/контента", "default": 2000000}
+                            },
+                            "required": ["action", "path"]
+                        }
+                    }
+                }
+            },
+
+            "shell_exec": {
+                "function": shell_exec,
+                "description": {
+                    "type": "function",
+                    "function": {
+                        "name": "shell_exec",
+                        "description": "ОПАСНО (только dangerous-mode): выполнить shell-команду. Перед выполнением требуется подтверждение пользователя в интерактивном режиме.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "command": {"type": "string", "description": "Команда для выполнения"},
+                                "cwd": {"type": "string", "description": "Рабочая директория (по умолчанию project root)"},
+                                "timeout_sec": {"type": "integer", "description": "Timeout выполнения", "default": 120},
+                                "max_bytes": {"type": "integer", "description": "Лимит вывода (байты)", "default": 256000}
+                            },
+                            "required": ["command"]
+                        }
+                    }
+                }
             }
         }
 
     def get_tool_definitions(self):
         """Возвращает список определений инструментов для Ollama API"""
-        return [tool["description"] for tool in self.tools.values()]
+        if self.dangerous_mode:
+            return [tool["description"] for tool in self.tools.values()]
+        safe = []
+        for name, tool in self.tools.items():
+            if name in ("code_editor", "shell_exec"):
+                continue
+            safe.append(tool["description"])
+        return safe
 
     def call_tool(self, name, arguments, session_path=None):
         """Вызывает инструмент по имени с переданными аргументами"""
         if name in self.tools:
             tool_func = self.tools[name]["function"]
             try:
+                if name in ("code_editor", "shell_exec") and not self.dangerous_mode:
+                    return "Ошибка: dangerous-mode выключен. Запусти бота с флагом --dangerous чтобы разрешить изменения."
+
+                if name == "shell_exec":
+                    if not sys.stdin.isatty():
+                        return "Ошибка: shell_exec запрещен без интерактивного TTY (нужно подтверждение пользователя)."
+                    cmd_preview = ""
+                    try:
+                        cmd_preview = arguments.get("command", "")
+                    except Exception:
+                        cmd_preview = ""
+                    print("\nBOTINOK shell_exec запрос на выполнение:")
+                    print(cmd_preview)
+                    ans = input("\nВыполнить? (y/N): ")
+                    if str(ans).strip().lower() not in ("y", "yes", "д", "да"):
+                        return "Отменено пользователем."
+
                 # Если передан session_path, передаем его в инструмент (если он его поддерживает)
                 if session_path:
                     import inspect
