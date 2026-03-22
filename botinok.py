@@ -869,6 +869,44 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     func_name = tool_call["function"]["name"]
                     func_args = tool_call["function"]["arguments"]
                     
+                    # Логика подтверждения для опасных инструментов
+                    if func_name in ("shell_exec", "code_editor") and tm.dangerous_mode:
+                        # Останавливаем Live UI для ввода
+                        live.stop()
+                        
+                        console.print("\n" + "═" * 80)
+                        console.print(Panel(
+                            Markdown(f"### Запрос на использование инструмента: `{func_name}`\n\n**Аргументы:**\n```json\n{json.dumps(func_args, indent=2, ensure_ascii=False)}\n```"),
+                            title="[bold red]ВНИМАНИЕ: ОПАСНОЕ ДЕЙСТВИЕ[/bold red]",
+                            border_style="red"
+                        ))
+                        
+                        ans = console.input("\n[bold yellow]Разрешить выполнение? (y/n): [/bold yellow]").strip().lower()
+                        
+                        if ans not in ("y", "yes", "д", "да"):
+                            reason = console.input("[bold cyan]Укажите причину отказа для бота: [/bold cyan]").strip()
+                            if not reason:
+                                reason = "Отменено пользователем без объяснения причин."
+                            
+                            result = f"ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Причина: {reason}"
+                            # Перезапускаем Live UI перед продолжением
+                            live.start()
+                            vis.add_tool_activity(func_name, str(func_args), status="aborted")
+                            
+                            # Добавляем результат отказа в историю
+                            compact_msg = _compact_tool_message(func_name, func_args, result, "")
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call["id"],
+                                "name": func_name,
+                                "content": compact_msg
+                            })
+                            sm.update_context(session_path, "tool", compact_msg, tool_name=func_name, tool_call_id=tool_call["id"])
+                            continue
+                        
+                        # Если разрешено, возвращаем Live UI
+                        live.start()
+
                     query_display = func_args.get('query', str(func_args))
                     vis.add_tool_activity(func_name, query_display, "running")
                     vis.status = f"[bold yellow]Tool: {func_name}[/bold yellow] ([cyan]{query_display}[/cyan])"

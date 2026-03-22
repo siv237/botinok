@@ -289,20 +289,6 @@ class ToolManager:
                 if name in ("code_editor", "shell_exec") and not self.dangerous_mode:
                     return "Ошибка: dangerous-mode выключен. Запусти бота с флагом --dangerous чтобы разрешить изменения."
 
-                if name == "shell_exec":
-                    if not sys.stdin.isatty():
-                        return "Ошибка: shell_exec запрещен без интерактивного TTY (нужно подтверждение пользователя)."
-                    cmd_preview = ""
-                    try:
-                        cmd_preview = arguments.get("command", "")
-                    except Exception:
-                        cmd_preview = ""
-                    print("\nBOTINOK shell_exec запрос на выполнение:")
-                    print(cmd_preview)
-                    ans = input("\nВыполнить? (y/N): ")
-                    if str(ans).strip().lower() not in ("y", "yes", "д", "да"):
-                        return "Отменено пользователем."
-
                 # Если передан session_path, передаем его в инструмент (если он его поддерживает)
                 if session_path:
                     import inspect
