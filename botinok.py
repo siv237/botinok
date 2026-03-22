@@ -931,7 +931,15 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                             
                             console.print("\n" + "─" * 40)
                             console.print("[bold green]Команда завершена.[/bold green]")
-                            console.input("[bold cyan]Нажмите Enter для продолжения и возврата в сессию...[/bold cyan]")
+                            user_comment = console.input("[bold cyan]Нажмите Enter для возврата или введите комментарий для модели: [/bold cyan]").strip()
+                            
+                            if user_comment:
+                                result = f"ВЫВОД КОМАНДЫ:\n{result}\n\nКОММЕНТАРИЙ ПОЛЬЗОВАТЕЛЯ:\n{user_comment}"
+                            
+                            # Обновляем сообщение в истории с учетом комментария
+                            compact_msg = _compact_tool_message(func_name, func_args, result, artifact_path)
+                            messages[-1]["content"] = compact_msg
+                            sm.update_context(session_path, "tool", compact_msg)
                             
                             # Перезапускаем Live UI и переходим к следующему инструменту
                             live.start()
