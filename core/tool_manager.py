@@ -238,7 +238,7 @@ class ToolManager:
                                 "content": {"type": "string", "description": "Новый контент для write"},
                                 "old_text": {"type": "string", "description": "Фрагмент для replace/apply (должен встретиться ровно 1 раз)"},
                                 "new_text": {"type": "string", "description": "Новый фрагмент для replace/apply"},
-                                "create": {"type": "boolean", "description": "Разрешить создание нового файла", "default": false},
+                                "create": {"type": "boolean", "description": "Разрешить создание нового файла", "default": False},
                                 "expected_sha256": {"type": "string", "description": "Если задано — операция разрешена только если sha256 текущего файла совпадает"},
                                 "max_bytes": {"type": "integer", "description": "Ограничение на размер файла/контента", "default": 2000000}
                             },
