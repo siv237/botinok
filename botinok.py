@@ -1531,6 +1531,20 @@ def main():
         f"{os.path.join(session_path, 'project')}"
     )
 
+    session_files_msg = (
+        "SESSION_FILES_AND_LAYOUT\n"
+        "Ниже — где что лежит внутри session_path и что в этих файлах. Используй это как карту для быстрых ссылок.\n\n"
+        f"- context_json: {os.path.join(session_path, 'context.json')} (структурированная история: role/content/thinking/tool_calls)\n"
+        f"- response_md: {os.path.join(session_path, 'response.md')} (итоговые ответы ассистента; в YAML-хедерах каждого turn лежит prompt)\n"
+        f"- thinking_md: {os.path.join(session_path, 'thinking.md')} (поток размышлений/chain-of-thought, если модель его отдаёт)\n"
+        f"- tools_log: {os.path.join(session_path, 'tools.log')} (каждый вызов инструмента: args/result/size/status)\n"
+        f"- session_raw_log: {os.path.join(session_path, 'session_raw.log')} (сырые чанки стрима: thinking/response + delta по времени)\n"
+        f"- performance_log: {os.path.join(session_path, 'performance.log')} (TPS/VRAM/ctx по шагам)\n"
+        f"- steps_dir: {os.path.join(session_path, sm.config.get('Storage', 'StepsSubDir', fallback='steps'))}/ (JSON снимки запрос/ответ по шагам)\n"
+        f"- artifacts_dir: {os.path.join(session_path, 'artifacts')}/ (крупные сохранения: обрезанный контекст, HTTP ошибки, payloads и т.п.)\n"
+        f"- project_dir: {os.path.join(session_path, 'project')}/ (рабочая папка файлов проекта по умолчанию)\n"
+    )
+
     dangerous_mode_msg = (
         "Dangerous-mode: ON (в этой сессии разрешены опасные инструменты: code_editor, shell_exec). "
         "shell_exec всегда требует подтверждение пользователя перед выполнением."
@@ -1548,6 +1562,7 @@ def main():
     messages = [
         {"role": "system", "content": system_time_msg},
         {"role": "system", "content": session_location_msg},
+        {"role": "system", "content": session_files_msg},
         {"role": "system", "content": tool_policy_msg},
         {"role": "system", "content": dangerous_mode_msg},
     ]
