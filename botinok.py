@@ -7,6 +7,7 @@ import queue
 import requests
 import argparse
 from datetime import datetime
+import inquirer
 from rich.console import Console
 from rich.layout import Layout
 from rich.panel import Panel
@@ -14,6 +15,7 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 from rich.markdown import Markdown
+from rich.prompt import Confirm
 from core.session_manager import SessionManager
 from core.tool_manager import ToolManager
 
@@ -1388,6 +1390,80 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192):
     except Exception:
         return messages
 
+def _choose_or_resume_session(sm: SessionManager, stealth_mode: bool, default_suffix: str) -> tuple[str, str]:
+    """Выбор сессии при старте.
+
+    Returns:
+      (session_path, resume_last_answer)
+    """
+    if stealth_mode or (not sys.stdin.isatty()):
+        return sm.create_session(default_suffix), ""
+
+    sessions = sm.list_sessions()
+    if not sessions:
+        return sm.create_session(default_suffix), ""
+
+    latest = sessions[0]
+    latest_name = latest.get("name") or "(unknown)"
+
+    choices = [
+        (f"Продолжить последнюю: {latest_name}", "continue_latest"),
+        ("Выбрать другую сессию", "choose"),
+        ("Начать новую сессию", "new"),
+    ]
+    answers = inquirer.prompt([
+        inquirer.List(
+            'session_action',
+            message="Старт BOTINOK: выбрать сессию",
+            choices=choices,
+            default="continue_latest",
+        )
+    ])
+
+    if not answers:
+        return sm.create_session(default_suffix), ""
+
+    action = answers.get('session_action')
+    if action == "new":
+        return sm.create_session(default_suffix), ""
+
+    if action == "choose":
+        session_options = []
+        for s in sessions:
+            name = s.get("name") or "(unknown)"
+            path = s.get("path") or ""
+            mtime = s.get("mtime")
+            try:
+                ts = datetime.fromtimestamp(float(mtime)).strftime("%Y-%m-%d %H:%M:%S") if mtime else "unknown"
+            except Exception:
+                ts = "unknown"
+            session_options.append((f"{name:<45} | {ts}", path))
+
+        picked = inquirer.prompt([
+            inquirer.List(
+                'session_path',
+                message="Выберите сессию для продолжения (Имя | last_modified)",
+                choices=session_options,
+                default=latest.get("path"),
+            )
+        ])
+
+        if not picked:
+            return sm.create_session(default_suffix), ""
+
+        chosen_path = picked.get('session_path')
+        if chosen_path and os.path.isdir(chosen_path):
+            sm.ensure_session_structure(chosen_path)
+            return chosen_path, sm.load_last_assistant_answer(chosen_path)
+
+        return sm.create_session(default_suffix), ""
+
+    if latest.get("path") and os.path.isdir(latest.get("path")):
+        sm.ensure_session_structure(latest["path"])
+        return latest["path"], sm.load_last_assistant_answer(latest["path"])
+
+    return sm.create_session(default_suffix), ""
+
 def main():
     parser = argparse.ArgumentParser(description="BOTINOK AGENT - Interactive AI Assistant")
     
@@ -1431,7 +1507,8 @@ def main():
             else:
                 arg_prompt = stdin_data
 
-    session_path = sm.create_session("visual_run" if not stealth_mode else "stealth_run")
+    session_suffix = "visual_run" if not stealth_mode else "stealth_run"
+    session_path, resume_last_answer = _choose_or_resume_session(sm, stealth_mode, session_suffix)
     
     # Подготовка начальных сообщений
     now = datetime.now().astimezone()
@@ -1460,12 +1537,23 @@ def main():
         if args.dangerous else
         "Dangerous-mode: OFF (опасные инструменты отключены)."
     )
+
+    resume_context_msg = ""
+    if resume_last_answer:
+        resume_context_msg = (
+            "RESUMED_SESSION_CONTEXT\n"
+            "Это продолжение предыдущей сессии. Ниже — хвост последнего ответа ассистента (для восстановления контекста):\n\n"
+            f"{resume_last_answer}"
+        )
     messages = [
         {"role": "system", "content": system_time_msg},
         {"role": "system", "content": session_location_msg},
         {"role": "system", "content": tool_policy_msg},
         {"role": "system", "content": dangerous_mode_msg},
     ]
+
+    if resume_context_msg:
+        messages.append({"role": "system", "content": resume_context_msg})
     
     vis = BotVisualizer(model, "", num_ctx, dangerous_mode=args.dangerous)
     step_num = 1

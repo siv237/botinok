@@ -21,6 +21,78 @@ class SessionManager:
         if not os.path.exists(self.base_path):
             os.makedirs(self.base_path)
 
+    def list_sessions(self):
+        """Возвращает список существующих сессий в base_path (новые сверху)."""
+        try:
+            if not os.path.exists(self.base_path):
+                return []
+            items = []
+            for name in os.listdir(self.base_path):
+                p = os.path.join(self.base_path, name)
+                if os.path.isdir(p):
+                    try:
+                        mtime = os.path.getmtime(p)
+                    except Exception:
+                        mtime = 0
+                    items.append({"name": name, "path": p, "mtime": mtime})
+            items.sort(key=lambda x: x.get("mtime", 0), reverse=True)
+            return items
+        except Exception:
+            return []
+
+    def get_latest_session(self):
+        sessions = self.list_sessions()
+        return sessions[0] if sessions else None
+
+    def ensure_session_structure(self, session_path: str):
+        """Гарантирует наличие стандартных подпапок в уже существующей сессии."""
+        try:
+            steps_subdir = self.config.get('Storage', 'StepsSubDir', fallback='steps')
+            os.makedirs(os.path.join(session_path, steps_subdir), exist_ok=True)
+            os.makedirs(os.path.join(session_path, "artifacts"), exist_ok=True)
+            os.makedirs(os.path.join(session_path, "project"), exist_ok=True)
+        except Exception:
+            pass
+
+    def load_last_assistant_answer(self, session_path: str, max_chars: int = 6000) -> str:
+        """Пытается достать последний ответ ассистента для продолжения сессии.
+
+        Приоритет:
+        1) конец response.md
+        2) последний assistant в context.json
+        """
+        response_path = os.path.join(session_path, "response.md")
+        try:
+            if os.path.exists(response_path):
+                with open(response_path, "r", encoding="utf-8", errors="ignore") as f:
+                    data = f.read()
+                if data:
+                    data = data.strip()
+                    if len(data) > max_chars:
+                        data = data[-max_chars:]
+                    return data
+        except Exception:
+            pass
+
+        context_path = os.path.join(session_path, "context.json")
+        try:
+            if os.path.exists(context_path):
+                with open(context_path, "r", encoding="utf-8", errors="ignore") as f:
+                    ctx = json.load(f)
+                hist = ctx.get("history", []) if isinstance(ctx, dict) else []
+                for entry in reversed(hist):
+                    if isinstance(entry, dict) and entry.get("role") == "assistant":
+                        content = entry.get("content") or ""
+                        content = str(content).strip()
+                        if content:
+                            if len(content) > max_chars:
+                                content = content[-max_chars:]
+                            return content
+        except Exception:
+            pass
+
+        return ""
+
     def ensure_session_subdir(self, session_path: str, subdir_name: str) -> str:
         subdir_path = os.path.join(session_path, subdir_name)
         if not os.path.exists(subdir_path):
