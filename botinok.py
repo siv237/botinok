@@ -259,6 +259,7 @@ class BotVisualizer:
         self.response_text = ""
         self.start_time = time.time()
         self.first_token_time = None
+        self.last_chunk_time = None
         self.thinking_tokens = 0
         self.response_tokens = 0
         self.tool_tokens = 0 # Новое поле для учета токенов от инструментов
@@ -276,6 +277,7 @@ class BotVisualizer:
         self.response_text = ""
         self.start_time = time.time()
         self.first_token_time = None
+        self.last_chunk_time = None
         self.thinking_tokens = 0
         self.response_tokens = 0
         self.tool_tokens = 0
@@ -351,6 +353,8 @@ class BotVisualizer:
         ttft = f"{self.first_token_time - self.start_time:.2f}s" if self.first_token_time else "..."
         # Считаем TPS на основе общего количества токенов (thinking + response)
         tps = self.total_tokens / (time.time() - self.first_token_time) if self.first_token_time and (time.time() - self.first_token_time) > 0 else 0
+
+        no_chunks_for = time.time() - self.last_chunk_time if self.last_chunk_time else 0.0
         
         # Индикатор активности (спиннер)
         spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -360,11 +364,12 @@ class BotVisualizer:
         
         display_status = self.status
             
-        activity = f"[bold magenta]{spinner}[/bold magenta]" if self.status in ["Generating...", "Calling Tools...", "Resuming generation...", "Checking Memory...", "Unloading Models...", "Forced VRAM Cleanup...", "Connecting..."] or "Tool:" in self.status else ""
+        activity = f"[bold magenta]{spinner}[/bold magenta]" if self.status in ["Generating...", "Waiting for tool call...", "Calling Tools...", "Resuming generation...", "Checking Memory...", "Unloading Models...", "Forced VRAM Cleanup...", "Connecting...", "Tool-mode parsing..."] or "Tool:" in self.status else ""
 
         table = Table(show_header=False, box=None, padding=(0, 1))
         table.add_row("[cyan]Status:[/cyan]", f"[bold]{display_status}[/bold] {activity}")
         table.add_row("[cyan]Elapsed:[/cyan]", f"{elapsed:.1f}s")
+        table.add_row("[cyan]No chunks:[/cyan]", f"{no_chunks_for:.1f}s")
         table.add_row("[cyan]TTFT:[/cyan]", f"[bold yellow]{ttft}[/bold yellow]")
         table.add_row("[cyan]Thinking:[/cyan]", f"[bold yellow]{self.thinking_tokens}[/bold yellow]")
         table.add_row("[cyan]Response:[/cyan]", f"[bold green]{self.response_tokens}[/bold green]")
@@ -642,6 +647,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     return messages
 
                 vis.status = "Generating..."
+                vis.last_chunk_time = time.time()
                 live.refresh()
                 
                 full_response = ""
@@ -653,15 +659,53 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                 sm.update_context(session_path, "user", prompt)
                 
                 thinking_ended = False
-                
-                for line in response.iter_lines():
-                    if line:
+
+                stream_queue = queue.Queue()
+
+                def stream_reader():
+                    try:
+                        for line in response.iter_lines():
+                            stream_queue.put(("line", line))
+                        stream_queue.put(("eof", None))
+                    except Exception as e:
+                        stream_queue.put(("error", str(e)))
+
+                reader_thread = threading.Thread(target=stream_reader, daemon=True)
+                reader_thread.start()
+
+                stream_done = False
+                stream_error = None
+                waiting_status_set = False
+
+                while not stream_done:
+                    # Drain all currently available stream items without blocking.
+                    while True:
+                        try:
+                            kind, item = stream_queue.get_nowait()
+                        except queue.Empty:
+                            break
+
+                        if kind == "eof":
+                            stream_done = True
+                            break
+                        if kind == "error":
+                            stream_error = item
+                            stream_done = True
+                            break
+
+                        line = item
+                        if not line:
+                            continue
+
+                        vis.last_chunk_time = time.time()
+                        waiting_status_set = False
+
                         try:
                             decoded_line = line.decode('utf-8')
                             chunk = json.loads(decoded_line)
-                            
+
                             msg = chunk.get("message", {})
-                            
+
                             # Обновляем реальные счетчики токенов Ollama, если они присутствуют в чанке
                             if "prompt_eval_count" in chunk:
                                 vis.prompt_eval_count = chunk.get("prompt_eval_count", 0)
@@ -670,10 +714,10 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
 
                             if not vis.first_token_time:
                                 vis.first_token_time = time.time()
-                            
+
                             if vis.total_tokens % 50 == 0:
                                 vis.update_vram(sm)
-                            
+
                             # Обработка процесса мышления
                             thought = msg.get("thinking", "")
                             if thought:
@@ -681,7 +725,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                                 vis.response_text = f"[dim]Thinking...[/dim]\n{full_thinking}\n\n[bold white]Response:[/bold white]\n{full_response}"
                                 vis.thinking_tokens += 1
                                 sm.log_chunk(session_path, "thinking", thought)
-                            
+
                             # Обработка основного ответа
                             token = msg.get("content", "")
                             if token:
@@ -708,23 +752,13 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                                         response.close()
                                     except Exception:
                                         pass
+                                    stream_done = True
                                     break
 
                             # Сбор вызовов инструментов
                             if msg.get("tool_calls"):
                                 tool_calls.extend(msg.get("tool_calls"))
 
-                            # Обновляем только то, что реально меняется
-                            # layout["header"] и layout["footer"] теперь не обновляются в цикле токенов
-                            main_height = console.size.height - 12
-                            main_width = int(console.size.width * 0.66)
-                            layout["content"].update(vis.get_content_panel(width=main_width, height=max(5, main_height)))
-                            layout["stats"].update(vis.get_stats_panel())
-                            
-                            # Обновляем панель инструментов только если есть активные инструменты
-                            if tool_calls or vis.active_tools:
-                                layout["tools_panel"].update(vis.get_tools_panel())
-                            
                             if chunk.get("done"):
                                 vis.status = "Done"
                                 metrics = {
@@ -735,8 +769,34 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                                     "eval_duration_ms": chunk.get("eval_duration", 0) / 1_000_000,
                                 }
                                 sm.log_chunk(session_path, "metrics", "", metrics=metrics)
+                                stream_done = True
+                                break
                         except json.JSONDecodeError:
                             continue
+
+                    if stream_done:
+                        break
+
+                    # UI tick (не зависит от прихода новых чанков)
+                    no_chunks_for = time.time() - vis.last_chunk_time if vis.last_chunk_time else 0.0
+                    if no_chunks_for >= 1.0 and not waiting_status_set:
+                        vis.status = "Waiting for tool call..."
+                        waiting_status_set = True
+                    elif no_chunks_for < 1.0 and vis.status == "Waiting for tool call...":
+                        vis.status = "Generating..."
+
+                    main_height = console.size.height - 12
+                    main_width = int(console.size.width * 0.66)
+                    layout["content"].update(vis.get_content_panel(width=main_width, height=max(5, main_height)))
+                    layout["stats"].update(vis.get_stats_panel())
+
+                    if tool_calls or vis.active_tools:
+                        layout["tools_panel"].update(vis.get_tools_panel())
+
+                    time.sleep(0.1)
+
+                if stream_error:
+                    raise RuntimeError(f"Ollama stream error: {stream_error}")
 
                 if (not tool_calls) and (not full_response.strip()) and full_thinking.strip():
                     aborted_reason = "missing_final_response"
@@ -858,6 +918,9 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     break
 
                 # Обработка вызовов инструментов
+                vis.status = "Tool-mode parsing..."
+                layout["stats"].update(vis.get_stats_panel())
+                live.refresh()
                 vis.status = "Calling Tools..."
                 live.refresh()
                 
