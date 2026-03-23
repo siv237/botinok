@@ -8,11 +8,11 @@ def _project_root() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
-def _safe_path(path: str) -> str:
-    root = _project_root()
+def _safe_path(path: str, root: str) -> str:
+    root = os.path.realpath(root)
     rp = os.path.realpath(path)
     if not (rp == root or rp.startswith(root + os.sep)):
-        raise ValueError(f"Path outside project root is not allowed: {path}")
+        raise ValueError(f"Path outside allowed root is not allowed: {path}")
     return rp
 
 
@@ -39,12 +39,14 @@ def code_editor(
     create: bool = False,
     expected_sha256: Optional[str] = None,
     max_bytes: int = 2_000_000,
+    session_path: Optional[str] = None,
 ) -> str:
     if action not in ("read", "write", "replace", "apply"):
         return f"Ошибка: неизвестный action '{action}'"
 
     try:
-        safe_path = _safe_path(path)
+        root = os.path.abspath(session_path) if session_path else _project_root()
+        safe_path = _safe_path(path, root=root)
 
         if action == "read":
             if not os.path.isfile(safe_path):
@@ -107,7 +109,7 @@ def code_editor(
 
         result = {
             "action": action,
-            "path": os.path.relpath(safe_path, _project_root()),
+            "path": safe_path,
             "before_sha256": before_sha,
             "after_sha256": after_sha,
             "changed": before_sha != after_sha,

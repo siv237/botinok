@@ -53,6 +53,7 @@ class SessionManager:
         os.makedirs(session_path)
         os.makedirs(os.path.join(session_path, steps_subdir))
         os.makedirs(os.path.join(session_path, "artifacts"))
+        os.makedirs(os.path.join(session_path, "project"))
         
         # Начальный контекст
         context = {

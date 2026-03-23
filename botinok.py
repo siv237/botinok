@@ -105,9 +105,32 @@ def _compact_tool_message(tool_name: str, tool_args: dict, result: str, artifact
     truncated = len(res_str) > TOOL_OUTPUT_MAX_CHARS
     args_preview = tool_args
     try:
-        args_preview = json.dumps(tool_args, ensure_ascii=False)
+        safe_args = tool_args
+        if tool_name == "code_editor" and isinstance(tool_args, dict):
+            safe_args = dict(tool_args)
+            for k in ("content", "old_text", "new_text"):
+                if k in safe_args and safe_args[k] is not None:
+                    try:
+                        safe_args[k] = f"<omitted:{len(str(safe_args[k]))} chars>"
+                    except Exception:
+                        safe_args[k] = "<omitted>"
+        args_preview = json.dumps(safe_args, ensure_ascii=False)
     except Exception:
         args_preview = str(tool_args)
+
+    extra_lines = ""
+    if tool_name == "code_editor":
+        try:
+            parsed = json.loads(res_str)
+            if isinstance(parsed, dict):
+                p = parsed.get("path")
+                changed = parsed.get("changed")
+                if p is not None:
+                    extra_lines += f"\nfile_path: {p}"
+                if changed is not None:
+                    extra_lines += f"\nchanged: {str(bool(changed)).lower()}"
+        except Exception:
+            pass
 
     msg = (
         f"TOOL_RESULT_SUMMARY\n"
@@ -117,10 +140,43 @@ def _compact_tool_message(tool_name: str, tool_args: dict, result: str, artifact
         f"size_kb: {size_kb:.2f}\n"
         f"truncated_in_context: {str(truncated).lower()}\n"
         f"content_preview:\n{shown}"
+        f"{extra_lines}"
     )
     if truncated:
         msg += f"\n...[TRUNCATED {len(res_str) - TOOL_OUTPUT_MAX_CHARS} chars]"
     return msg
+
+
+def _session_project_dir(session_path: str) -> str:
+    return os.path.join(session_path, "project")
+
+
+def _resolve_code_editor_target_path(session_path: str, raw_path: str) -> str:
+    if os.path.isabs(raw_path):
+        return os.path.realpath(raw_path)
+    return os.path.realpath(os.path.join(_session_project_dir(session_path), raw_path))
+
+
+def _is_within(base_dir: str, target_path: str) -> bool:
+    base_dir = os.path.realpath(base_dir)
+    target_path = os.path.realpath(target_path)
+    return target_path == base_dir or target_path.startswith(base_dir + os.sep)
+
+
+def _code_editor_args_for_display(session_path: str, func_args: dict) -> dict:
+    safe = {}
+    if isinstance(func_args, dict):
+        safe = dict(func_args)
+    raw_path = safe.get("path")
+    if raw_path:
+        safe["path"] = _resolve_code_editor_target_path(session_path, str(raw_path))
+    for k in ("content", "old_text", "new_text"):
+        if k in safe and safe[k] is not None:
+            try:
+                safe[k] = f"<omitted:{len(str(safe[k]))} chars>"
+            except Exception:
+                safe[k] = "<omitted>"
+    return safe
 
 def _ollama_summarize_and_reset_context(
     sm: SessionManager,
@@ -502,6 +558,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
             auto_recoveries = 0
             http_retries = 0
             max_http_retries = 2
+            changed_project_files = []
             while True:
                 tool_rounds += 1
                 if tool_rounds > MAX_TOOL_ROUNDS_PER_TURN:
@@ -931,20 +988,107 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                 for tool_call in tool_calls:
                     func_name = tool_call["function"]["name"]
                     func_args = tool_call["function"]["arguments"]
+
+                    effective_session_path = session_path
+                    if func_name == "code_editor" and isinstance(func_args, dict):
+                        raw_path = str(func_args.get("path", ""))
+                        resolved = _resolve_code_editor_target_path(session_path, raw_path) if raw_path else ""
+                        project_dir = _session_project_dir(session_path)
+
+                        # Default: relative paths go into session_path/project/.
+                        if raw_path and (not os.path.isabs(raw_path)):
+                            func_args["path"] = resolved
+
+                        # If user tries to write outside session dir, require explicit confirmation and run against repo root.
+                        if raw_path and os.path.isabs(raw_path) and (not _is_within(session_path, resolved)):
+                            effective_session_path = None
+
+                        # If write target is outside project workspace (but still within session), require confirmation.
+                        needs_confirm = True
+                        if resolved and _is_within(project_dir, resolved):
+                            needs_confirm = False
+
+                        # Store for later UI display.
+                        func_args_display = _code_editor_args_for_display(session_path, func_args)
+                    else:
+                        func_args_display = func_args
                     
                     # Логика подтверждения для опасных инструментов
                     if func_name in ("shell_exec", "code_editor") and tm.dangerous_mode:
-                        # Останавливаем Live UI для ввода и выполнения интерактивных команд
-                        live.stop()
-                        
-                        console.print("\n" + "═" * 80)
-                        console.print(Panel(
-                            Markdown(f"### Запрос на использование инструмента: `{func_name}`\n\n**Аргументы:**\n```json\n{json.dumps(func_args, indent=2, ensure_ascii=False)}\n```"),
-                            title="[bold red]ВНИМАНИЕ: ОПАСНОЕ ДЕЙСТВИЕ[/bold red]",
-                            border_style="red"
-                        ))
-                        
-                        ans = console.input("\n[bold yellow]Разрешить выполнение? (y/n): [/bold yellow]").strip().lower()
+                        if func_name == "code_editor" and isinstance(func_args, dict):
+                            ans = "y"
+                            # Skip confirmation for safe edits inside session project workspace.
+                            if 'needs_confirm' in locals() and not needs_confirm:
+                                pass
+                            else:
+                                live.stop()
+
+                                warn_text = ""
+                                if effective_session_path is None:
+                                    warn_text = (
+                                        "\n\n[bold red]ВНИМАНИЕ:[/bold red] путь находится вне папки сессии. "
+                                        "Это может изменить файлы проекта."
+                                    )
+                                else:
+                                    # Within session but outside project dir.
+                                    resolved_path = None
+                                    try:
+                                        resolved_path = str(func_args_display.get('path'))
+                                    except Exception:
+                                        resolved_path = None
+                                    if resolved_path and (not _is_within(_session_project_dir(session_path), resolved_path)):
+                                        warn_text = (
+                                            "\n\n[bold yellow]Предупреждение:[/bold yellow] путь находится вне "
+                                            "`session_path/project/`. Рекомендуется хранить файлы проекта в этой папке."
+                                        )
+
+                                console.print("\n" + "═" * 80)
+                                console.print(Panel(
+                                    Markdown(
+                                        f"### Запрос на использование инструмента: `{func_name}`\n\n"
+                                        f"**Аргументы (sanitized):**\n```json\n{json.dumps(func_args_display, indent=2, ensure_ascii=False)}\n```"
+                                        f"{warn_text}"
+                                    ),
+                                    title="[bold red]ВНИМАНИЕ: ОПАСНОЕ ДЕЙСТВИЕ[/bold red]",
+                                    border_style="red"
+                                ))
+
+                                ans = console.input("\n[bold yellow]Разрешить выполнение? (y/n): [/bold yellow]").strip().lower()
+
+                                if ans not in ("y", "yes", "д", "да"):
+                                    reason = console.input("[bold cyan]Укажите причину отказа для бота: [/bold cyan]").strip()
+                                    if not reason:
+                                        reason = "Отменено пользователем без объяснения причин."
+
+                                    result = f"ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Причина: {reason}"
+                                    live.start()
+                                    vis.add_tool_activity(func_name, str(func_args_display), status="aborted")
+
+                                    compact_msg = _compact_tool_message(func_name, func_args_display, result, "")
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tool_call["id"],
+                                        "name": func_name,
+                                        "content": compact_msg
+                                    })
+                                    sm.update_context(session_path, "tool", compact_msg)
+                                    continue
+
+                                live.start()
+
+                            # code_editor approved (or skipped) -> do not run generic confirmation panel.
+                        else:
+                            # Останавливаем Live UI для ввода и выполнения интерактивных команд
+                            live.stop()
+                            
+                            console.print("\n" + "═" * 80)
+                            console.print(Panel(
+                                Markdown(f"### Запрос на использование инструмента: `{func_name}`\n\n**Аргументы:**\n```json\n{json.dumps(func_args, indent=2, ensure_ascii=False)}\n```"),
+                                title="[bold red]ВНИМАНИЕ: ОПАСНОЕ ДЕЙСТВИЕ[/bold red]",
+                                border_style="red"
+                            ))
+                            
+                            ans = console.input("\n[bold yellow]Разрешить выполнение? (y/n): [/bold yellow]").strip().lower()
                         
                         if ans not in ("y", "yes", "д", "да"):
                             reason = console.input("[bold cyan]Укажите причину отказа для бота: [/bold cyan]").strip()
@@ -982,6 +1126,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                             artifact_path = sm.save_artifact(session_path, artifact_file, str(result))
                             
                             compact_msg = _compact_tool_message(func_name, func_args, result, artifact_path)
+
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tool_call["id"],
@@ -1011,7 +1156,10 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                         # Для code_editor просто возвращаем Live UI, он выполнится асинхронно ниже
                         live.start()
 
-                    query_display = func_args.get('query', str(func_args))
+                    if func_name == "code_editor" and isinstance(func_args_display, dict):
+                        query_display = str(func_args_display.get("path") or func_args.get("path") or "")
+                    else:
+                        query_display = func_args.get('query', str(func_args))
                     vis.add_tool_activity(func_name, query_display, "running")
                     vis.status = f"[bold yellow]Tool: {func_name}[/bold yellow] ([cyan]{query_display}[/cyan])"
                     layout["tools_panel"].update(vis.get_tools_panel())
@@ -1025,7 +1173,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                             # Для инструментов, поддерживающих стриминг или порционную отдачу,
                             # здесь можно было бы реализовать колбэк. Но пока сделаем имитацию
                             # живого набора токенов во время ожидания.
-                            res = tm.call_tool(func_name, func_args, session_path=session_path)
+                            res = tm.call_tool(func_name, func_args, session_path=effective_session_path)
                             result_queue.put(("success", res))
                         except Exception as e:
                             result_queue.put(("error", str(e)))
@@ -1058,6 +1206,15 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                         result = f"Error calling tool: {tool_output}"
                     else:
                         result = tool_output
+
+                    # Track changed files for code_editor without leaking content.
+                    if func_name == "code_editor":
+                        try:
+                            parsed = json.loads(str(result))
+                            if isinstance(parsed, dict) and parsed.get("changed") and parsed.get("path"):
+                                changed_project_files.append(str(parsed.get("path")))
+                        except Exception:
+                            pass
 
                     artifact_file = f"tool_{func_name}_{tool_call.get('id', int(time.time()))}.txt"
                     artifact_path = sm.save_artifact(session_path, artifact_file, str(result))
@@ -1285,7 +1442,8 @@ def main():
     tool_policy_msg = (
         "Политика инструментов:\n"
         "- Для systemd journal/journalctl используй инструмент 'journal' (а не file_system).\n"
-        "- file_system предназначен для файлов/директорий/grep и чтения файлов."
+        "- file_system предназначен для файлов/директорий/grep и чтения файлов.\n"
+        "- Для создания/изменения файлов проекта по умолчанию используй `code_editor` внутри session_path/project/ (если пользователь явно не указал другой путь)."
     )
 
     dangerous_mode_msg = (
