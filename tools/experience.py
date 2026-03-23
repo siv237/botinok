@@ -26,6 +26,63 @@ def _ensure_structure():
     for subdir in ["positive", "negative", "tools", "patterns"]:
         os.makedirs(os.path.join(exp_dir, subdir), exist_ok=True)
 
+def _format_timestamp(ts: str) -> str:
+    """Форматирование timestamp в читаемый вид"""
+    if not ts:
+        return ""
+    try:
+        dt = datetime.fromisoformat(ts)
+        return f"📅 {dt.strftime('%Y-%m-%d %H:%M')}"
+    except:
+        return f"📅 {ts}"
+
+def _format_entry(entry: dict) -> str:
+    """Форматирование записи опыта для отображения"""
+    ts_str = _format_timestamp(entry.get('timestamp', ''))
+    
+    lines = [
+        f"**{entry.get('title', 'Без названия')}**",
+        f"🏷️ {', '.join(entry.get('tags', []))}",
+    ]
+    
+    if ts_str:
+        lines.append(ts_str)
+    
+    if entry.get('solution'):
+        lines.append(f"\n💡 **Решение:**\n{entry.get('solution')}")
+    
+    if entry.get('error_context'):
+        lines.append(f"\n❌ **Ошибка:**\n{entry.get('error_context')}")
+    
+    return "\n".join(lines)
+
+def _update_index(exp_dir: str):
+    """Обновление индекса опыта"""
+    index_path = os.path.join(exp_dir, "index.json")
+    index = {"positive": [], "negative": [], "updated": datetime.now().isoformat()}
+    
+    for subdir in ["positive", "negative"]:
+        subpath = os.path.join(exp_dir, subdir)
+        if not os.path.exists(subpath):
+            continue
+        for filename in os.listdir(subpath):
+            if filename.endswith(".json"):
+                filepath = os.path.join(subpath, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        entry = json.load(f)
+                    index[subdir].append({
+                        "filename": filename,
+                        "title": entry.get("title", ""),
+                        "tags": entry.get("tags", []),
+                        "timestamp": entry.get("timestamp", ""),
+                    })
+                except:
+                    pass
+    
+    with open(index_path, "w", encoding="utf-8") as f:
+        json.dump(index, f, ensure_ascii=False, indent=2)
+
 def experience(
     action: str,
     title: str = "",
@@ -78,7 +135,7 @@ def experience(
         # Обновляем индекс
         _update_index(exp_dir)
         
-        return f"✅ Позитивный опыт записан:\n📁 {filepath}\n🏷️ Теги: {', '.join(tags or [])}"
+        return f"✅ Позитивный опыт записан:\n📁 {filepath}\n🏷️ Теги: {', '.join(tags or [])}\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     
     elif action == "add_negative":
         # Записываем ошибку
@@ -100,7 +157,7 @@ def experience(
         
         _update_index(exp_dir)
         
-        return f"❌ Негативный опыт записан:\n📁 {filepath}\n🏷️ Теги: {', '.join(tags or [])}"
+        return f"❌ Негативный опыт записан:\n📁 {filepath}\n🏷️ Теги: {', '.join(tags or [])}\n📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     
     elif action == "search":
         # Ищем опыт по тегам или тексту
@@ -146,48 +203,57 @@ def experience(
         if results["positive"]:
             output.append("✅ Позитивный опыт:")
             for r in results["positive"]:
-                output.append(f"  • {r['title']} ({r['timestamp'][:10]}) — теги: {', '.join(r['tags'])}")
+                ts = _format_timestamp(r.get('timestamp', ''))
+                output.append(f"  • {r['title']} {ts} — теги: {', '.join(r['tags'])}")
         
         if results["negative"]:
             output.append("\n❌ Негативный опыт:")
             for r in results["negative"]:
-                output.append(f"  • {r['title']} ({r['timestamp'][:10]}) — теги: {', '.join(r['tags'])}")
+                ts = _format_timestamp(r.get('timestamp', ''))
+                output.append(f"  • {r['title']} {ts} — теги: {', '.join(r['tags'])}")
         
         if not results["positive"] and not results["negative"]:
-            output.append("Ничего не найдено")
+            output.append("Ничего не найдено.")
         
         return "\n".join(output)
     
     elif action == "list":
         # Показать весь опыт
-        output = [f"📚 База опыта: {exp_dir}\n"]
+        output = ["📚 База опыта:\n"]
         
-        for subdir, emoji in [("positive", "✅"), ("negative", "❌")]:
+        for subdir in ["positive", "negative"]:
             subpath = os.path.join(exp_dir, subdir)
             if not os.path.exists(subpath):
                 continue
             
-            files = [f for f in os.listdir(subpath) if f.endswith(".json")]
-            output.append(f"\n{emoji} {subdir.upper()} ({len(files)} записей):")
-            
-            for filename in sorted(files, reverse=True)[:10]:  # последние 10
-                filepath = os.path.join(subpath, filename)
+            entries = []
+            for filename in os.listdir(subpath):
+                if not filename.endswith(".json"):
+                    continue
+                filepath = os.path.join(subdir, filename)
                 try:
-                    with open(filepath, "r", encoding="utf-8") as f:
+                    with open(os.path.join(exp_dir, filepath), "r", encoding="utf-8") as f:
                         entry = json.load(f)
-                    tags_str = ", ".join(entry.get("tags", [])[:5])
-                    output.append(f"  • {entry.get('title', 'Без названия')} [{tags_str}]")
-                except Exception:
-                    output.append(f"  • {filename} (ошибка чтения)")
+                    entries.append(entry)
+                except:
+                    pass
             
-            if len(files) > 10:
-                output.append(f"  ... и ещё {len(files) - 10}")
+            # Сортируем по timestamp (новые сверху)
+            entries.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+            
+            prefix = "✅" if subdir == "positive" else "❌"
+            output.append(f"\n{prefix} {subdir.capitalize()}:")
+            
+            for entry in entries:
+                ts = _format_timestamp(entry.get('timestamp', ''))
+                output.append(f"  • {entry.get('title', 'Без названия')} {ts}")
+                output.append(f"    🏷️ {', '.join(entry.get('tags', []))}")
         
         return "\n".join(output)
     
     elif action == "check":
-        # Проверить есть ли опыт по теме — вернуть JSON для использования в логике
-        query = title
+        # Проверяем есть ли опыт по теме (для использования в логике)
+        query = title  # используем title как поисковый запрос
         found = {"positive": [], "negative": []}
         
         for subdir in ["positive", "negative"]:
@@ -208,51 +274,23 @@ def experience(
                         entry.get("title", ""),
                         entry.get("description", ""),
                         " ".join(entry.get("tags", [])),
+                        entry.get("solution", ""),
+                        entry.get("error_context", ""),
                     ]).lower()
                     
                     if query.lower() in search_text:
                         found[subdir].append({
                             "title": entry.get("title"),
                             "tags": entry.get("tags", []),
-                            "solution": entry.get("solution", ""),
-                            "error_context": entry.get("error_context", ""),
+                            "solution": entry.get("solution"),
+                            "error_context": entry.get("error_context"),
+                            "timestamp": entry.get("timestamp"),
                         })
                 except Exception:
                     pass
         
-        return json.dumps(found, ensure_ascii=False, indent=2)
+        # Возвращаем в формате для JSON парсинга
+        return json.dumps(found, ensure_ascii=False)
     
     else:
-        return f"Неизвестное действие: {action}. Используй: add_positive, add_negative, search, list, check"
-
-def _update_index(exp_dir: str):
-    """Обновить индексный файл"""
-    index_path = os.path.join(exp_dir, "index.json")
-    
-    index = {"positive": [], "negative": [], "last_updated": datetime.now().isoformat()}
-    
-    for subdir in ["positive", "negative"]:
-        subpath = os.path.join(exp_dir, subdir)
-        if not os.path.exists(subpath):
-            continue
-        
-        for filename in os.listdir(subpath):
-            if not filename.endswith(".json"):
-                continue
-            
-            filepath = os.path.join(subpath, filename)
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    entry = json.load(f)
-                
-                index[subdir].append({
-                    "filename": filename,
-                    "title": entry.get("title"),
-                    "tags": entry.get("tags", []),
-                    "timestamp": entry.get("timestamp"),
-                })
-            except Exception:
-                pass
-    
-    with open(index_path, "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, indent=2)
+        return f"❓ Неизвестное действие: {action}"
