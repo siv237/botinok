@@ -7,6 +7,8 @@ from tools.file_system import file_system_tool
 from tools.journal import journal_tool
 from tools.code_editor import code_editor
 from tools.shell_exec import shell_exec
+from tools.experience import experience
+from tools.github import github
 
 class ToolManager:
     def __init__(self):
@@ -264,6 +266,60 @@ class ToolManager:
                                 "max_bytes": {"type": "integer", "description": "Лимит вывода (байты)", "default": 256000}
                             },
                             "required": ["command"]
+                        }
+                    }
+                }
+            },
+
+            "experience": {
+                "function": experience,
+                "description": {
+                    "type": "function",
+                    "function": {
+                        "name": "experience",
+                        "description": "База опыта работы: записывает успешные решения и ошибки для избежания повторения. Опыт хранится глобально (~/.botinok/experience/). Использовать когда задача долго не решается и найдено решение.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["add_positive", "add_negative", "search", "list", "check"],
+                                    "description": "Действие: add_positive (записать успех), add_negative (записать ошибку), search (поиск), list (показать всё), check (проверить есть ли опыт)"
+                                },
+                                "title": {"type": "string", "description": "Краткое название (например 'Битый MP3 определяется как валидный')"},
+                                "description": {"type": "string", "description": "Что произошло"},
+                                "tags": {"type": "array", "items": {"type": "string"}, "description": "Теги для поиска [audio, mp3, wget]"},
+                                "solution": {"type": "string", "description": "Как решили проблему (для add_positive)"},
+                                "error_context": {"type": "string", "description": "Что пошло не так (для add_negative)"}
+                            },
+                            "required": ["action"]
+                        }
+                    }
+                }
+            },
+
+            "github": {
+                "function": github,
+                "description": {
+                    "type": "function",
+                    "function": {
+                        "name": "github",
+                        "description": "Работа с GitHub API: поиск репозиториев, получение информации, README, файлов, тегов и веток.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["search_repos", "get_repo", "get_readme", "get_file", "get_tags", "get_branches"],
+                                    "description": "Действие: search_repos (искать репозитории), get_repo (инфо о репо), get_readme (README), get_file (файл), get_tags (теги), get_branches (ветки)"
+                                },
+                                "query": {"type": "string", "description": "Поисковый запрос (для search_repos)"},
+                                "repo": {"type": "string", "description": "Репозиторий owner/repo"},
+                                "path": {"type": "string", "description": "Путь к файлу (для get_file)"},
+                                "branch": {"type": "string", "description": "Ветка (по умолчанию main)"},
+                                "per_page": {"type": "integer", "description": "Результатов на страницу (по умолчанию 5)"}
+                            },
+                            "required": ["action"]
                         }
                     }
                 }
