@@ -1437,7 +1437,13 @@ def _choose_or_resume_session(sm: SessionManager, stealth_mode: bool, default_su
                 ts = datetime.fromtimestamp(float(mtime)).strftime("%Y-%m-%d %H:%M:%S") if mtime else "unknown"
             except Exception:
                 ts = "unknown"
-            session_options.append((f"{name:<45} | {ts}", path))
+            preview = ""
+            if path and os.path.isdir(path):
+                preview = sm.load_first_user_prompt(path, max_chars=120)
+            if preview:
+                session_options.append((f"{name:<35} | {ts} | {preview}", path))
+            else:
+                session_options.append((f"{name:<45} | {ts}", path))
 
         picked = inquirer.prompt([
             inquirer.List(

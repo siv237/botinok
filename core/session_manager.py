@@ -4,6 +4,7 @@ import time
 import configparser
 from datetime import datetime
 import requests
+import re
 
 class SessionManager:
     def __init__(self):
@@ -88,6 +89,46 @@ class SessionManager:
                             if len(content) > max_chars:
                                 content = content[-max_chars:]
                             return content
+        except Exception:
+            pass
+
+        return ""
+
+    def load_first_user_prompt(self, session_path: str, max_chars: int = 120) -> str:
+        context_path = os.path.join(session_path, "context.json")
+        try:
+            if os.path.exists(context_path):
+                with open(context_path, "r", encoding="utf-8", errors="ignore") as f:
+                    ctx = json.load(f)
+                hist = ctx.get("history", []) if isinstance(ctx, dict) else []
+                for entry in hist:
+                    if isinstance(entry, dict) and entry.get("role") == "user":
+                        content = str(entry.get("content") or "").strip()
+                        if content:
+                            content = re.sub(r"\s+", " ", content)
+                            if len(content) > max_chars:
+                                content = content[:max_chars] + "..."
+                            return content
+        except Exception:
+            pass
+
+        response_path = os.path.join(session_path, "response.md")
+        try:
+            if os.path.exists(response_path):
+                with open(response_path, "r", encoding="utf-8", errors="ignore") as f:
+                    head = f.read(60_000)
+                m = re.search(r"^\s*prompt:\s*\|\s*\n(?P<body>(?:\s{2}.*\n)+)", head, re.MULTILINE)
+                if m:
+                    body = m.group("body")
+                    lines = []
+                    for ln in body.splitlines():
+                        lines.append(ln[2:] if ln.startswith("  ") else ln)
+                    content = "\n".join(lines).strip()
+                    content = re.sub(r"\s+", " ", content)
+                    if content:
+                        if len(content) > max_chars:
+                            content = content[:max_chars] + "..."
+                        return content
         except Exception:
             pass
 
