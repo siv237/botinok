@@ -1446,6 +1446,14 @@ def main():
         "- Для создания/изменения файлов проекта по умолчанию используй `code_editor` внутри session_path/project/ (если пользователь явно не указал другой путь)."
     )
 
+    session_location_msg = (
+        "Текущая папка сессии (session_path): "
+        f"{session_path}\n"
+        "Вся протоколировка и артефакты этой сессии сохраняются внутри этой папки. "
+        "Файлы создаваемого/редактируемого проекта по умолчанию размещай в: "
+        f"{os.path.join(session_path, 'project')}"
+    )
+
     dangerous_mode_msg = (
         "Dangerous-mode: ON (в этой сессии разрешены опасные инструменты: code_editor, shell_exec). "
         "shell_exec всегда требует подтверждение пользователя перед выполнением."
@@ -1454,6 +1462,7 @@ def main():
     )
     messages = [
         {"role": "system", "content": system_time_msg},
+        {"role": "system", "content": session_location_msg},
         {"role": "system", "content": tool_policy_msg},
         {"role": "system", "content": dangerous_mode_msg},
     ]
