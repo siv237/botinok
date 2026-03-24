@@ -112,7 +112,32 @@ class ToolManager:
                 "function": {
                     "name": "skills",
                     "description": "Менеджер AI скиллов",
-                    "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "search", "get", "add", "remove", "install", "run"]}, "name": {"type": "string"}, "query": {"type": "string"}}, "required": ["action"]}
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": [
+                                    "list",
+                                    "get",
+                                    "add",
+                                    "remove",
+                                    "run",
+                                    "search",
+                                    "clawhub",
+                                    "install-clawhub"
+                                ]
+                            },
+                            "name": {"type": "string"},
+                            "query": {"type": "string"},
+                            "url": {"type": "string"},
+                            "content": {"type": "string"},
+                            "task": {"type": "string"},
+                            "limit": {"type": "integer"},
+                            "sort": {"type": "string"}
+                        },
+                        "required": ["action"]
+                    }
                 }
             },
         }

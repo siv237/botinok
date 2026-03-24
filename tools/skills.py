@@ -261,12 +261,17 @@ def cmd_clawhub_search(query: str, limit: int = 10) -> list:
     print(f"ClawHub results for '{query}' (total: {len(results)}):\n")
     output = []
     for r in results:
-        name = r.get("name", "?")
-        desc = r.get("description", "N/A")[:60]
-        tags = ", ".join(r.get("tags", [])[:3])
-        stars = r.get("stars", 0)
-        output.append(f"{name} - {desc}...")
-        output.append(f"   Tags: {tags} | stars: {stars}")
+        # ClawHub API returns: displayName, summary, slug, tags
+        name = r.get("displayName") or r.get("name", "?")
+        desc = r.get("summary") or r.get("description", "N/A")
+        desc_short = desc[:80] + "..." if len(desc) > 80 else desc
+        slug = r.get("slug", "")
+        tags = r.get("tags", [])
+        tags_str = ", ".join(tags[:3]) if tags else "none"
+        output.append(f"{name}")
+        output.append(f"   {desc_short}")
+        output.append(f"   slug: {slug} | tags: {tags_str}")
+        output.append("")
     return output
 
 def cmd_clawhub_explore(limit: int = 10, sort: str = "newest") -> list:
@@ -280,11 +285,16 @@ def cmd_clawhub_explore(limit: int = 10, sort: str = "newest") -> list:
     print(f"Latest skills on ClawHub (sort: {sort}):\n")
     output = []
     for r in results:
-        name = r.get("name", "?")
-        desc = r.get("description", "N/A")[:60]
-        tags = ", ".join(r.get("tags", [])[:3])
-        output.append(f"{name} - {desc}...")
-        output.append(f"   Tags: {tags}")
+        name = r.get("displayName") or r.get("name", "?")
+        desc = r.get("summary") or r.get("description", "N/A")
+        desc_short = desc[:80] + "..." if len(desc) > 80 else desc
+        slug = r.get("slug", "")
+        tags = r.get("tags", [])
+        tags_str = ", ".join(tags[:3]) if tags else "none"
+        output.append(f"{name}")
+        output.append(f"   {desc_short}")
+        output.append(f"   slug: {slug} | tags: {tags_str}")
+        output.append("")
     return output
 
 # === MAIN SKILLS FUNCTION ===
@@ -320,7 +330,7 @@ def skills(action=None, name=None, query=None, url=None, content=None, task=None
                 result = None
             else:
                 result = cmd_run(name, task)
-        elif action == "clawhub":
+        elif action == "clawhub" or action == "search":
             if query:
                 result = cmd_clawhub_search(query, limit=limit or 10)
             elif name == "explore":
@@ -338,9 +348,16 @@ def skills(action=None, name=None, query=None, url=None, content=None, task=None
             print(f"Unknown action: {action}")
             result = None
     output = buf.getvalue()
-    if output.strip():
-        return output
-    return result
+    result_text = ""
+    if isinstance(result, list):
+        result_text = "\n".join(str(x) for x in result if x is not None)
+    elif result is not None:
+        result_text = str(result)
+
+    combined = (output or "") + (result_text if result_text else "")
+    if combined.strip():
+        return combined
+    return None
 
 if __name__ == "__main__":
     import sys
