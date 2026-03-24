@@ -496,12 +496,13 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
     
     # Подготовка инструментов
     tools = tm.get_tool_definitions()
+    tools_list = list(tools.values()) if isinstance(tools, dict) else (tools or [])
     
     payload = {
         "model": model,
         "messages": messages,
         "stream": True,
-        "tools": tools,
+        "tools": tools_list,
         "options": {
             "num_ctx": num_ctx,
         }
@@ -1288,12 +1289,13 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192):
     
     prompt = messages[-1]["content"] if messages else ""
     tools = tm.get_tool_definitions()
+    tools_list = list(tools.values()) if isinstance(tools, dict) else (tools or [])
     
     payload = {
         "model": model,
         "messages": messages,
         "stream": True,
-        "tools": tools,
+        "tools": tools_list,
         "options": {
             "num_ctx": num_ctx,
         }
@@ -1558,6 +1560,10 @@ def main():
         "Dangerous-mode: OFF (опасные инструменты отключены)."
     )
 
+    # Проверка сломанных инструментов
+    tm = ToolManager()
+    broken_tools_msg = tm.get_broken_tools_info() or ""
+
     resume_context_msg = ""
     if resume_last_answer:
         resume_context_msg = (
@@ -1572,6 +1578,9 @@ def main():
         {"role": "system", "content": tool_policy_msg},
         {"role": "system", "content": dangerous_mode_msg},
     ]
+
+    if broken_tools_msg:
+        messages.append({"role": "system", "content": broken_tools_msg})
 
     if resume_context_msg:
         messages.append({"role": "system", "content": resume_context_msg})
