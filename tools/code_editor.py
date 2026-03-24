@@ -38,7 +38,7 @@ def code_editor(
     new_text: Optional[str] = None,
     create: bool = False,
     expected_sha256: Optional[str] = None,
-    max_bytes: int = 2_000_000,
+    max_bytes: int = 20_000_000,
     session_path: Optional[str] = None,
 ) -> str:
     if action not in ("read", "write", "replace", "apply"):
@@ -59,7 +59,7 @@ def code_editor(
             return txt
 
         exists = os.path.exists(safe_path)
-        if not exists and not create:
+        if not exists and not create and action != "write":
             return f"Ошибка: файл не существует (create=false): {path}"
 
         before = b""

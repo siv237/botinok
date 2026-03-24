@@ -24,7 +24,7 @@ OLLAMA_PS_URL = "http://localhost:11434/api/ps"
 
 console = Console()
 
-TOOL_OUTPUT_MAX_CHARS = 5000
+TOOL_OUTPUT_MAX_CHARS = 100000
 
 HARD_CTX_PCT = 0.90
 REPEAT_LINE_WINDOW = 40
@@ -328,7 +328,8 @@ class BotVisualizer:
         self.prompt_eval_count = 0
         self.eval_count = 0
         self.session_ctx_est = 0
-        self.active_tools = [] # Список текущих вызовов инструментов
+        self.active_tools = []
+        self.is_proofreader = False
         
     def reset(self, prompt):
         self.prompt = prompt
@@ -381,9 +382,13 @@ class BotVisualizer:
 
     def get_header(self):
         danger_tag = " | DANGEROUS MODE: ON" if self.dangerous_mode else ""
+        agent_type = "PROOFREADER AGENT" if self.is_proofreader else "BOTINOK AGENT"
+        header_style = "bold black on yellow" if self.is_proofreader else "bold white on blue"
+        panel_style = "yellow" if self.is_proofreader else "blue"
+        
         return Panel(
-            Text(f"BOTINOK AGENT{danger_tag} | Model: {self.model} | Context: {self.num_ctx} | {self.vram_info}", justify="center", style="bold white on blue"),
-            style="blue"
+            Text(f"{agent_type}{danger_tag} | Model: {self.model} | Context: {self.num_ctx} | {self.vram_info}", justify="center", style=header_style),
+            style=panel_style
         )
 
     def get_content_panel(self, width=80, height=20):
@@ -479,7 +484,7 @@ class BotVisualizer:
             border_style="cyan"
         )
 
-def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis=None):
+def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis=None, read_only_mode=False):
     sm = SessionManager()
     tm = ToolManager()
     
@@ -496,6 +501,40 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
     
     # Подготовка инструментов
     tools = tm.get_tool_definitions()
+    
+    # Если включен режим read-only (например для корректора), фильтруем инструменты
+    if read_only_mode:
+        read_only_tools = {}
+        for name, desc in tools.items():
+            # Пропускаем shell_exec полностью
+            if name == "shell_exec":
+                continue
+            
+            # Для остальных инструментов, если у них есть action, оставляем только безопасные
+            if "function" in desc and "parameters" in desc["function"]:
+                params = desc["function"]["parameters"]
+                if "properties" in params and "action" in params["properties"]:
+                    actions = params.get("enum", []) # Corrected: action enum is often inside 'action' property itself or handled via type
+                    # In our ToolManager, actions are often in properties['action']['enum']
+                    prop_action = params["properties"].get("action", {})
+                    actions = prop_action.get("enum", [])
+                    
+                    # Оставляем только те действия, которые похожи на чтение/просмотр
+                    safe_actions = [a for a in actions if a in ("read", "list", "search", "grep", "info", "inspect", "tail", "unit_tail", "since", "query", "stats", "get", "get_repo", "get_readme", "get_file", "get_tags", "get_branches")]
+                    if safe_actions:
+                        # Создаем копию описания с ограниченными действиями
+                        new_desc = json.loads(json.dumps(desc))
+                        new_desc["function"]["parameters"]["properties"]["action"]["enum"] = safe_actions
+                        read_only_tools[name] = new_desc
+                    elif name in ("web_search", "open_url", "experience", "github"):
+                        # Fallback for tools that might not have explicit action enums in all cases but are safe
+                        read_only_tools[name] = desc
+                else:
+                    # Если у инструмента нет параметра action, но он сам по себе read-only
+                    if name in ("web_search", "open_url", "experience", "github"):
+                        read_only_tools[name] = desc
+        tools = read_only_tools
+
     tools_list = list(tools.values()) if isinstance(tools, dict) else (tools or [])
     
     payload = {
@@ -1010,6 +1049,10 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                         needs_confirm = True
                         if resolved and _is_within(project_dir, resolved):
                             needs_confirm = False
+                        
+                        # Read action inside session directory is ALWAYS safe.
+                        if func_name == "code_editor" and func_args.get("action") == "read" and _is_within(session_path, resolved):
+                            needs_confirm = False
 
                         # Store for later UI display.
                         func_args_display = _code_editor_args_for_display(session_path, func_args)
@@ -1283,12 +1326,36 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
             time.sleep(2)
             return messages
 
-def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192):
+def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, read_only_mode=False):
     sm = SessionManager()
     tm = ToolManager()
     
     prompt = messages[-1]["content"] if messages else ""
     tools = tm.get_tool_definitions()
+    
+    if read_only_mode:
+        read_only_tools = {}
+        for name, desc in tools.items():
+            if name == "shell_exec":
+                continue
+            if "function" in desc and "parameters" in desc["function"]:
+                params = desc["function"]["parameters"]
+                if "properties" in params and "action" in params["properties"]:
+                    prop_action = params["properties"].get("action", {})
+                    actions = prop_action.get("enum", [])
+                    
+                    safe_actions = [a for a in actions if a in ("read", "list", "search", "grep", "info", "inspect", "tail", "unit_tail", "since", "query", "stats", "get", "get_repo", "get_readme", "get_file", "get_tags", "get_branches")]
+                    if safe_actions:
+                        new_desc = json.loads(json.dumps(desc))
+                        new_desc["function"]["parameters"]["properties"]["action"]["enum"] = safe_actions
+                        read_only_tools[name] = new_desc
+                    elif name in ("web_search", "open_url", "experience", "github"):
+                        read_only_tools[name] = desc
+                else:
+                    if name in ("web_search", "open_url", "experience", "github"):
+                        read_only_tools[name] = desc
+        tools = read_only_tools
+
     tools_list = list(tools.values()) if isinstance(tools, dict) else (tools or [])
     
     payload = {
@@ -1472,6 +1539,65 @@ def _choose_or_resume_session(sm: SessionManager, stealth_mode: bool, default_su
 
     return sm.create_session(default_suffix), ""
 
+def run_proofreader_turn(model, session_path, num_ctx, developer_messages, vis=None):
+    """Выполняет один ход корректора."""
+    sm = SessionManager()
+    proofreader_history = sm.load_proofreader_history(session_path)
+    
+    # Подготовка контекста для корректора
+    # Мы передаем ему системный промпт, его историю и текущее состояние дел
+    if not proofreader_history:
+        proofreader_history.append({
+            "role": "system",
+            "content": (
+                "Ты — КОРРЕКТОР (Proofreader). Твоя задача — анализировать работу Исполнителя (разработчика). "
+                "Ты подключаешься после того, как Исполнитель выполнил запрос. "
+                "У тебя чистый контекст, но ты видишь логи сессии, протоколы и результат. "
+                "Изучи файлы в session_path, особенно response.md, thinking.md, tools.log. "
+                "Сделай заключение: что сделано правильно, а что нужно исправить. "
+                "Будь критичен, ищи зацикливания, ошибки в коде или логике. "
+                "Твое заключение будет передано Исполнителю для правок. "
+                "Ты должен помнить свои предыдущие замечания и проверять их выполнение."
+            )
+        })
+
+    # Формируем максимально краткий отчет для корректора
+    status_report = (
+        f"ОТЧЕТ ДЛЯ КОРРЕКТОРА:\n"
+        f"Папка сессии: {session_path}\n"
+        f"Задача Исполнителя была: {developer_messages[0].get('content')[:500] if developer_messages else 'Неизвестно'}\n"
+        "Твоя задача: самостоятельно изучить файлы в папке сессии (проект, логи, артефакты) "
+        "с помощью инструментов и вынести вердикт о качестве работы Исполнителя.\n"
+        "Используй `file_system action=list` для начала обзора."
+    )
+    
+    proofreader_history.append({"role": "user", "content": status_report})
+    
+    # Запускаем генерацию корректора (с инструментами только для чтения)
+    # Используем stealth mode для корректора внутри, или stream если хотим видеть процесс
+    if vis:
+        vis.status = "Proofreader is thinking..."
+        vis.model = model
+        vis.is_proofreader = True
+        # Для корректора создаем временные сообщения, чтобы не портить основной визуал
+        proof_messages = ask_ollama_stream(model, proofreader_history, session_path, "proofreader", num_ctx, vis, read_only_mode=True)
+        # Возвращаем оригинальные параметры в визуал после окончания
+        vis.is_proofreader = False
+    else:
+        proof_messages = ask_ollama_stealth(model, proofreader_history, session_path, "proofreader", num_ctx, read_only_mode=True)
+    
+    # Сохраняем обновленную историю корректора
+    sm.save_proofreader_history(session_path, proof_messages)
+    
+    # Возвращаем последнее заключение корректора
+    feedback = proof_messages[-1]["content"] if proof_messages else "No feedback from proofreader."
+    
+    # Сохраняем вердикт в отдельный файл артефакта, чтобы агент мог на него сослаться
+    verdict_file = f"proofreader_verdict_{int(time.time())}.md"
+    verdict_path = sm.save_artifact(session_path, verdict_file, feedback)
+    
+    return feedback, verdict_path
+
 def main():
     parser = argparse.ArgumentParser(description="BOTINOK AGENT - Interactive AI Assistant")
     
@@ -1488,6 +1614,7 @@ def main():
     parser.add_argument("--wizard", action="store_true", help="Запустить мастер настройки")
     parser.add_argument("--stealth", action="store_true", help="Минимальный вывод, только ответ")
     parser.add_argument("--dangerous", action="store_true", help="Разрешить опасные инструменты (редактирование файлов и выполнение команд) только в этой сессии")
+    parser.add_argument("--proofread", action="store_true", help="Включить режим корректора (цикл: Исполнитель -> Корректор)")
     
     args = parser.parse_args()
     
@@ -1631,11 +1758,26 @@ def main():
                 # В интерактивном режиме запрашиваем ввод
                 console.print(Panel(Text("Введите ваш вопрос (или 'exit' для выхода):", style="bold cyan"), border_style="cyan"))
                 prompt = console.input("[bold green]> [/bold green]")
-                
+
                 if prompt.lower() in ["exit", "quit", "выход"]:
                     break
                 if not prompt.strip():
                     continue
+
+            # Добавляем компактную памятку по инструментам ПЕРЕД началом хода (turn)
+            messages.append({
+                "role": "system",
+                "content": (
+                    "TOOL_USAGE_REMINDER:\n"
+                    "1. Чтение/Поиск: используй `file_system` (list/grep/info) или `code_editor` (read). "
+                    "НЕ используй `shell_exec` для простого чтения файлов.\n"
+                    "2. Редактирование: используй `code_editor` (write/apply/replace). "
+                    "НЕ используй `shell_exec` (sed/echo >) для правки кода.\n"
+                    "3. Специфические задачи: Сначала проверь `skills` (list), нет ли готового решения. "
+                    "Если нужно — установи подходящий скилл из базы.\n"
+                    "4. Порядок: Сначала изучи (list/read), потом планируй, потом меняй."
+                )
+            })
 
             missing_final_retries = 0
             while True:
@@ -1660,7 +1802,43 @@ def main():
                         console.print("\n" + "─" * console.width + "\n")
                     else:
                         console.print(Markdown(last_assistant_message))
-                        break
+                    
+                    # --- РЕЖИМ КОРРЕКТОРА ---
+                    if args.proofread:
+                        console.print("\n[bold magenta]>>> ПРОВЕРКА КОРРЕКТОРОМ...[/bold magenta]")
+                        feedback, verdict_path = run_proofreader_turn(model, session_path, num_ctx, messages, None if stealth_mode else vis)
+                        
+                        # Явно сбрасываем флаг корректора, чтобы UI вернулся в синий цвет
+                        if vis:
+                            vis.is_proofreader = False
+                        
+                        console.print("\n[bold magenta]ЗАКЛЮЧЕНИЕ КОРРЕКТОРА:[/bold magenta]")
+                        console.print(Markdown(feedback))
+                        console.print("\n" + "═" * console.width + "\n")
+                        
+                        fb_low = feedback.lower()
+                        exit_keywords = ["замечаний нет", "все верно", "исправлено", "проверка завершена", "принято", "замечаний не обнаружено", "все в порядке"]
+                        if any(kw in fb_low for kw in exit_keywords):
+                            console.print("[bold green]Корректор одобрил работу.[/bold green]")
+                            step_num += 1
+                            break
+                        
+                        if not stealth_mode:
+                            ans = Confirm.ask("[bold yellow]Выполнить правки согласно замечаниям корректора?[/bold yellow]", default=True)
+                            if not ans:
+                                step_num += 1
+                                break
+                        
+                        # Передаем замечания исполнителю с прямой ссылкой на файл вердикта
+                        prompt = (
+                            f"КОРРЕКТОР ОБНАРУЖИЛ ОШИБКИ/НЕДОЧЕТЫ.\n"
+                            f"Полный текст замечаний сохранен в файле: {verdict_path}\n\n"
+                            f"Краткое резюме:\n{feedback[:2000]}\n\n"
+                            "Исправь свою работу в соответствии с этими замечаниями. "
+                            "Обязательно прочитай файл вердикта, если резюме обрезано."
+                        )
+                        continue
+                    
                     step_num += 1
                     break
 

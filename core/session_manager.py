@@ -52,6 +52,7 @@ class SessionManager:
             os.makedirs(os.path.join(session_path, steps_subdir), exist_ok=True)
             os.makedirs(os.path.join(session_path, "artifacts"), exist_ok=True)
             os.makedirs(os.path.join(session_path, "project"), exist_ok=True)
+            os.makedirs(os.path.join(session_path, "proofreader"), exist_ok=True)
         except Exception:
             pass
 
@@ -167,6 +168,7 @@ class SessionManager:
         os.makedirs(os.path.join(session_path, steps_subdir))
         os.makedirs(os.path.join(session_path, "artifacts"))
         os.makedirs(os.path.join(session_path, "project"))
+        os.makedirs(os.path.join(session_path, "proofreader"))
         
         # Начальный контекст
         context = {
@@ -355,3 +357,25 @@ class SessionManager:
                 "ctx": metrics.get("context_used") if isinstance(metrics, dict) else None
             }
             f.write(json.dumps(perf_entry, ensure_ascii=False) + "\n")
+
+    def load_proofreader_history(self, session_path: str) -> list:
+        """Загружает историю сообщений корректора."""
+        path = os.path.join(session_path, "proofreader", "context.json")
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("history", [])
+            except Exception:
+                return []
+        return []
+
+    def save_proofreader_history(self, session_path: str, history: list):
+        """Сохраняет историю сообщений корректора."""
+        path = os.path.join(session_path, "proofreader", "context.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"history": history}, f, indent=4, ensure_ascii=False)
+        except Exception:
+            pass
