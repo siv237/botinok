@@ -159,7 +159,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
     echo_blue "Creating initial config.cfg..."
     cat <<EOF > "$CONFIG_FILE"
 [Ollama]
-BaseUrl = http://ollama.localnet:11434
+BaseUrl = http://localhost:11434
 DefaultModel = qwen3.5:4b
 DefaultContext = 8192
 RequestTimeout = 300

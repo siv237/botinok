@@ -19,8 +19,8 @@ from rich.prompt import Confirm
 from core.session_manager import SessionManager
 from core.tool_manager import ToolManager
 
-OLLAMA_CHAT_URL = "http://ollama.localnet:11434/api/chat"
-OLLAMA_PS_URL = "http://ollama.localnet:11434/api/ps"
+OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
+OLLAMA_PS_URL = "http://localhost:11434/api/ps"
 
 console = Console()
 
