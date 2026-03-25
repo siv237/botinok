@@ -315,12 +315,14 @@ class BotVisualizer:
         self.num_ctx = num_ctx
         self.dangerous_mode = dangerous_mode
         self.response_text = ""
+        self.streaming_tool_text = ""
         self.start_time = time.time()
         self.first_token_time = None
         self.last_chunk_time = None
         self.thinking_tokens = 0
         self.response_tokens = 0
         self.tool_tokens = 0 # Новое поле для учета токенов от инструментов
+        self.streaming_tool_tokens = 0 # Токены инструмента во время стриминга (из logprobs)
         self.status = "Initializing..."
         self.vram_info = "Checking VRAM..."
         self.current_vram_used = 0
@@ -334,12 +336,14 @@ class BotVisualizer:
     def reset(self, prompt):
         self.prompt = prompt
         self.response_text = ""
+        self.streaming_tool_text = ""
         self.start_time = time.time()
         self.first_token_time = None
         self.last_chunk_time = None
         self.thinking_tokens = 0
         self.response_tokens = 0
         self.tool_tokens = 0
+        self.streaming_tool_tokens = 0
         self.status = "Initializing..."
         self.prompt_eval_count = 0
         self.eval_count = 0
@@ -365,7 +369,7 @@ class BotVisualizer:
 
     @property
     def total_tokens(self):
-        return self.thinking_tokens + self.response_tokens + self.tool_tokens
+        return self.thinking_tokens + self.response_tokens + self.tool_tokens + self.streaming_tool_tokens
 
     def update_vram(self, sm):
         status = sm.get_ollama_status()
@@ -392,13 +396,28 @@ class BotVisualizer:
         )
 
     def get_content_panel(self, width=80, height=20):
-        # Используем встроенный механизм Rich для замера строк с учетом переносов
-        text_obj = Text(self.response_text, style="bold white")
+        # Собираем весь текст для отображения
+        full_display = self.response_text
+        if self.streaming_tool_text:
+            # Очищаем текст от возможных артефактов и добавляем заголовок
+            # Используем r-строку или двойное экранирование для Rich разметки
+            tool_content = self.streaming_tool_text.replace("[", "\\[").replace("]", "\\]")
+            full_display += f"\n\n[bold magenta]Streaming Tool Call JSON:[/bold magenta]\n{tool_content}"
+            
+        # Используем Text.from_markup только если есть теги, иначе обычный Text для скорости
+        if "[" in full_display:
+            try:
+                text_obj = Text.from_markup(full_display)
+            except Exception:
+                text_obj = Text(full_display, style="bold white")
+        else:
+            text_obj = Text(full_display, style="bold white")
+
         # console.render_lines делает всю магию учета переносов
         lines = list(text_obj.wrap(console, width - 4)) 
         
+        # Если количество строк превышает высоту окна, берем ПОСЛЕДНИЕ height строк
         if len(lines) > height:
-            # Берем последние height строк, чтобы видеть актуальный вывод
             display_text = Text("\n").join(lines[-height:])
         else:
             display_text = Text("\n").join(lines)
@@ -436,7 +455,8 @@ class BotVisualizer:
         table.add_row("[cyan]TTFT:[/cyan]", f"[bold yellow]{ttft}[/bold yellow]")
         table.add_row("[cyan]Thinking:[/cyan]", f"[bold yellow]{self.thinking_tokens}[/bold yellow]")
         table.add_row("[cyan]Response:[/cyan]", f"[bold green]{self.response_tokens}[/bold green]")
-        table.add_row("[cyan]Tool Ctx:[/cyan]", f"[bold magenta]{self.tool_tokens}[/bold magenta]")
+        table.add_row("[cyan]Stream Tool:[/cyan]", f"[bold magenta]{self.streaming_tool_tokens}[/bold magenta]")
+        table.add_row("[cyan]Final Tool:[/cyan]", f"[bold magenta]{self.tool_tokens}[/bold magenta]")
         table.add_row("[cyan]TPS:[/cyan]", f"[bold green]{tps:.2f}[/bold green]")
         
         # VRAM информация
@@ -541,6 +561,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
         "model": model,
         "messages": messages,
         "stream": True,
+        "logprobs": True,
         "tools": tools_list,
         "options": {
             "num_ctx": num_ctx,
@@ -811,6 +832,26 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                             if "eval_count" in chunk:
                                 vis.eval_count = chunk.get("eval_count", 0)
 
+                            # Обработка logprobs для стриминга инструментов
+                            logprobs = chunk.get("logprobs")
+                            if logprobs and isinstance(logprobs, list):
+                                for lp in logprobs:
+                                    token = lp.get("token", "")
+                                    vis.streaming_tool_tokens += 1
+                                    # Если мы еще не начали получать основной контент или мышление,
+                                    # значит это токены инструмента (JSON аргументы)
+                                    if not msg.get("content") and not msg.get("thinking"):
+                                        vis.streaming_tool_text += token
+                                        if not waiting_status_set:
+                                            vis.status = "Streaming Tool JSON..."
+                                            waiting_status_set = True
+                                        
+                                        # Гарантируем перерисовку UI при получении токенов инструмента
+                                        main_height = console.size.height - 12
+                                        main_width = int(console.size.width * 0.66)
+                                        layout["content"].update(vis.get_content_panel(width=main_width, height=max(5, main_height)))
+                                        layout["stats"].update(vis.get_stats_panel())
+
                             if not vis.first_token_time:
                                 vis.first_token_time = time.time()
 
@@ -828,6 +869,10 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                             # Обработка основного ответа
                             token = msg.get("content", "")
                             if token:
+                                # Очищаем текст стриминга инструмента при переходе к основному ответу
+                                if vis.streaming_tool_text:
+                                    vis.streaming_tool_text = ""
+                                    
                                 if not thinking_ended:
                                     thinking_ended = True
                                     thinking_stats = {
@@ -1018,6 +1063,9 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
 
                 # Обработка вызовов инструментов
                 vis.status = "Tool-mode parsing..."
+                # Очищаем текст стриминга после завершения генерации чанка
+                vis.streaming_tool_text = ""
+                
                 layout["stats"].update(vis.get_stats_panel())
                 live.refresh()
                 vis.status = "Calling Tools..."
@@ -1362,6 +1410,7 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
         "model": model,
         "messages": messages,
         "stream": True,
+        "logprobs": True,
         "tools": tools_list,
         "options": {
             "num_ctx": num_ctx,
@@ -1393,7 +1442,14 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
                     try:
                         chunk = json.loads(line.decode('utf-8'))
                         msg = chunk.get("message", {})
-                        
+
+                        # Обработка logprobs для стриминга инструментов (stealth mode)
+                        logprobs = chunk.get("logprobs")
+                        if logprobs and isinstance(logprobs, list):
+                            # В stealth моде просто пропускаем или можем логировать, 
+                            # но здесь нет визуализатора для обновления счетчиков
+                            pass
+
                         thought = msg.get("thinking", "")
                         if thought:
                             full_thinking += thought
