@@ -6,6 +6,7 @@ import threading
 import queue
 import requests
 import argparse
+import re
 from datetime import datetime
 import inquirer
 from rich.console import Console
@@ -25,6 +26,7 @@ OLLAMA_PS_URL = "http://localhost:11434/api/ps"
 console = Console()
 
 TOOL_OUTPUT_MAX_CHARS = 100000
+STREAM_TOOL_TEXT_MAX_CHARS = 12000
 
 HARD_CTX_PCT = 0.90
 REPEAT_LINE_WINDOW = 40
@@ -32,6 +34,33 @@ REPEAT_LINE_MIN_OCCURRENCES = 6
 MAX_TOOL_ROUNDS_PER_TURN = 80
 MAX_AUTO_RECOVERIES_PER_TURN = 2
 MISSING_FINAL_AUTO_CONTINUE_MAX = 2
+
+_TOOL_STREAM_TAG_RE = re.compile(
+    r"(?:<\|[^\n\r]*?\|>|</?[^>\n\r]+?>)",
+    re.IGNORECASE,
+)
+
+def _trim_tail(text: str, max_chars: int) -> str:
+    if not text or max_chars <= 0:
+        return "" if not text else str(text)
+    text = str(text)
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+def _tool_stream_has_payload(text: str) -> bool:
+    """True если стриминг инструмента содержит хоть что-то кроме пробелов/тегов."""
+    if not text:
+        return False
+    s = str(text)
+    # Remove known special/model tags like <|...|>, <tool_call>, </tool_call>, etc.
+    s = _TOOL_STREAM_TAG_RE.sub("", s)
+    # Remove punctuation that often appears as scaffolding.
+    s = s.replace("{", "").replace("}", "").replace("[", "").replace("]", "")
+    s = s.replace("\"", "").replace("'", "").replace(":", "").replace(",", "")
+    s = "".join(ch for ch in s if not ch.isspace())
+    # If there's at least one alnum, consider it real payload.
+    return any(ch.isalnum() for ch in s)
 
 def _estimate_tokens(text: str) -> int:
     if not text:
@@ -303,7 +332,7 @@ def create_layout():
         Layout(name="right", ratio=1)
     )
     layout["right"].split_column(
-        Layout(name="stats", size=12),
+        Layout(name="stats", ratio=1),
         Layout(name="tools_panel", ratio=1)
     )
     return layout
@@ -398,10 +427,11 @@ class BotVisualizer:
     def get_content_panel(self, width=80, height=20):
         # Собираем весь текст для отображения
         full_display = self.response_text
-        if self.streaming_tool_text:
+        if self.streaming_tool_text and _tool_stream_has_payload(self.streaming_tool_text):
             # Очищаем текст от возможных артефактов и добавляем заголовок
             # Используем r-строку или двойное экранирование для Rich разметки
-            tool_content = self.streaming_tool_text.replace("[", "\\[").replace("]", "\\]")
+            tool_content = _trim_tail(self.streaming_tool_text, STREAM_TOOL_TEXT_MAX_CHARS)
+            tool_content = tool_content.replace("[", "\\[").replace("]", "\\]")
             full_display += f"\n\n[bold magenta]Streaming Tool Call JSON:[/bold magenta]\n{tool_content}"
             
         # Используем Text.from_markup только если есть теги, иначе обычный Text для скорости
@@ -460,20 +490,30 @@ class BotVisualizer:
         table.add_row("[cyan]TPS:[/cyan]", f"[bold green]{tps:.2f}[/bold green]")
         
         # VRAM информация
-        vram_pct = (self.current_vram_used / self.total_vram) * 100
-        vram_style = "green" if vram_pct < 70 else "yellow" if vram_pct < 90 else "red"
-        table.add_row("[cyan]VRAM:[/cyan]", f"[{vram_style}]{self.current_vram_used:.2f}GB ({vram_pct:.1f}%)[/{vram_style}]")
+        table.add_row("[cyan]VRAM:[/cyan]", f"[bold yellow]{self.current_vram_used:.2f}GB[/bold yellow]")
+        
+        # Разделитель
+        table.add_row("", "")
         
         session_ctx_pct = (self.session_ctx_est / self.num_ctx) * 100 if self.num_ctx > 0 else 0
         session_ctx_style = "green" if session_ctx_pct < 70 else "yellow" if session_ctx_pct < 90 else "red"
         table.add_row("[cyan]SessionCtx:[/cyan]", f"[{session_ctx_style}]{self.session_ctx_est}/{self.num_ctx} ({session_ctx_pct:.1f}%)[/{session_ctx_style}]")
-
+        
         last_req_ctx_used = self.prompt_eval_count + self.eval_count
         last_req_ctx_pct = (last_req_ctx_used / self.num_ctx) * 100 if self.num_ctx > 0 else 0
         last_req_ctx_style = "green" if last_req_ctx_pct < 70 else "yellow" if last_req_ctx_pct < 90 else "red"
         table.add_row("[cyan]LastReqCtx:[/cyan]", f"[{last_req_ctx_style}]{last_req_ctx_used}/{self.num_ctx} ({last_req_ctx_pct:.1f}%)[/{last_req_ctx_style}]")
         
-        return Panel(table, title="[bold yellow]Performance[/bold yellow]", border_style="yellow")
+        # Индикатор общего заполнения окна (прогресс-бар)
+        table.add_row("", "")
+        table.add_row("[bold cyan]Context Window Fill:[/bold cyan]", "")
+        
+        bar_width = 20
+        filled = int(bar_width * session_ctx_pct / 100) if session_ctx_pct <= 100 else bar_width
+        bar = "█" * filled + "░" * (bar_width - filled)
+        table.add_row("", f"[{session_ctx_style}]{bar} {session_ctx_pct:.1f}%[/{session_ctx_style}]")
+        
+        return Panel(table, title="[bold yellow]Performance[/bold yellow]", border_style="yellow", expand=True)
 
     def get_tools_panel(self):
         if not self.active_tools:
@@ -837,11 +877,15 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                             if logprobs and isinstance(logprobs, list):
                                 for lp in logprobs:
                                     token = lp.get("token", "")
+                                    if token is None:
+                                        token = ""
                                     vis.streaming_tool_tokens += 1
                                     # Если мы еще не начали получать основной контент или мышление,
                                     # значит это токены инструмента (JSON аргументы)
                                     if not msg.get("content") and not msg.get("thinking"):
-                                        vis.streaming_tool_text += token
+                                        if token:
+                                            vis.streaming_tool_text += str(token)
+                                            vis.streaming_tool_text = _trim_tail(vis.streaming_tool_text, STREAM_TOOL_TEXT_MAX_CHARS)
                                         if not waiting_status_set:
                                             vis.status = "Streaming Tool JSON..."
                                             waiting_status_set = True
