@@ -47,3 +47,4 @@ config.cfg
 .idea/
 .windsurf/
 .browser_profile/
+.tmp
