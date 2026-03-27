@@ -35,6 +35,36 @@ MAX_TOOL_ROUNDS_PER_TURN = 80
 MAX_AUTO_RECOVERIES_PER_TURN = 2
 MISSING_FINAL_AUTO_CONTINUE_MAX = 2
 
+# Models that are known to not support the `tools` field in Ollama /api/chat.
+MODELS_NO_TOOLS = set()
+
+def _ollama_error_indicates_no_tools(error_msg: str) -> bool:
+    if not error_msg:
+        return False
+    msg = str(error_msg).lower()
+    return (
+        "does not support tools" in msg
+        or "doesn't support tools" in msg
+        or "not support tools" in msg
+    )
+
+def _ensure_chat_only_system_message(messages: list) -> None:
+    if not messages:
+        return
+    marker = "CHAT_ONLY_MODE"
+    for m in messages:
+        if m.get("role") == "system" and marker in str(m.get("content", "")):
+            return
+    messages.append({
+        "role": "system",
+        "content": (
+            f"{marker}\n"
+            "В этом режиме инструменты недоступны (tool-calling отключён). "
+            "Не предлагай и не описывай использование инструментов, файловых операций или команд. "
+            "Отвечай только текстом и, если нужно, проси пользователя выполнить действия вручную."
+        ),
+    })
+
 _TOOL_STREAM_TAG_RE = re.compile(
     r"(?:<\|[^\n\r]*?\|>|</?[^>\n\r]+?>)",
     re.IGNORECASE,
@@ -604,11 +634,14 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
         "messages": messages,
         "stream": True,
         "logprobs": True,
-        "tools": tools_list,
         "options": {
             "num_ctx": num_ctx,
         }
     }
+
+    # Some Ollama models don't support tools; for them we run chat-only mode.
+    if model not in MODELS_NO_TOOLS:
+        payload["tools"] = tools_list
 
     with Live(layout, refresh_per_second=10, screen=False, auto_refresh=True) as live:
         # Асинхронная подготовка (VRAM, очистка) чтобы UI не висел
@@ -708,10 +741,17 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     sm.update_context(session_path, "user", cont_user["content"])
                     continue
 
+                if model in MODELS_NO_TOOLS:
+                    _ensure_chat_only_system_message(messages)
+
                 prepared = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=num_ctx)
                 payload["messages"] = prepared
                 if vis is not None:
                     vis.session_ctx_est = _estimate_messages_tokens(prepared)
+
+                # If we discovered this model can't do tools, ensure payload doesn't include them.
+                if model in MODELS_NO_TOOLS and payload.get("tools") is not None:
+                    payload.pop("tools", None)
                 # Создаем поток для выполнения POST запроса, чтобы не блокировать UI на этапе 'Connecting'
                 response_queue = queue.Queue()
                 def make_request():
@@ -762,6 +802,20 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                             error_text = (response.text or "")
                         except Exception:
                             error_text = ""
+
+                    # Auto fallback: if model doesn't support tools, retry without tools once.
+                    if (
+                        response.status_code == 400
+                        and _ollama_error_indicates_no_tools(error_msg)
+                        and payload.get("tools")
+                    ):
+                        MODELS_NO_TOOLS.add(model)
+                        _ensure_chat_only_system_message(messages)
+                        payload.pop("tools", None)
+                        vis.status = "Model has no tools support: chat-only mode"
+                        layout["stats"].update(vis.get_stats_panel())
+                        live.refresh()
+                        continue
 
                     vis.status = f"Ollama Error: {error_msg}"
 
@@ -1100,6 +1154,10 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     sm.update_context(session_path, "assistant", summary)
                     sm.update_context(session_path, "user", cont_user["content"])
                     continue
+
+                # In chat-only mode ignore any tool calls if the model emitted them.
+                if model in MODELS_NO_TOOLS and tool_calls:
+                    tool_calls = []
 
                 # Если нет вызовов инструментов, выходим из цикла генерации
                 if not tool_calls:
@@ -1458,11 +1516,14 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
         "messages": messages,
         "stream": True,
         "logprobs": True,
-        "tools": tools_list,
         "options": {
             "num_ctx": num_ctx,
         }
     }
+
+    # Some Ollama models don't support tools; for them we run chat-only mode.
+    if model not in MODELS_NO_TOOLS:
+        payload["tools"] = tools_list
 
     sm.write_file_header(session_path, "thinking.md", model, num_ctx, prompt)
     sm.write_file_header(session_path, "response.md", model, num_ctx, prompt)
@@ -1473,10 +1534,42 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
     
     try:
         while True:
+            if model in MODELS_NO_TOOLS:
+                _ensure_chat_only_system_message(messages)
+
             payload["messages"] = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=num_ctx)
+
+            # If we discovered this model can't do tools, ensure payload doesn't include them.
+            if model in MODELS_NO_TOOLS and payload.get("tools") is not None:
+                payload.pop("tools", None)
+
             response = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300), verify=verify_ssl)
             
             if response.status_code != 200:
+                error_msg = ""
+                try:
+                    data = response.json()
+                    if isinstance(data, dict):
+                        error_msg = data.get("error", "")
+                    else:
+                        error_msg = str(data)
+                except Exception:
+                    try:
+                        error_msg = response.text or ""
+                    except Exception:
+                        error_msg = ""
+
+                # Auto fallback: if model doesn't support tools, retry without tools once.
+                if (
+                    response.status_code == 400
+                    and _ollama_error_indicates_no_tools(error_msg)
+                    and payload.get("tools")
+                ):
+                    MODELS_NO_TOOLS.add(model)
+                    _ensure_chat_only_system_message(messages)
+                    payload.pop("tools", None)
+                    continue
+
                 return messages
 
             full_response = ""
