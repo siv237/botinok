@@ -69,6 +69,127 @@ def _get_version_info():
     except Exception:
         return "unknown", "????"
 
+
+def _check_remote_version():
+    """Проверяет есть ли обновления в удаленном репозитории."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    try:
+        # Проверяем что это git репозиторий
+        git_check = subprocess.run(
+            ['git', 'rev-parse', '--git-dir'],
+            capture_output=True, text=True, cwd=script_dir, timeout=5
+        )
+        if git_check.returncode != 0:
+            return None, "Not a git repository"
+        
+        # Получаем текущий хэш
+        local_hash = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, cwd=script_dir, timeout=5
+        )
+        if local_hash.returncode != 0:
+            return None, "Failed to get local version"
+        local_hash = local_hash.stdout.strip()
+        
+        # Получаем информацию об удаленном origin
+        remote_url = subprocess.run(
+            ['git', 'remote', 'get-url', 'origin'],
+            capture_output=True, text=True, cwd=script_dir, timeout=5
+        )
+        if remote_url.returncode != 0:
+            return None, "No remote origin configured"
+        
+        # Fetch с удаленного репозитория (без изменения локальных файлов)
+        fetch_result = subprocess.run(
+            ['git', 'fetch', 'origin', '--quiet'],
+            capture_output=True, text=True, cwd=script_dir, timeout=30
+        )
+        if fetch_result.returncode != 0:
+            return None, f"Failed to fetch: {fetch_result.stderr}"
+        
+        # Получаем хэш последнего коммита на origin/main (или origin/master)
+        for branch in ['main', 'master']:
+            remote_hash = subprocess.run(
+                ['git', 'rev-parse', f'origin/{branch}'],
+                capture_output=True, text=True, cwd=script_dir, timeout=5
+            )
+            if remote_hash.returncode == 0:
+                remote_hash = remote_hash.stdout.strip()
+                break
+        else:
+            return None, "Could not find origin/main or origin/master"
+        
+        # Получаем дату и хэш удаленной версии для отображения
+        remote_info = subprocess.run(
+            ['git', 'log', '-1', '--format=%cd | %h', '--date=format:%d.%m.%Y', remote_hash],
+            capture_output=True, text=True, cwd=script_dir, timeout=5
+        )
+        remote_display = remote_info.stdout.strip() if remote_info.returncode == 0 else "unknown"
+        
+        # Проверяем отличаются ли хэши
+        if local_hash != remote_hash:
+            # Проверяем можно ли сделать fast-forward (без конфликтов)
+            merge_base = subprocess.run(
+                ['git', 'merge-base', 'HEAD', remote_hash],
+                capture_output=True, text=True, cwd=script_dir, timeout=5
+            )
+            if merge_base.returncode == 0:
+                merge_base = merge_base.stdout.strip()
+                if merge_base == local_hash:
+                    return {
+                        'has_update': True,
+                        'local_hash': local_hash[:8],
+                        'remote_hash': remote_hash[:8],
+                        'remote_display': remote_display,
+                        'can_fast_forward': True,
+                        'local_date': _COMMIT_DATE,
+                    }, None
+                else:
+                    # Есть отхождения от main
+                    return {
+                        'has_update': True,
+                        'local_hash': local_hash[:8],
+                        'remote_hash': remote_hash[:8],
+                        'remote_display': remote_display,
+                        'can_fast_forward': False,
+                        'local_date': _COMMIT_DATE,
+                    }, None
+            else:
+                return None, "Failed to check merge status"
+        else:
+            return {'has_update': False, 'local_date': _COMMIT_DATE, 'remote_display': remote_display}, None
+            
+    except Exception as e:
+        return None, str(e)
+
+
+def _perform_update():
+    """Выполняет git pull для обновления."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    try:
+        # Определяем текущую ветку
+        branch_result = subprocess.run(
+            ['git', 'branch', '--show-current'],
+            capture_output=True, text=True, cwd=script_dir, timeout=5
+        )
+        current_branch = branch_result.stdout.strip() if branch_result.returncode == 0 else "main"
+        
+        # Делаем pull
+        pull_result = subprocess.run(
+            ['git', 'pull', 'origin', current_branch],
+            capture_output=True, text=True, cwd=script_dir, timeout=60
+        )
+        
+        if pull_result.returncode == 0:
+            return True, pull_result.stdout
+        else:
+            return False, pull_result.stderr
+    except Exception as e:
+        return False, str(e)
+
+
 # Получаем версию при запуске
 _COMMIT_DATE, _COMMIT_HASH = _get_version_info()
 _BOTINOK_VERSION = f"0.2 | {_COMMIT_DATE} | {_COMMIT_HASH}"
@@ -1871,8 +1992,57 @@ def main():
     parser.add_argument("--dangerous", action="store_true", help="Разрешить опасные инструменты (редактирование файлов и выполнение команд) только в этой сессии")
     parser.add_argument("--proofread", action="store_true", help="Включить режим корректора (цикл: Исполнитель -> Корректор)")
     parser.add_argument("--debug", action="store_true", help="Включить отладочный вывод")
+    parser.add_argument("--update", action="store_true", help="Проверить и установить обновления из git")
     
     args = parser.parse_args()
+    
+    # Обработка обновления
+    if args.update:
+        console.print("[bold cyan]Проверка обновлений BOTINOK...[/bold cyan]")
+        
+        result, error = _check_remote_version()
+        
+        if error:
+            console.print(f"[bold red]Ошибка проверки обновлений:[/bold red] {error}")
+            # Если это установленная версия (не git), предлагаем переустановить
+            if "Not a git repository" in error:
+                console.print("[yellow]Похоже BOTINOK установлен не из git.[/yellow]")
+                console.print("[yellow]Для обновления запустите:[/yellow]")
+                console.print("[green]  curl -sSL https://raw.githubusercontent.com/siv237/botinok/main/install.sh | bash[/green]")
+            return
+        
+        if not result['has_update']:
+            console.print(f"[bold green]У вас актуальная версия![/bold green]")
+            console.print(f"[cyan]Текущая версия:[/cyan] {result['local_date']} | {_COMMIT_HASH}")
+            return
+        
+        # Есть обновление
+        console.print(f"\n[bold yellow]Доступно обновление![/bold yellow]")
+        console.print(f"[cyan]Текущая версия:[/cyan] {result['local_date']} | {result['local_hash']}")
+        console.print(f"[green]Новая версия:[/green] {result['remote_display']}")
+        
+        if not result['can_fast_forward']:
+            console.print("[yellow]\nВнимание: у вас есть локальные изменения, отсутствующие в основной ветке.[/yellow]")
+            console.print("[yellow]Обновление может потребовать ручного разрешения конфликтов.[/yellow]")
+        
+        # Спрашиваем подтверждение
+        from rich.prompt import Confirm
+        if Confirm.ask("\n[bold cyan]Установить обновление?[/bold cyan]", default=True):
+            console.print("[bold cyan]Обновление...[/bold cyan]")
+            success, output = _perform_update()
+            
+            if success:
+                console.print("[bold green]Обновление успешно установлено![/bold green]")
+                console.print(f"[dim]{output}[/dim]")
+                console.print("\n[bold yellow]Перезапустите BOTINOK для применения изменений.[/bold yellow]")
+            else:
+                console.print("[bold red]Ошибка при обновлении:[/bold red]")
+                console.print(f"[red]{output}[/red]")
+                console.print("[yellow]Попробуйте обновить вручную:[/yellow]")
+                console.print("[green]  git pull origin main[/green]")
+        else:
+            console.print("[yellow]Обновление отменено.[/yellow]")
+        return
     
     if args.wizard:
         from core.config_wizard import ConfigWizard
