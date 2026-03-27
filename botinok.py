@@ -696,7 +696,12 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
     if model not in MODELS_NO_TOOLS:
         payload["tools"] = tools_list
 
-    with Live(layout, refresh_per_second=10, screen=False, auto_refresh=True) as live:
+    # Настройки для минимизации мерцания в SSH (всегда slow mode)
+    refresh_rate = 10
+    auto_refresh = True
+    use_screen = True  # Альтернативный буфер терминала - меньше мерцания
+
+    with Live(layout, refresh_per_second=refresh_rate, screen=use_screen, auto_refresh=auto_refresh) as live:
         # Асинхронная подготовка (VRAM, очистка) чтобы UI не висел
         prep_queue = queue.Queue()
         def background_prep():
