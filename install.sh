@@ -66,8 +66,19 @@ check_root() {
 
 install_dependencies() {
     echo_blue "Checking system dependencies..."
-    apt-get update -y
-    apt-get install -y python3 python3-venv python3-pip lynx curl git ca-certificates
+    
+    # Detect package manager
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y
+        apt-get install -y python3 python3-venv python3-pip lynx curl git ca-certificates
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y python3 python3-virtualenv python3-pip lynx curl git ca-certificates
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y python3 python3-virtualenv python3-pip lynx curl git ca-certificates
+    else
+        echo_red "No supported package manager found (apt-get, dnf, or yum)"
+        exit 1
+    fi
 }
 
 uninstall() {
@@ -90,11 +101,11 @@ check_root
 
 echo_blue "Starting BOTINOK installation/update..."
 
-# Detect OS
-if [ -f /etc/debian_version ]; then
-    echo_green "Debian-based system detected."
+# Detect package manager instead of OS
+if command -v apt-get >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+    echo_green "Supported package manager detected."
 else
-    echo_red "This script is designed for Debian-based distributions."
+    echo_red "No supported package manager found (apt-get, dnf, or yum)."
     exit 1
 fi
 
