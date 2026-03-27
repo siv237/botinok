@@ -11,11 +11,14 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
- BOTINOK_VERSION="0.1 (2026-03-21)"
+BOTINOK_VERSION="0.1 (2026-03-21)"
 
 INSTALL_DIR="/opt/botinok"
-# Detect BIN_DIR based on distro
-if command -v apt-get >/dev/null 2>&1; then
+OS_NAME="$(uname -s 2>/dev/null || echo unknown)"
+# Detect BIN_DIR based on OS/distro
+if [ "$OS_NAME" = "Darwin" ]; then
+    BIN_DIR="/usr/local/bin"
+elif command -v apt-get >/dev/null 2>&1; then
     BIN_DIR="/usr/local/bin"
 else
     # RHEL/CentOS - /usr/local/bin not in root's PATH by default
@@ -73,7 +76,28 @@ check_root() {
 install_dependencies() {
     echo_blue "Checking system dependencies..."
     
-    # Detect package manager
+    if [ "$OS_NAME" = "Darwin" ]; then
+        if ! command -v brew >/dev/null 2>&1; then
+            echo_red "Homebrew not found. Install it first: https://brew.sh"
+            exit 1
+        fi
+        if [ "$EUID" -eq 0 ]; then
+            BREW_USER="${SUDO_USER:-}"
+            if [ -n "$BREW_USER" ] && [ "$BREW_USER" != "root" ]; then
+                sudo -u "$BREW_USER" brew update
+                sudo -u "$BREW_USER" brew install python3 lynx git curl
+            else
+                echo_red "Do not run Homebrew as root. Run installer via sudo from a normal user (so SUDO_USER is set), or install dependencies manually with brew."
+                exit 1
+            fi
+        else
+            brew update
+            brew install python3 lynx git curl
+        fi
+        return 0
+    fi
+
+    # Detect package manager (Linux)
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -y
         apt-get install -y python3 python3-venv python3-pip lynx curl git ca-certificates
@@ -107,8 +131,10 @@ check_root
 
 echo_blue "Starting BOTINOK installation/update..."
 
-# Detect package manager instead of OS
-if command -v apt-get >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+# Detect supported platform
+if [ "$OS_NAME" = "Darwin" ]; then
+    echo_green "macOS detected."
+elif command -v apt-get >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
     echo_green "Supported package manager detected."
 else
     echo_red "No supported package manager found (apt-get, dnf, or yum)."
@@ -178,7 +204,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
 [Ollama]
 BaseUrl = http://localhost:11434
 DefaultModel = qwen3.5:4b
-DefaultContext = 8192
+DefaultContext = 16384
 RequestTimeout = 300
 
 [Storage]

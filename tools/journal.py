@@ -1,6 +1,7 @@
 import re
 import json
 import subprocess
+import platform
 from typing import Optional, List, Dict
 
 
@@ -16,6 +17,22 @@ def _run_journalctl(argv: List[str], max_bytes: int = 256_000) -> str:
         return f"Ошибка: journalctl не найден"
     except subprocess.TimeoutExpired:
         return "Ошибка: journalctl timeout"
+    except Exception as e:
+        return f"Ошибка: {str(e)}"
+
+
+def _run_log_show(argv: List[str], max_bytes: int = 256_000) -> str:
+    try:
+        cp = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        out = (cp.stdout or "") + ("\n" + cp.stderr if cp.stderr else "")
+        data = out.encode("utf-8", errors="ignore")
+        if len(data) > max_bytes:
+            out = data[:max_bytes].decode("utf-8", errors="ignore") + "\n...[TRUNCATED_BY_MAX_BYTES]"
+        return out.strip() if out.strip() else "(no output)"
+    except FileNotFoundError:
+        return "Ошибка: log не найден"
+    except subprocess.TimeoutExpired:
+        return "Ошибка: log timeout"
     except Exception as e:
         return f"Ошибка: {str(e)}"
 
@@ -52,6 +69,21 @@ def _build_base_args(
     if priority:
         argv.extend(["-p", priority])
 
+    return argv
+
+
+def _build_macos_args(
+    unit: Optional[str],
+    since: Optional[str],
+    until: Optional[str],
+) -> List[str]:
+    argv: List[str] = ["log", "show", "--style", "syslog", "--color", "none"]
+    if since:
+        argv.extend(["--start", since])
+    if until:
+        argv.extend(["--end", until])
+    if unit:
+        argv.extend(["--predicate", f'process == "{unit}"'])
     return argv
 
 
@@ -130,6 +162,11 @@ def journal_tool(
     act = (action or "").strip().lower()
 
     if act == "tail":
+        if platform.system() == "Darwin":
+            argv = _build_macos_args(unit=None, since=since, until=until)
+            raw = _run_log_show(argv, max_bytes=max_bytes)
+            trimmed = "\n".join(raw.splitlines()[-lines:]) if lines > 0 else raw
+            return _filter_lines(trimmed, grep=grep, regex=regex, max_lines=max_lines)
         argv = _build_base_args(unit=None, since=None, until=None, boot=boot, priority=priority, output=output, no_pager=True)
         argv.extend(["-n", str(lines)])
         raw = _run_journalctl(argv, max_bytes=max_bytes)
@@ -138,6 +175,11 @@ def journal_tool(
     if act == "unit_tail":
         if not unit:
             return "Ошибка: unit обязателен для action='unit_tail'"
+        if platform.system() == "Darwin":
+            argv = _build_macos_args(unit=unit, since=since, until=until)
+            raw = _run_log_show(argv, max_bytes=max_bytes)
+            trimmed = "\n".join(raw.splitlines()[-lines:]) if lines > 0 else raw
+            return _filter_lines(trimmed, grep=grep, regex=regex, max_lines=max_lines)
         argv = _build_base_args(unit=unit, since=None, until=None, boot=boot, priority=priority, output=output, no_pager=True)
         argv.extend(["-n", str(lines)])
         raw = _run_journalctl(argv, max_bytes=max_bytes)
@@ -146,6 +188,11 @@ def journal_tool(
     if act == "since":
         if not since:
             return "Ошибка: since обязателен для action='since'"
+        if platform.system() == "Darwin":
+            argv = _build_macos_args(unit=unit, since=since, until=until)
+            raw = _run_log_show(argv, max_bytes=max_bytes)
+            trimmed = "\n".join(raw.splitlines()[-lines:]) if lines > 0 else raw
+            return _filter_lines(trimmed, grep=grep, regex=regex, max_lines=max_lines)
         argv = _build_base_args(unit=unit, since=since, until=until, boot=boot, priority=priority, output=output, no_pager=True)
         argv.extend(["-n", str(lines)])
         raw = _run_journalctl(argv, max_bytes=max_bytes)
@@ -153,6 +200,11 @@ def journal_tool(
 
     if act == "query":
         # query = since (если задан) иначе tail
+        if platform.system() == "Darwin":
+            argv = _build_macos_args(unit=unit, since=since, until=until)
+            raw = _run_log_show(argv, max_bytes=max_bytes)
+            trimmed = "\n".join(raw.splitlines()[-lines:]) if lines > 0 else raw
+            return _filter_lines(trimmed, grep=grep, regex=regex, max_lines=max_lines)
         if since:
             argv = _build_base_args(unit=unit, since=since, until=until, boot=boot, priority=priority, output=output, no_pager=True)
         else:
@@ -163,12 +215,17 @@ def journal_tool(
 
     if act == "stats":
         # берём окно как в query и считаем грубую статистику
-        if since:
-            argv = _build_base_args(unit=unit, since=since, until=until, boot=boot, priority=priority, output=output, no_pager=True)
+        if platform.system() == "Darwin":
+            argv = _build_macos_args(unit=unit, since=since, until=until)
+            raw = _run_log_show(argv, max_bytes=max_bytes)
+            raw = "\n".join(raw.splitlines()[-lines:]) if lines > 0 else raw
         else:
-            argv = _build_base_args(unit=unit, since=None, until=None, boot=boot, priority=priority, output=output, no_pager=True)
-        argv.extend(["-n", str(lines)])
-        raw = _run_journalctl(argv, max_bytes=max_bytes)
+            if since:
+                argv = _build_base_args(unit=unit, since=since, until=until, boot=boot, priority=priority, output=output, no_pager=True)
+            else:
+                argv = _build_base_args(unit=unit, since=None, until=None, boot=boot, priority=priority, output=output, no_pager=True)
+            argv.extend(["-n", str(lines)])
+            raw = _run_journalctl(argv, max_bytes=max_bytes)
         filtered = _filter_lines(raw, grep=grep, regex=regex, max_lines=max_lines)
         if filtered.startswith("Ошибка"):
             return filtered
