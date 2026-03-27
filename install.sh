@@ -161,8 +161,8 @@ fi
 # Set up Virtual Environment
 echo_blue "Setting up Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
-"$INSTALL_DIR/venv/bin/pip" install --upgrade pip
-"$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
+"$INSTALL_DIR/venv/bin/pip" install --upgrade pip --trusted-host pypi.org --trusted-host files.pythonhosted.org
+"$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt" --trusted-host pypi.org --trusted-host files.pythonhosted.org
 
 # Configuration
 CONFIG_FILE="$INSTALL_DIR/config.cfg"
