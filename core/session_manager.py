@@ -9,8 +9,11 @@ import re
 class SessionManager:
     def __init__(self):
         self.config = configparser.ConfigParser()
-        # Конфиг один общий в /opt/botinok для всех пользователей
-        self.config_path = os.getenv("BOTINOK_CONFIG", "/opt/botinok/config.cfg")
+        # Ищем конфиг: сначала локальный, потом системный
+        if os.path.exists("config.cfg"):
+            self.config_path = "config.cfg"
+        else:
+            self.config_path = os.getenv("BOTINOK_CONFIG", "/opt/botinok/config.cfg")
         if os.path.exists(self.config_path):
             self.config.read(self.config_path, encoding='utf-8')
         else:
