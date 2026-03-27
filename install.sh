@@ -168,7 +168,6 @@ install_dependencies
 # Prepare directories
 echo_blue "Preparing directories..."
 mkdir -p "$INSTALL_DIR"
-mkdir -p "$SESSIONS_DIR"
 mkdir -p "$SKILLS_DIR"
 mkdir -p "$EXPERIENCE_DIR"
 

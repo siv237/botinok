@@ -24,7 +24,17 @@ class SessionManager:
         self.base_path = os.path.expandvars(self.base_path)
         self.last_chunk_time = None
         if not os.path.exists(self.base_path):
-            os.makedirs(self.base_path)
+            try:
+                os.makedirs(self.base_path)
+            except PermissionError as e:
+                parent = os.path.dirname(self.base_path)
+                raise PermissionError(
+                    f"Cannot create sessions directory: {self.base_path}\n"
+                    f"Parent directory exists: {os.path.exists(parent)}\n"
+                    f"If {parent} was created by root earlier, run:\n"
+                    f"  sudo chown $(id -u):$(id -g) {parent}\n"
+                    f"Or remove it: sudo rm -rf {parent}"
+                ) from e
 
     def list_sessions(self):
         """Возвращает список существующих сессий в base_path (новые сверху)."""
