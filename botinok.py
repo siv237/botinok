@@ -9,7 +9,7 @@ import argparse
 import re
 from datetime import datetime
 import inquirer
-from rich.console import Console
+from rich.console import Console, Group
 from rich.layout import Layout
 from rich.panel import Panel
 from rich.live import Live
@@ -17,6 +17,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.markdown import Markdown
 from rich.prompt import Confirm
+from rich.progress import Progress, BarColumn, TextColumn
 from core.session_manager import SessionManager
 from core.tool_manager import ToolManager
 
@@ -709,17 +710,19 @@ class BotVisualizer:
         last_req_ctx_pct = (last_req_ctx_used / self.num_ctx) * 100 if self.num_ctx > 0 else 0
         last_req_ctx_style = "green" if last_req_ctx_pct < 70 else "yellow" if last_req_ctx_pct < 90 else "red"
         table.add_row("[cyan]LastReqCtx:[/cyan]", f"[{last_req_ctx_style}]{last_req_ctx_used}/{self.num_ctx} ({last_req_ctx_pct:.1f}%)[/{last_req_ctx_style}]")
-        
+
         # Индикатор общего заполнения окна (прогресс-бар)
         table.add_row("", "")
         table.add_row("[bold cyan]Context Window Fill:[/bold cyan]", "")
-        
-        bar_width = 20
-        filled = int(bar_width * session_ctx_pct / 100) if session_ctx_pct <= 100 else bar_width
-        bar = "█" * filled + "░" * (bar_width - filled)
-        table.add_row("", f"[{session_ctx_style}]{bar} {session_ctx_pct:.1f}%[/{session_ctx_style}]")
-        
-        return Panel(table, title="[bold yellow]Performance[/bold yellow]", border_style="yellow", expand=True)
+
+        progress = Progress(
+            BarColumn(bar_width=None, complete_style=session_ctx_style, finished_style=session_ctx_style),
+            TextColumn("{task.percentage:>5.1f}%"),
+            expand=True,
+        )
+        progress.add_task("ctx", total=100.0, completed=float(session_ctx_pct))
+
+        return Panel(Group(table, progress), title="[bold yellow]Performance[/bold yellow]", border_style="yellow", expand=True)
 
     def get_tools_panel(self):
         if not self.active_tools:
