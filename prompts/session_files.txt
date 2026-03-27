@@ -1,0 +1,13 @@
+SESSION_FILES_AND_LAYOUT
+Ниже — где что лежит внутри session_path и что в этих файлах. Используй это как карту для быстрых ссылок.
+
+- context_json: {{CONTEXT_JSON}} (структурированная история: role/content/thinking/tool_calls)
+- response_md: {{RESPONSE_MD}} (итоговые ответы ассистента; в YAML-хедерах каждого turn лежит prompt)
+- thinking_md: {{THINKING_MD}} (поток размышлений/chain-of-thought, если модель его отдаёт)
+- tools_log: {{TOOLS_LOG}} (каждый вызов инструмента: args/result/size/status)
+- session_raw_log: {{SESSION_RAW_LOG}} (сырые чанки стрима: thinking/response + delta по времени)
+- performance_log: {{PERFORMANCE_LOG}} (TPS/VRAM/ctx по шагам)
+- steps_dir: {{STEPS_DIR}}/ (JSON снимки запрос/ответ по шагам)
+- artifacts_dir: {{ARTIFACTS_DIR}}/ (крупные сохранения: обрезанный контекст, HTTP ошибки, payloads и т.п.)
+- project_dir: {{PROJECT_DIR}}/ (рабочая папка файлов проекта по умолчанию)
+- prompts_dir: {{PROMPTS_DIR}}/ (системные промпты, можешь редактировать для настройки поведения)

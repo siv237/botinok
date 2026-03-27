@@ -187,6 +187,9 @@ class SessionManager:
         os.makedirs(os.path.join(session_path, "project"))
         os.makedirs(os.path.join(session_path, "proofreader"))
         
+        # Копируем системные промпты в сессию
+        self._copy_prompts_to_session(session_path)
+        
         # Начальный контекст
         context = {
             "session_id": session_name,
@@ -198,6 +201,56 @@ class SessionManager:
             json.dump(context, f, indent=4)
             
         return session_path
+
+    def _copy_prompts_to_session(self, session_path: str):
+        """Копирует системные промпты из глобальной папки в сессию."""
+        import shutil
+        # Определяем путь к глобальным промптам
+        if os.path.exists("prompts"):
+            global_prompts = "prompts"
+        else:
+            # Ищем рядом с конфигом
+            global_prompts = os.path.join(os.path.dirname(self.config_path), "prompts")
+        
+        session_prompts = os.path.join(session_path, "prompts")
+        os.makedirs(session_prompts, exist_ok=True)
+        
+        if os.path.exists(global_prompts):
+            for filename in os.listdir(global_prompts):
+                if filename.endswith('.txt'):
+                    src = os.path.join(global_prompts, filename)
+                    dst = os.path.join(session_prompts, filename)
+                    try:
+                        shutil.copy2(src, dst)
+                    except Exception:
+                        pass
+
+    def load_prompt(self, session_path: str, prompt_name: str, **variables) -> str:
+        """Загружает промпт из папки сессии и подставляет переменные."""
+        prompt_file = os.path.join(session_path, "prompts", f"{prompt_name}.txt")
+        
+        # Fallback на глобальные промпты
+        if not os.path.exists(prompt_file):
+            if os.path.exists(f"prompts/{prompt_name}.txt"):
+                prompt_file = f"prompts/{prompt_name}.txt"
+            else:
+                global_file = os.path.join(os.path.dirname(self.config_path), "prompts", f"{prompt_name}.txt")
+                if os.path.exists(global_file):
+                    prompt_file = global_file
+                else:
+                    return ""
+        
+        try:
+            with open(prompt_file, "r", encoding="utf-8") as f:
+                content = f.read()
+            
+            # Подставляем переменные {{VAR_NAME}}
+            for var_name, var_value in variables.items():
+                content = content.replace(f"{{{{{var_name}}}}}", str(var_value))
+            
+            return content
+        except Exception:
+            return ""
 
     def get_ollama_status(self, base_url=None):
         if base_url is None:

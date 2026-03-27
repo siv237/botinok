@@ -1903,59 +1903,49 @@ def main():
     session_suffix = "visual_run" if not stealth_mode else "stealth_run"
     session_path, resume_last_answer = _choose_or_resume_session(sm, stealth_mode, session_suffix)
     
-    # Подготовка начальных сообщений
+    # Подготовка начальных сообщений из промптов
     now = datetime.now().astimezone()
-    system_time_msg = (
-        "Текущее системное время (локальная таймзона): "
-        f"{now.isoformat()} (tzname={now.tzname()})"
-    )
-    tool_policy_msg = (
-        "Политика инструментов:\n"
-        "- Для systemd journal/journalctl используй инструмент 'journal' (а не file_system).\n"
-        "- file_system предназначен для файлов/директорий/grep и чтения файлов.\n"
-        "- Для создания/изменения файлов проекта по умолчанию используй `code_editor` внутри session_path/project/ (если пользователь явно не указал другой путь)."
-    )
-
-    session_location_msg = (
-        "Текущая папка сессии (session_path): "
-        f"{session_path}\n"
-        "Вся протоколировка и артефакты этой сессии сохраняются внутри этой папки. "
-        "Файлы создаваемого/редактируемого проекта по умолчанию размещай в: "
-        f"{os.path.join(session_path, 'project')}"
-    )
-
-    session_files_msg = (
-        "SESSION_FILES_AND_LAYOUT\n"
-        "Ниже — где что лежит внутри session_path и что в этих файлах. Используй это как карту для быстрых ссылок.\n\n"
-        f"- context_json: {os.path.join(session_path, 'context.json')} (структурированная история: role/content/thinking/tool_calls)\n"
-        f"- response_md: {os.path.join(session_path, 'response.md')} (итоговые ответы ассистента; в YAML-хедерах каждого turn лежит prompt)\n"
-        f"- thinking_md: {os.path.join(session_path, 'thinking.md')} (поток размышлений/chain-of-thought, если модель его отдаёт)\n"
-        f"- tools_log: {os.path.join(session_path, 'tools.log')} (каждый вызов инструмента: args/result/size/status)\n"
-        f"- session_raw_log: {os.path.join(session_path, 'session_raw.log')} (сырые чанки стрима: thinking/response + delta по времени)\n"
-        f"- performance_log: {os.path.join(session_path, 'performance.log')} (TPS/VRAM/ctx по шагам)\n"
-        f"- steps_dir: {os.path.join(session_path, sm.config.get('Storage', 'StepsSubDir', fallback='steps'))}/ (JSON снимки запрос/ответ по шагам)\n"
-        f"- artifacts_dir: {os.path.join(session_path, 'artifacts')}/ (крупные сохранения: обрезанный контекст, HTTP ошибки, payloads и т.п.)\n"
-        f"- project_dir: {os.path.join(session_path, 'project')}/ (рабочая папка файлов проекта по умолчанию)\n"
-    )
-
-    dangerous_mode_msg = (
-        "Dangerous-mode: ON (в этой сессии разрешены опасные инструменты: code_editor, shell_exec). "
-        "shell_exec всегда требует подтверждение пользователя перед выполнением."
-        if args.dangerous else
-        "Dangerous-mode: OFF (опасные инструменты отключены)."
-    )
+    steps_subdir = sm.config.get('Storage', 'StepsSubDir', fallback='steps')
+    
+    system_time_msg = sm.load_prompt(session_path, "system_time", 
+                                     TIMESTAMP=now.isoformat(), 
+                                     TZNAME=now.tzname() or "unknown")
+    
+    session_location_msg = sm.load_prompt(session_path, "session_location",
+                                          SESSION_PATH=session_path,
+                                          PROJECT_DIR=os.path.join(session_path, 'project'))
+    
+    session_files_msg = sm.load_prompt(session_path, "session_files",
+                                       SESSION_PATH=session_path,
+                                       CONTEXT_JSON=os.path.join(session_path, 'context.json'),
+                                       RESPONSE_MD=os.path.join(session_path, 'response.md'),
+                                       THINKING_MD=os.path.join(session_path, 'thinking.md'),
+                                       TOOLS_LOG=os.path.join(session_path, 'tools.log'),
+                                       SESSION_RAW_LOG=os.path.join(session_path, 'session_raw.log'),
+                                       PERFORMANCE_LOG=os.path.join(session_path, 'performance.log'),
+                                       STEPS_DIR=os.path.join(session_path, steps_subdir),
+                                       ARTIFACTS_DIR=os.path.join(session_path, 'artifacts'),
+                                       PROJECT_DIR=os.path.join(session_path, 'project'),
+                                       PROMPTS_DIR=os.path.join(session_path, 'prompts'))
+    
+    tool_policy_msg = sm.load_prompt(session_path, "tool_policy")
+    
+    dangerous_status = "ON" if args.dangerous else "OFF"
+    dangerous_details = ("В этой сессии разрешены опасные инструменты: code_editor, shell_exec. shell_exec всегда требует подтверждение пользователя перед выполнением." 
+                        if args.dangerous else "Опасные инструменты отключены.")
+    dangerous_mode_msg = sm.load_prompt(session_path, "dangerous_mode",
+                                        DANGEROUS_STATUS=dangerous_status,
+                                        DANGEROUS_DETAILS=dangerous_details)
 
     # Проверка сломанных инструментов
     tm = ToolManager()
-    broken_tools_msg = tm.get_broken_tools_info() or ""
+    broken_tools_info = tm.get_broken_tools_info() or ""
+    broken_tools_msg = sm.load_prompt(session_path, "broken_tools", BROKEN_TOOLS_INFO=broken_tools_info) if broken_tools_info else ""
 
     resume_context_msg = ""
     if resume_last_answer:
-        resume_context_msg = (
-            "RESUMED_SESSION_CONTEXT\n"
-            "Это продолжение предыдущей сессии. Ниже — хвост последнего ответа ассистента (для восстановления контекста):\n\n"
-            f"{resume_last_answer}"
-        )
+        resume_context_msg = sm.load_prompt(session_path, "resume_context", 
+                                            RESUME_LAST_ANSWER=resume_last_answer)
     messages = [
         {"role": "system", "content": system_time_msg},
         {"role": "system", "content": session_location_msg},
@@ -2031,19 +2021,13 @@ def main():
                     continue
 
             # Добавляем компактную памятку по инструментам ПЕРЕД началом хода (turn)
-            messages.append({
-                "role": "system",
-                "content": (
-                    "TOOL_USAGE_REMINDER:\n"
-                    "1. Чтение/Поиск: используй `file_system` (list/grep/info) или `code_editor` (read). "
-                    "НЕ используй `shell_exec` для простого чтения файлов.\n"
-                    "2. Редактирование: используй `code_editor` (write/apply/replace). "
-                    "НЕ используй `shell_exec` (sed/echo >) для правки кода.\n"
-                    "3. Специфические задачи: Сначала проверь `skills` (list), нет ли готового решения. "
-                    "Если нужно — установи подходящий скилл из базы.\n"
-                    "4. Порядок: Сначала изучи (list/read), потом планируй, потом меняй."
-                )
-            })
+            tool_reminder_msg = sm.load_prompt(session_path, "tool_reminder",
+                                               PROMPTS_DIR=os.path.join(session_path, 'prompts'))
+            if tool_reminder_msg:
+                messages.append({
+                    "role": "system",
+                    "content": tool_reminder_msg
+                })
 
             missing_final_retries = 0
             while True:
