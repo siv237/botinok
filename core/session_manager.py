@@ -185,12 +185,12 @@ class SessionManager:
     def get_ollama_status(self, base_url=None):
         if base_url is None:
             base_url = self.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+        verify_ssl = self.config.getboolean('Ollama', 'VerifySSL', fallback=True)
         try:
-            response = requests.get(f"{base_url}/api/ps", timeout=5)
+            response = requests.get(f"{base_url}/api/ps", timeout=5, verify=verify_ssl)
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
-            # Не печатаем ошибку в консоль, чтобы не ломать Rich Layout
             pass
         return None
 
@@ -198,6 +198,7 @@ class SessionManager:
         """Выгружает все модели из памяти Ollama"""
         if base_url is None:
             base_url = self.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+        verify_ssl = self.config.getboolean('Ollama', 'VerifySSL', fallback=True)
         status = self.get_ollama_status(base_url)
         if status and "models" in status:
             for m in status["models"]:
@@ -205,7 +206,7 @@ class SessionManager:
                     requests.post(f"{base_url}/api/generate", json={
                         "model": m["name"],
                         "keep_alive": 0
-                    }, timeout=5)
+                    }, timeout=5, verify=verify_ssl)
                 except Exception:
                     pass
 

@@ -262,6 +262,7 @@ def _ollama_summarize_and_reset_context(
     )
 
     ollama_base_url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+    verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
     chat_url = f"{ollama_base_url}/api/chat"
 
     summary_text = (
@@ -287,6 +288,7 @@ def _ollama_summarize_and_reset_context(
             chat_url,
             json=payload,
             timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300),
+            verify=verify_ssl,
         )
         if res.status_code == 200:
             data = res.json()
@@ -654,6 +656,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
         sm.write_file_header(session_path, "response.md", model, num_ctx, prompt)
         
         OLLAMA_CHAT_URL = f"{sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')}/api/chat"
+        verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
         
         try:
             # Цикл для обработки потенциальных вызовов инструментов
@@ -713,7 +716,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                 response_queue = queue.Queue()
                 def make_request():
                     try:
-                        res = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300))
+                        res = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300), verify=verify_ssl)
                         response_queue.put(("success", res))
                     except Exception as e:
                         response_queue.put(("error", str(e)))
@@ -1466,11 +1469,12 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
     
     ollama_base_url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
     OLLAMA_CHAT_URL = f"{ollama_base_url}/api/chat"
+    verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
     
     try:
         while True:
             payload["messages"] = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=num_ctx)
-            response = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300))
+            response = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300), verify=verify_ssl)
             
             if response.status_code != 200:
                 return messages

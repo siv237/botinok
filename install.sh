@@ -206,6 +206,7 @@ BaseUrl = http://localhost:11434
 DefaultModel = qwen3.5:4b
 DefaultContext = 16384
 RequestTimeout = 300
+VerifySSL = false
 
 [Storage]
 SessionsDir = $SESSIONS_DIR
