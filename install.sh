@@ -11,9 +11,16 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Detect real user home (for sudo installs)
+REAL_HOME="$HOME"
+if [ -n "$SUDO_USER" ] && [ "$EUID" -eq 0 ]; then
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    [ -z "$REAL_HOME" ] && REAL_HOME="/home/$SUDO_USER"
+fi
+
 # Extract version info from git: date (DD.MM.YYYY) and first 4 chars of commit hash
 BOTINOK_VERSION="unknown"
-if [ -d "${PWD}/.git" ] || [ -d "./.git" ]; then
+if [ -d ".git" ] || [ -d "$PWD/.git" ]; then
     COMMIT_DATE=$(git log -1 --format=%cd --date=format:%d.%m.%Y 2>/dev/null || echo "unknown")
     COMMIT_HASH=$(git log -1 --format=%h 2>/dev/null | cut -c1-4 || echo "????")
     BOTINOK_VERSION="0.2 | ${COMMIT_DATE} | ${COMMIT_HASH}"
@@ -30,9 +37,9 @@ else
     # RHEL/CentOS - /usr/local/bin not in root's PATH by default
     BIN_DIR="/usr/bin"
 fi
-SESSIONS_DIR="$HOME/.botinok"
-SKILLS_DIR="$HOME/.botinok/skills"
-EXPERIENCE_DIR="$HOME/.botinok/experience"
+SESSIONS_DIR="$REAL_HOME/.botinok"
+SKILLS_DIR="$REAL_HOME/.botinok/skills"
+EXPERIENCE_DIR="$REAL_HOME/.botinok/experience"
 GITHUB_REPO="https://github.com/siv237/botinok.git"
 
 # --- Functions ---
