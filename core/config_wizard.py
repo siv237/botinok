@@ -17,7 +17,7 @@ class ConfigWizard:
     def check_ollama(self, url):
         """Проверка доступности Ollama по указанному URL."""
         try:
-            response = requests.get(f"{url}/api/tags", timeout=5)
+            response = requests.get(f"{url}/api/tags", timeout=5, verify=False)
             if response.status_code == 200:
                 return True, response.json().get("models", [])
         except Exception:
@@ -47,6 +47,7 @@ class ConfigWizard:
             success, models = self.check_ollama(url)
             if success:
                 console.print(f"[green]✓ Подключение к Ollama установлено: {url}[/green]")
+                console.print("[yellow]⚠ SSL верификация отключена (небезопасно для продакшена)[/yellow]")
                 if Confirm.ask(f"Использовать этот адрес сервера?", default=True):
                     break
             else:
