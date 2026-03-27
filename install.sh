@@ -11,20 +11,27 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Detect real user home (for sudo installs)
-REAL_HOME="$HOME"
-if [ -n "$SUDO_USER" ] && [ "$EUID" -eq 0 ]; then
-    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-    [ -z "$REAL_HOME" ] && REAL_HOME="/home/$SUDO_USER"
-fi
-
-# Extract version info from git: date (DD.MM.YYYY) and first 4 chars of commit hash
+# Version (computed later, after repo is available)
 BOTINOK_VERSION="unknown"
-if [ -d ".git" ] || [ -d "$PWD/.git" ]; then
-    COMMIT_DATE=$(git log -1 --format=%cd --date=format:%d.%m.%Y 2>/dev/null || echo "unknown")
-    COMMIT_HASH=$(git log -1 --format=%h 2>/dev/null | cut -c1-4 || echo "????")
-    BOTINOK_VERSION="0.2 | ${COMMIT_DATE} | ${COMMIT_HASH}"
-fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+
+get_version_from_git() {
+    # $1 = repo dir
+    local repo_dir="$1"
+    local commit_date="unknown"
+    local commit_hash="????"
+
+    if [ -n "$repo_dir" ] && [ -d "$repo_dir/.git" ]; then
+        commit_date=$(git -C "$repo_dir" log -1 --format=%cd --date=format:%d.%m.%Y 2>/dev/null || echo "unknown")
+        commit_hash=$(git -C "$repo_dir" log -1 --format=%h 2>/dev/null | cut -c1-4 || echo "????")
+        echo "0.2 | ${commit_date} | ${commit_hash}"
+        return 0
+    fi
+
+    echo "unknown"
+    return 0
+}
 
 INSTALL_DIR="/opt/botinok"
 OS_NAME="$(uname -s 2>/dev/null || echo unknown)"
@@ -37,9 +44,9 @@ else
     # RHEL/CentOS - /usr/local/bin not in root's PATH by default
     BIN_DIR="/usr/bin"
 fi
-SESSIONS_DIR="$REAL_HOME/.botinok"
-SKILLS_DIR="$REAL_HOME/.botinok/skills"
-EXPERIENCE_DIR="$REAL_HOME/.botinok/experience"
+SESSIONS_DIR="$HOME/.botinok"
+SKILLS_DIR="$HOME/.botinok/skills"
+EXPERIENCE_DIR="$HOME/.botinok/experience"
 GITHUB_REPO="https://github.com/siv237/botinok.git"
 
 # --- Functions ---
@@ -206,6 +213,12 @@ if [ -z "$BOTINOK_REEXEC" ]; then
     fi
 fi
 
+# (Re)compute version now that we might be executing from $INSTALL_DIR
+BOTINOK_VERSION="$(get_version_from_git "$SCRIPT_DIR")"
+if [ "$BOTINOK_VERSION" = "unknown" ]; then
+    BOTINOK_VERSION="$(get_version_from_git "$INSTALL_DIR")"
+fi
+
 # Set up Virtual Environment
 echo_blue "Setting up Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
@@ -213,6 +226,9 @@ python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt" --trusted-host pypi.org --trusted-host files.pythonhosted.org
 
 # Save version to file for non-root users to read
+if [ "$BOTINOK_VERSION" = "unknown" ]; then
+    BOTINOK_VERSION="$(get_version_from_git "$INSTALL_DIR")"
+fi
 echo "$BOTINOK_VERSION" > "$INSTALL_DIR/.version"
 chmod 644 "$INSTALL_DIR/.version"
 
