@@ -22,11 +22,27 @@ from core.tool_manager import ToolManager
 
 import subprocess
 
-def _get_git_version_info():
-    """Получает дату и хэш последнего git-коммита для версии."""
+def _get_version_info():
+    """Получает версию из файла .version (если установлен) или из git."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    version_file = os.path.join(script_dir, ".version")
+    
+    # Сначала пробуем прочитать из файла (для установленных версий)
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        
+        if os.path.exists(version_file):
+            with open(version_file, "r") as f:
+                version = f.read().strip()
+                if version:
+                    # Парсим формат: "0.2 | DD.MM.YYYY | HASH"
+                    parts = version.split(" | ")
+                    if len(parts) >= 3:
+                        return parts[1], parts[2]
+                    return "unknown", "????"
+    except Exception:
+        pass
+    
+    # Fallback на git (для разработки)
+    try:
         # Проверяем что git доступен
         git_check = subprocess.run(
             ['git', '--version'],
@@ -49,22 +65,12 @@ def _get_git_version_info():
         )
         commit_hash = hash_result.stdout.strip()[:4] if hash_result.returncode == 0 else "????"
         
-        # Если hash пустой но returncode == 0, пробуем ещё раз с другим подходом
-        if not commit_hash and hash_result.returncode == 0:
-            # Пробуем через rev-parse
-            hash_result2 = subprocess.run(
-                ['git', 'rev-parse', '--short', 'HEAD'],
-                capture_output=True, text=True, cwd=script_dir, timeout=5
-            )
-            commit_hash = hash_result2.stdout.strip()[:4] if hash_result2.returncode == 0 else "????"
-        
         return commit_date, commit_hash
-    except Exception as e:
-        # В случае любой ошибки возвращаем значения по умолчанию
+    except Exception:
         return "unknown", "????"
 
-# Получаем git-информацию при запуске
-_COMMIT_DATE, _COMMIT_HASH = _get_git_version_info()
+# Получаем версию при запуске
+_COMMIT_DATE, _COMMIT_HASH = _get_version_info()
 _BOTINOK_VERSION = f"0.2 | {_COMMIT_DATE} | {_COMMIT_HASH}"
 
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
@@ -1961,10 +1967,12 @@ def main():
 
     # Вывод ASCII арта и версии (только если не stealth_mode)
     if not stealth_mode:
-        ascii_art = f"""
+        term_width = console.width
+        if term_width >= 100:
+            ascii_art = f"""
     [bold blue]
-                                                           ^^:.                                     
-                                                          !~.~!7^:::::....                          
+                                                           ^^:.                                      
+                                                          !~.~!7^:::::....                           
                                                         ^?7^7!~~~7~~~~~~!!!!!!~~^^                  
                                                        :J7:J^!7~ ^           ..:~P^                 
                                                        7J !?:^~:~^::::........  !Y.                 
@@ -1988,7 +1996,13 @@ def main():
     [/bold blue]
     [bold yellow]BOTINOK AGENT - Version {_BOTINOK_VERSION}[/bold yellow]
     """
-        console.print(Panel(Text.from_markup(ascii_art), border_style="blue"))
+            console.print(Panel(Text.from_markup(ascii_art), border_style="blue"))
+        else:
+            # Компактный баннер для узких консолей
+            console.print(Panel(
+                Text(f"BOTINOK AGENT - Version {_BOTINOK_VERSION}", style="bold yellow"),
+                border_style="blue"
+            ))
 
     try:
         while True:

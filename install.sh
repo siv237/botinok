@@ -30,7 +30,9 @@ else
     # RHEL/CentOS - /usr/local/bin not in root's PATH by default
     BIN_DIR="/usr/bin"
 fi
-SESSIONS_DIR="/var/log/botinok/sessions"
+SESSIONS_DIR="$HOME/.botinok"
+SKILLS_DIR="$HOME/.botinok/skills"
+EXPERIENCE_DIR="$HOME/.botinok/experience"
 GITHUB_REPO="https://github.com/siv237/botinok.git"
 
 # --- Functions ---
@@ -153,7 +155,8 @@ install_dependencies
 echo_blue "Preparing directories..."
 mkdir -p "$INSTALL_DIR"
 mkdir -p "$SESSIONS_DIR"
-chmod 777 "$SESSIONS_DIR"
+mkdir -p "$SKILLS_DIR"
+mkdir -p "$EXPERIENCE_DIR"
 
 # Copy/Clone files
 if [ -d ".git" ] && [ "$PWD" != "$INSTALL_DIR" ]; then
@@ -202,6 +205,10 @@ python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip --trusted-host pypi.org --trusted-host files.pythonhosted.org
 "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt" --trusted-host pypi.org --trusted-host files.pythonhosted.org
 
+# Save version to file for non-root users to read
+echo "$BOTINOK_VERSION" > "$INSTALL_DIR/.version"
+chmod 644 "$INSTALL_DIR/.version"
+
 # Configuration
 CONFIG_FILE="$INSTALL_DIR/config.cfg"
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -216,6 +223,8 @@ VerifySSL = false
 
 [Storage]
 SessionsDir = $SESSIONS_DIR
+SkillsDir = $SKILLS_DIR
+ExperienceDir = $EXPERIENCE_DIR
 StepsSubDir = steps
 
 [Tools]
@@ -257,6 +266,8 @@ if [ "$IS_RU" -eq 1 ]; then
     MSG_INSTALL_DIR="Каталог установки"
     MSG_CONFIG_FILE="Файл конфигурации"
     MSG_SESSIONS_DIR="Каталог сессий"
+    MSG_SKILLS_DIR="Каталог скилов"
+    MSG_EXPERIENCE_DIR="Каталог опыта"
     MSG_QUICK_START="Быстрый старт"
     MSG_TIP="Подсказка: если нужно отредактировать настройки вручную"
     MSG_WIZARD="Мастер настройки"
@@ -267,6 +278,8 @@ else
     MSG_INSTALL_DIR="Install directory"
     MSG_CONFIG_FILE="Config file"
     MSG_SESSIONS_DIR="Sessions dir"
+    MSG_SKILLS_DIR="Skills dir"
+    MSG_EXPERIENCE_DIR="Experience dir"
     MSG_QUICK_START="Quick start"
     MSG_TIP="Tip: if you need to edit settings manually"
     MSG_WIZARD="Configuration Wizard"
@@ -282,6 +295,8 @@ cat <<EOF
 | $MSG_INSTALL_DIR:  ${INSTALL_DIR}
 | $MSG_CONFIG_FILE:  ${INSTALL_DIR}/config.cfg
 | $MSG_SESSIONS_DIR: ${SESSIONS_DIR}
+| $MSG_SKILLS_DIR:   ${SKILLS_DIR}
+| $MSG_EXPERIENCE_DIR: ${EXPERIENCE_DIR}
 | 
 | $MSG_QUICK_START:
 |   $MSG_RUN:     botinok
