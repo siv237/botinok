@@ -5,6 +5,11 @@ import sys
 import urllib.parse
 import time
 
+def _debug(msg: str):
+    """Выводит отладочное сообщение если включен BOTINOK_DEBUG."""
+    if os.environ.get("BOTINOK_DEBUG"):
+        print(f"DEBUG: {msg}", file=sys.stderr)
+
 def ddg_search(query: str, session_path: str = None) -> str:
     """
     Выполняет поиск в DuckDuckGo через lynx (HTML версия).
@@ -21,7 +26,7 @@ def ddg_search(query: str, session_path: str = None) -> str:
     connect_timeout = config.getint('Tools', 'LynxConnectTimeout', fallback=6)
     read_timeout = config.getint('Tools', 'LynxReadTimeout', fallback=10)
 
-    print(f"DEBUG: Starting search for query: '{query}'", file=sys.stderr)
+    _debug(f"Starting search for query: '{query}'")
     # Кодируем запрос для URL
     # Используем quote вместо quote_plus для более стандартного кодирования в URL
     encoded_query = urllib.parse.quote(query)
@@ -56,7 +61,7 @@ def ddg_search(query: str, session_path: str = None) -> str:
                         f"-read_timeout={t}",
                         url
                     ]
-                    print(f"DEBUG: Running command: {' '.join(full_cmd)}", file=sys.stderr)
+                    _debug(f"Running command: {' '.join(full_cmd)}")
                     result = subprocess.run(
                         full_cmd,
                         capture_output=True,
@@ -72,13 +77,13 @@ def ddg_search(query: str, session_path: str = None) -> str:
                         stderr=f"Lynx timeout after {t + 6}s",
                     )
 
-                print(f"DEBUG: Lynx finished with return code: {result.returncode}", file=sys.stderr)
+                _debug(f"Lynx finished with return code: {result.returncode}")
 
                 if result.returncode == 0:
                     break
 
                 if attempt < len(timeouts) and result.stderr and "Не удается установить соединение" in result.stderr:
-                    print("DEBUG: Connection failed, retrying in 0.5s...", file=sys.stderr)
+                    _debug("Connection failed, retrying in 0.5s...")
                     time.sleep(0.5)
                     continue
 
@@ -88,7 +93,7 @@ def ddg_search(query: str, session_path: str = None) -> str:
                 break
 
             if url_index < len(search_urls):
-                print("DEBUG: Switching to fallback DDG host...", file=sys.stderr)
+                _debug("Switching to fallback DDG host...")
 
         # Сохраняем дамп lynx в сессию, если путь передан
         if session_path and result:
@@ -107,12 +112,12 @@ def ddg_search(query: str, session_path: str = None) -> str:
 
         if not result or result.returncode != 0:
             err_output = result.stderr if result and result.stderr else "Unknown error"
-            print(f"DEBUG: Lynx error: {err_output}", file=sys.stderr)
+            _debug(f"Lynx error: {err_output}")
             return f"Ошибка lynx (code {result.returncode if result else 'unknown'}): {err_output}{save_info}"
 
         content = result.stdout
         if not content or len(content.strip()) < 100:
-            print(f"DEBUG: Lynx returned suspicious content length: {len(content) if content else 0}", file=sys.stderr)
+            _debug(f"Lynx returned suspicious content length: {len(content) if content else 0}")
             # Иногда DDG выдает страницу с капчей или блокировкой
             if "captcha" in content.lower() or "forbidden" in content.lower():
                 return f"Ошибка: DuckDuckGo заблокировал запрос (CAPTCHA/Forbidden). Контент: {content[:200]}{save_info}"
@@ -122,11 +127,11 @@ def ddg_search(query: str, session_path: str = None) -> str:
         lines = [line for line in content.split('\n') if line.strip()]
         cleaned_content = '\n'.join(lines)
         
-        print(f"DEBUG: Found {len(lines)} lines of content ({len(cleaned_content)} chars)", file=sys.stderr)
+        _debug(f"Found {len(lines)} lines of content ({len(cleaned_content)} chars)")
         return cleaned_content[:max_chars] + save_info
 
     except Exception as e:
-        print(f"DEBUG: Exception during search: {str(e)}", file=sys.stderr)
+        _debug(f"Exception during search: {str(e)}")
         return f"Ошибка выполнения поиска: {str(e)}"
 
 if __name__ == "__main__":

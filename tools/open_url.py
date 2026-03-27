@@ -5,8 +5,13 @@ import time
 import urllib.parse
 import configparser
 
+def _debug(msg: str):
+    """Выводит отладочное сообщение если включен BOTINOK_DEBUG."""
+    if os.environ.get("BOTINOK_DEBUG"):
+        print(f"DEBUG: {msg}", file=sys.stderr)
+
 def open_url(url: str, session_path: str = None) -> str:
-    print(f"DEBUG: Opening URL: {url}", file=sys.stderr)
+    _debug(f"Opening URL: {url}")
 
     # Загружаем конфиг
     config = configparser.ConfigParser()
@@ -53,7 +58,7 @@ def open_url(url: str, session_path: str = None) -> str:
         result = None
         timeouts = [connect_timeout, read_timeout]
         for url_index, cand_url in enumerate(validated_candidates, start=1):
-            print(f"DEBUG: Trying URL: {cand_url}", file=sys.stderr)
+            _debug(f"Trying URL: {cand_url}")
             for attempt, t in enumerate(timeouts, start=1):
                 try:
                     full_cmd = lynx_base_cmd + [f"-connect_timeout={t}", f"-read_timeout={t}", cand_url]
@@ -72,13 +77,13 @@ def open_url(url: str, session_path: str = None) -> str:
                         stderr=f"Lynx timeout after {t + 6}s",
                     )
 
-                print(f"DEBUG: Lynx finished with return code: {result.returncode}", file=sys.stderr)
+                _debug(f"Lynx finished with return code: {result.returncode}")
 
                 if result.returncode == 0:
                     break
 
                 if attempt < len(timeouts) and result.stderr and "Не удается установить соединение" in result.stderr:
-                    print("DEBUG: Connection failed, retrying in 0.5s...", file=sys.stderr)
+                    _debug("Connection failed, retrying in 0.5s...")
                     time.sleep(0.5)
                     continue
 
@@ -88,7 +93,7 @@ def open_url(url: str, session_path: str = None) -> str:
                 break
 
             if url_index < len(validated_candidates):
-                print("DEBUG: Switching to next URL candidate...", file=sys.stderr)
+                _debug("Switching to next URL candidate...")
 
         # Сохраняем дамп lynx в сессию, если путь передан
         if session_path and result:

@@ -1870,6 +1870,7 @@ def main():
     parser.add_argument("--stealth", action="store_true", help="Минимальный вывод, только ответ")
     parser.add_argument("--dangerous", action="store_true", help="Разрешить опасные инструменты (редактирование файлов и выполнение команд) только в этой сессии")
     parser.add_argument("--proofread", action="store_true", help="Включить режим корректора (цикл: Исполнитель -> Корректор)")
+    parser.add_argument("--debug", action="store_true", help="Включить отладочный вывод")
     
     args = parser.parse_args()
     
@@ -1886,6 +1887,8 @@ def main():
     stealth_mode = args.stealth or not sys.stdin.isatty()
     if args.dangerous:
         os.environ["BOTINOK_DANGEROUS"] = "1"
+    if args.debug:
+        os.environ["BOTINOK_DEBUG"] = "1"
 
     # Если есть данные в stdin (Pipe mode), добавляем их к промпту
     stdin_data = ""
@@ -2047,10 +2050,31 @@ def main():
                 turn_start_idx = len(messages)
                 messages.append({"role": "user", "content": prompt})
 
-                if stealth_mode:
-                    messages = ask_ollama_stealth(model, messages, session_path, step_num, num_ctx)
-                else:
-                    messages = ask_ollama_stream(model, messages, session_path, step_num, num_ctx, vis)
+                try:
+                    if stealth_mode:
+                        messages = ask_ollama_stealth(model, messages, session_path, step_num, num_ctx)
+                    else:
+                        messages = ask_ollama_stream(model, messages, session_path, step_num, num_ctx, vis)
+                except KeyboardInterrupt:
+                    # Обработка Ctrl+C - предлагаем выбор
+                    if not stealth_mode:
+                        console.print("\n[bold yellow]Прервать выполнение?[/bold yellow]")
+                        from rich.prompt import Prompt
+                        ans = Prompt.ask("[bold cyan]Введите:[/bold cyan] (c)ontinue - вернуться к вводу, (q)uit - выйти, (r)etry - повторить", choices=["c", "q", "r"], default="c")
+                        if ans == "q":
+                            console.print("[bold red]Завершение работы...[/bold red]")
+                            raise SystemExit(0)
+                        elif ans == "r":
+                            console.print("[bold yellow]Повторяем запрос...[/bold yellow]")
+                            continue
+                        else:
+                            console.print("[bold green]Возврат к вводу[/bold green]")
+                            messages.pop()  # Удаляем последнее сообщение пользователя
+                            break
+                    else:
+                        # В stealth mode просто выходим
+                        console.print("\n[bold red]Interrupted[/bold red]")
+                        raise SystemExit(0)
 
                 last_assistant_message = ""
                 for m in reversed(messages[turn_start_idx:]):
@@ -2120,9 +2144,9 @@ def main():
                     "Продолжай и дай финальный ответ на последний запрос пользователя. "
                     "Не повторяй рассуждения и не вызывай инструменты без необходимости."
                 )
-            
-    except KeyboardInterrupt:
-        console.print("\n[bold red]Interrupted by user[/bold red]")
+
+    except SystemExit:
+        raise
     finally:
         if not stealth_mode:
             console.print(f"\n[bold blue]Session saved to: {session_path}[/bold blue]")
