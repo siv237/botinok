@@ -9,15 +9,19 @@ import re
 class SessionManager:
     def __init__(self):
         self.config = configparser.ConfigParser()
-        self.config_path = os.getenv("BOTINOK_CONFIG", "config.cfg")
+        # Конфиг один общий в /opt/botinok для всех пользователей
+        self.config_path = os.getenv("BOTINOK_CONFIG", "/opt/botinok/config.cfg")
         if os.path.exists(self.config_path):
             self.config.read(self.config_path, encoding='utf-8')
         else:
             # Дефолтные значения, если конфиг не найден
             self.config['Ollama'] = {'BaseUrl': 'http://localhost:11434', 'DefaultModel': 'qwen3.5:9b', 'DefaultContext': '8192'}
-            self.config['Storage'] = {'SessionsDir': 'sessions', 'StepsSubDir': 'steps'}
+            self.config['Storage'] = {'SessionsDir': '~/.botinok/sessions', 'StepsSubDir': 'steps'}
             
         self.base_path = self.config.get('Storage', 'SessionsDir', fallback='sessions')
+        # Разворачиваем ~ и $HOME для текущего пользователя
+        self.base_path = os.path.expanduser(self.base_path)
+        self.base_path = os.path.expandvars(self.base_path)
         self.last_chunk_time = None
         if not os.path.exists(self.base_path):
             os.makedirs(self.base_path)

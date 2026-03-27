@@ -44,7 +44,7 @@ else
     # RHEL/CentOS - /usr/local/bin not in root's PATH by default
     BIN_DIR="/usr/bin"
 fi
-SESSIONS_DIR="$HOME/.botinok"
+SESSIONS_DIR="$HOME/.botinok/sessions"
 SKILLS_DIR="$HOME/.botinok/skills"
 EXPERIENCE_DIR="$HOME/.botinok/experience"
 GITHUB_REPO="https://github.com/siv237/botinok.git"
@@ -245,9 +245,9 @@ RequestTimeout = 300
 VerifySSL = false
 
 [Storage]
-SessionsDir = $SESSIONS_DIR
-SkillsDir = $SKILLS_DIR
-ExperienceDir = $EXPERIENCE_DIR
+SessionsDir = ~/.botinok/sessions
+SkillsDir = ~/.botinok/skills
+ExperienceDir = ~/.botinok/experience
 StepsSubDir = steps
 
 [Tools]
