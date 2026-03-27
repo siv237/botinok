@@ -14,7 +14,13 @@ NC='\033[0m' # No Color
  BOTINOK_VERSION="0.1 (2026-03-21)"
 
 INSTALL_DIR="/opt/botinok"
-BIN_DIR="/usr/local/bin"
+# Detect BIN_DIR based on distro
+if command -v apt-get >/dev/null 2>&1; then
+    BIN_DIR="/usr/local/bin"
+else
+    # RHEL/CentOS - /usr/local/bin not in root's PATH by default
+    BIN_DIR="/usr/bin"
+fi
 SESSIONS_DIR="/var/log/botinok/sessions"
 GITHUB_REPO="https://github.com/siv237/botinok.git"
 
