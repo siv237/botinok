@@ -11,7 +11,13 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-BOTINOK_VERSION="0.1 (2026-03-21)"
+# Extract version info from git: date (DD.MM.YYYY) and first 4 chars of commit hash
+BOTINOK_VERSION="unknown"
+if [ -d "${PWD}/.git" ] || [ -d "./.git" ]; then
+    COMMIT_DATE=$(git log -1 --format=%cd --date=format:%d.%m.%Y 2>/dev/null || echo "unknown")
+    COMMIT_HASH=$(git log -1 --format=%h 2>/dev/null | cut -c1-4 || echo "????")
+    BOTINOK_VERSION="0.2 | ${COMMIT_DATE} | ${COMMIT_HASH}"
+fi
 
 INSTALL_DIR="/opt/botinok"
 OS_NAME="$(uname -s 2>/dev/null || echo unknown)"

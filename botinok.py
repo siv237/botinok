@@ -20,6 +20,53 @@ from rich.prompt import Confirm
 from core.session_manager import SessionManager
 from core.tool_manager import ToolManager
 
+import subprocess
+
+def _get_git_version_info():
+    """Получает дату и хэш последнего git-коммита для версии."""
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Проверяем что git доступен
+        git_check = subprocess.run(
+            ['git', '--version'],
+            capture_output=True, text=True, cwd=script_dir, timeout=5
+        )
+        if git_check.returncode != 0:
+            return "unknown", "????"
+        
+        # Дата последнего коммита в формате DD.MM.YYYY
+        date_result = subprocess.run(
+            ['git', 'log', '-1', '--format=%cd', '--date=format:%d.%m.%Y'],
+            capture_output=True, text=True, cwd=script_dir, timeout=5
+        )
+        commit_date = date_result.stdout.strip() if date_result.returncode == 0 else "unknown"
+        
+        # Первые 4 символа хэша коммита
+        hash_result = subprocess.run(
+            ['git', 'log', '-1', '--format=%h'],
+            capture_output=True, text=True, cwd=script_dir, timeout=5
+        )
+        commit_hash = hash_result.stdout.strip()[:4] if hash_result.returncode == 0 else "????"
+        
+        # Если hash пустой но returncode == 0, пробуем ещё раз с другим подходом
+        if not commit_hash and hash_result.returncode == 0:
+            # Пробуем через rev-parse
+            hash_result2 = subprocess.run(
+                ['git', 'rev-parse', '--short', 'HEAD'],
+                capture_output=True, text=True, cwd=script_dir, timeout=5
+            )
+            commit_hash = hash_result2.stdout.strip()[:4] if hash_result2.returncode == 0 else "????"
+        
+        return commit_date, commit_hash
+    except Exception as e:
+        # В случае любой ошибки возвращаем значения по умолчанию
+        return "unknown", "????"
+
+# Получаем git-информацию при запуске
+_COMMIT_DATE, _COMMIT_HASH = _get_git_version_info()
+_BOTINOK_VERSION = f"0.2 | {_COMMIT_DATE} | {_COMMIT_HASH}"
+
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
 OLLAMA_PS_URL = "http://localhost:11434/api/ps"
 
@@ -1914,7 +1961,7 @@ def main():
 
     # Вывод ASCII арта и версии (только если не stealth_mode)
     if not stealth_mode:
-        ascii_art = """
+        ascii_art = f"""
     [bold blue]
                                                            ^^:.                                     
                                                           !~.~!7^:::::....                          
@@ -1939,7 +1986,7 @@ def main():
               ^7:::^~!!!!7!7!7!!~~^~J~:^:::::^^^^~~!!7777!!!!~~^^^^::.........      !^              
               .^!~^!^.:~::^^^^~~!!~!!7!7!7!7!7!7!!!!~^~^^^^~~~^!7^?                 !~              
     [/bold blue]
-    [bold yellow]BOTINOK AGENT - Version 0.2 | 27.03.2026[/bold yellow]
+    [bold yellow]BOTINOK AGENT - Version {_BOTINOK_VERSION}[/bold yellow]
     """
         console.print(Panel(Text.from_markup(ascii_art), border_style="blue"))
 
