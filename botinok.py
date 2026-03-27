@@ -1939,7 +1939,7 @@ def main():
               ^7:::^~!!!!7!7!7!!~~^~J~:^:::::^^^^~~!!7777!!!!~~^^^^::.........      !^              
               .^!~^!^.:~::^^^^~~!!~!!7!7!7!7!7!7!!!!~^~^^^^~~~^!7^?                 !~              
     [/bold blue]
-    [bold yellow]BOTINOK AGENT - Version 0.1[/bold yellow]
+    [bold yellow]BOTINOK AGENT - Version 0.2 | 27.03.2026[/bold yellow]
     """
         console.print(Panel(Text.from_markup(ascii_art), border_style="blue"))
 
