@@ -2171,6 +2171,14 @@ def main():
                 Text(f"BOTINOK AGENT - Version {_BOTINOK_VERSION}", style="bold yellow"),
                 border_style="blue"
             ))
+        
+        # Вывод прошлого ответа при возобновлении сессии
+        if resume_last_answer:
+            console.print("\n[bold green]Предыдущий ответ (возобновление сессии):[/bold green]")
+            console.print(Markdown(resume_last_answer))
+            console.print("\n" + "─" * console.width + "\n")
+            console.print("[bold cyan]Сессия продолжена. Введите ваш вопрос:[/bold cyan]")
+            console.print()
 
     try:
         while True:
