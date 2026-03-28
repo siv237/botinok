@@ -20,6 +20,7 @@ from rich.prompt import Confirm
 from rich.progress import Progress, BarColumn, TextColumn
 from core.session_manager import SessionManager
 from core.tool_manager import ToolManager
+from core.image_ascii import image_to_fullcolor
 
 import subprocess
 
@@ -2136,40 +2137,27 @@ def main():
     vis = BotVisualizer(model, "", num_ctx, dangerous_mode=args.dangerous)
     step_num = 1
 
-    # Вывод ASCII арта и версии (только если не stealth_mode)
+    # Вывод логотипа и версии (только если не stealth_mode)
     if not stealth_mode:
-        term_width = console.width
-        if term_width >= 100:
-            ascii_art = f"""
-    [bold blue]
-                                                           ^^:.                                      
-                                                          !~.~!7^:::::....                           
-                                                        ^?7^7!~~~7~~~~~~!!!!!!~~^^                  
-                                                       :J7:J^!7~ ^           ..:~P^                 
-                                                       7J !?:^~:~^::::........  !Y.                 
-                                                      ~Y::J!!7..~      ........:J?                  
-                                                     ~?7!?!:~!.^.              :Y!                  
-                                                    ~J~!?7!!: ^:               ^5~                  
-                                                  .!?!??~.~!:^:                !Y!                  
-                                                .^???77!?! .^.                 7?7                  
-                                              .~?J7??~.:~^::                   ?!?.                 
-                                           .^7J5J7^:7?~.::.                 .:^J77!                 
-                                         ^!7Y?~~7?! .:::.               :^!!~~^.  ?.                
-                                       .?7J7!?! .^^::.               :~!~^.       !~                
-                                   .:^~~^.?~:~^  ^.                 !7^.          .?                
-                    .:::::::::^^~7~^^.    ~?: ..:~.:::....         7!              ?:               
-                 .~~^:::::::::...!?        !?~~~~7!~!!~~~^::.     ^?.              7:               
-                 7:               !7        ^^::.......:^~!!^::   !7               ?.               
-               .~?..              .?^                      ^7~:^..J!.::::^^^^~~~~!!J!               
-               J7!7!!!~^::..       ~?                 ..:^^~7?777!?777777777!7!!!!~^J:              
-              ^7:::^~!!!!7!7!7!!~~^~J~:^:::::^^^^~~!!7777!!!!~~^^^^::.........      !^              
-              .^!~^!^.:~::^^^^~~!!~!!7!7!7!7!7!7!!!!~^~^^^^~~~^!7^?                 !~              
-    [/bold blue]
-    [bold yellow]BOTINOK AGENT - Version {_BOTINOK_VERSION}[/bold yellow]
-    """
-            console.print(Panel(Text.from_markup(ascii_art), border_style="blue"))
+        logo_path = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+        if os.path.exists(logo_path):
+            # Выводим цветной логотип через image_to_fullcolor
+            term_width = console.width
+            logo_width = min(80, (term_width - 4) // 2)
+            try:
+                ascii_art, _ = image_to_fullcolor(logo_path, logo_width)
+                # Добавляем версию под логотипом
+                version_text = f"BOTINOK AGENT - Version {_BOTINOK_VERSION}"
+                print(ascii_art)
+                console.print(f"\n[bold yellow]{version_text}[/bold yellow]\n")
+            except Exception:
+                # Fallback на текстовый баннер если логотип не удалось вывести
+                console.print(Panel(
+                    Text(f"BOTINOK AGENT - Version {_BOTINOK_VERSION}", style="bold yellow"),
+                    border_style="blue"
+                ))
         else:
-            # Компактный баннер для узких консолей
+            # Компактный баннер если логотип не найден
             console.print(Panel(
                 Text(f"BOTINOK AGENT - Version {_BOTINOK_VERSION}", style="bold yellow"),
                 border_style="blue"
