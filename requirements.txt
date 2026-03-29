@@ -1,5 +1,5 @@
 requests
 rich
-configparser
 inquirer
+configparser
 Pillow
