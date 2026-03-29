@@ -39,6 +39,11 @@ MAX_IMAGE_SIZE = int(os.environ.get("VISION_MAX_PIXELS", 16777216))  # 4096×409
 MAX_EDGE = int(os.environ.get("VISION_MAX_EDGE", 4096))  # Максимальная сторона
 
 
+def _looks_like_html(data: bytes) -> bool:
+    head = (data[:512] or b"").lstrip().lower()
+    return head.startswith(b"<!doctype") or head.startswith(b"<html")
+
+
 def _download_image(url: str, timeout: int = 30) -> tuple[bytes, str]:
     """Скачивает изображение по URL, возвращает (data, mime_type)"""
     try:
@@ -126,12 +131,16 @@ def _validate_and_process_image(image_bytes: bytes, mime_type: str) -> tuple[byt
         "final_format": mime_type,
     }
     
-    # Если Pillow недоступен - отправляем как есть (риск ошибки)
     if not PIL_AVAILABLE:
-        return image_bytes, mime_type, metadata
+        raise RuntimeError("Pillow is required for image validation/conversion")
     
     try:
-        # Открываем изображение
+        if _looks_like_html(image_bytes):
+            raise RuntimeError("Input looks like HTML, not an image")
+
+        img_probe = Image.open(BytesIO(image_bytes))
+        img_probe.verify()
+
         img = Image.open(BytesIO(image_bytes))
         metadata["original_format"] = img.format or "unknown"
         
@@ -239,9 +248,8 @@ def _validate_and_process_image(image_bytes: bytes, mime_type: str) -> tuple[byt
             metadata["final_format"] = "JPEG"
             return output_bytes, "image/jpeg", metadata
             
-        except Exception:
-            # Не удалось обработать - возвращаем как есть (пусть Ollama решает)
-            return image_bytes, mime_type, metadata
+        except Exception as e2:
+            raise RuntimeError(f"Invalid/unsupported image input: {type(e).__name__}: {e}") from e2
 
 
 def execute(
@@ -278,7 +286,9 @@ def execute(
             image_bytes, mime_type = _load_local_image(image_path)
             source = image_path
         
-        # Проверяем что это изображение
+        if _looks_like_html(image_bytes):
+            return "❌ Error: Input looks like HTML, not an image"
+
         if not mime_type.startswith("image/"):
             return f"❌ Error: File is not an image (detected: {mime_type})"
         
