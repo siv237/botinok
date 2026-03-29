@@ -39,30 +39,48 @@ MAX_IMAGE_SIZE = int(os.environ.get("VISION_MAX_PIXELS", 16777216))  # 4096×409
 MAX_EDGE = int(os.environ.get("VISION_MAX_EDGE", 4096))  # Максимальная сторона
 
 
-def _download_image(url: str, timeout_sec: int = 30) -> tuple[bytes, str]:
+def _download_image(url: str, timeout: int = 30) -> tuple[bytes, str]:
     """Скачивает изображение по URL, возвращает (data, mime_type)"""
     try:
-        with httpx.Client(timeout=timeout_sec, follow_redirects=True) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            
-            # Определяем mime type из заголовка или расширения URL
-            mime_type = resp.headers.get("content-type", "")
-            if not mime_type or mime_type == "application/octet-stream":
-                # Пытаемся угадать по расширению
-                parsed = urlparse(url)
-                ext = os.path.splitext(parsed.path)[1].lower()
-                mime_type = {
-                    ".jpg": "image/jpeg",
-                    ".jpeg": "image/jpeg",
-                    ".png": "image/png",
-                    ".gif": "image/gif",
-                    ".webp": "image/webp",
-                    ".bmp": "image/bmp",
-                    ".svg": "image/svg+xml",
-                }.get(ext, "image/jpeg")  # default
-            
-            return resp.content, mime_type
+        resp = httpx.get(url, timeout=timeout, follow_redirects=True)
+        resp.raise_for_status()
+        
+        # Проверяем Content-Type из заголовков
+        content_type = resp.headers.get("content-type", "").lower()
+        
+        # Если Content-Type указан и это не image/* - возможно это ошибка или HTML страница
+        if content_type and not content_type.startswith("image/"):
+            # Проверяем начало контента - может быть HTML?
+            content_start = resp.content[:100].lower()
+            if content_start.startswith(b"<!doctype") or content_start.startswith(b"<html"):
+                raise RuntimeError(f"URL returned HTML page instead of image (Content-Type: {content_type})")
+        
+        # Пытаемся определить MIME тип
+        mime_type = content_type.split(";")[0] if content_type else None
+        
+        if not mime_type:
+            # Пробуем угадать по расширению URL
+            parsed = urlparse(url)
+            ext = os.path.splitext(parsed.path)[1].lower()
+            mime_type = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+                ".bmp": "image/bmp",
+                ".svg": "image/svg+xml",
+            }.get(ext, "image/jpeg")  # default
+        
+        # Валидируем что это реальное изображение через Pillow
+        if PIL_AVAILABLE:
+            try:
+                img = Image.open(BytesIO(resp.content))
+                img.verify()  # Проверяем целостность файла
+            except Exception as e:
+                raise RuntimeError(f"Downloaded content is not a valid image: {e}")
+        
+        return resp.content, mime_type
     except Exception as e:
         raise RuntimeError(f"Failed to download image: {e}")
 
