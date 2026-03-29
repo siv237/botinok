@@ -42,6 +42,7 @@ class ToolManager:
             "github": ("tools.github", "github"),
             "skills": ("tools.skills", "skills"),
             "curl": ("tools.curl", "curl"),
+            "vision": ("tools.vision", "execute"),
         }
         
         # Базовые описания (пока tool не загружен)
@@ -178,6 +179,23 @@ class ToolManager:
                             "output_path": {"type": "string", "description": "Путь для сохранения ответа в файл (опционально, только внутри папки сессии без dangerous_mode)"}
                         },
                         "required": ["url"]
+                    }
+                }
+            },
+            "vision": {
+                "type": "function",
+                "function": {
+                    "name": "vision",
+                    "description": "Анализ изображений мультимодальной моделью. Конвертирует картинку в base64 для передачи в LLM (llava, bakllava и др.)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "image_path": {"type": "string", "description": "Путь к локальному файлу изображения (jpg, png, gif, webp)"},
+                            "url": {"type": "string", "description": "URL изображения (альтернатива image_path)"},
+                            "prompt": {"type": "string", "description": "Вопрос к модели про изображение (по умолчанию: 'Опиши что ты видишь')"},
+                            "timeout_sec": {"type": "integer", "description": "Таймаут скачивания URL в секундах (по умолчанию 30)"}
+                        },
+                        "required": []
                     }
                 }
             },

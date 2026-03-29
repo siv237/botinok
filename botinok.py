@@ -1686,11 +1686,20 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     
                     sm.log_tool_call(session_path, func_name, func_args, result, status="completed")
                     
-                    messages.append({
-                        "role": "tool",
-                        "content": compact_msg,
-                        "tool_call_id": tool_call.get("id")
-                    })
+                    # Special handling for vision tool - add message with images for multimodal models
+                    if func_name == "vision" and isinstance(result, dict) and result.get("image_data"):
+                        vision_prompt = result.get("prompt", "Опиши что ты видишь на этом изображении")
+                        messages.append({
+                            "role": "user",
+                            "content": vision_prompt,
+                            "images": [result["image_data"]]
+                        })
+                    else:
+                        messages.append({
+                            "role": "tool",
+                            "content": compact_msg,
+                            "tool_call_id": tool_call.get("id")
+                        })
                     
                     sm.log_step(session_path, f"tool_{func_name}_{int(time.time())}", tool_call, {"result": result}, {})
 
@@ -1893,11 +1902,20 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
                 
                 sm.log_tool_call(session_path, func_name, func_args, result, status="completed")
                 
-                messages.append({
-                    "role": "tool",
-                    "content": compact_msg,
-                    "tool_call_id": tool_call.get("id")
-                })
+                # Special handling for vision tool - add message with images for multimodal models
+                if func_name == "vision" and isinstance(result, dict) and result.get("image_data"):
+                    vision_prompt = result.get("prompt", "Опиши что ты видишь на этом изображении")
+                    messages.append({
+                        "role": "user",
+                        "content": vision_prompt,
+                        "images": [result["image_data"]]
+                    })
+                else:
+                    messages.append({
+                        "role": "tool",
+                        "content": compact_msg,
+                        "tool_call_id": tool_call.get("id")
+                    })
                 
                 sm.log_step(session_path, f"tool_{func_name}_{int(time.time())}", tool_call, {"result": result}, {})
 
