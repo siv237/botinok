@@ -85,8 +85,27 @@ class ToolManager:
                 "type": "function",
                 "function": {
                     "name": "file_system",
-                    "description": "Инструмент для работы с файловой системой",
-                    "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "search", "grep", "read", "info", "inspect"]}, "path": {"type": "string"}}, "required": ["action"]}
+                    "description": "Инструмент для работы с файловой системой. Безопасные команды (list, search, grep, read, info, inspect) работают всегда. Опасные команды (delete, move, copy, mkdir, chmod, symlink, touch) требуют dangerous_mode и подтверждения при работе вне сессии.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["list", "search", "grep", "read", "info", "inspect", "find", "delete", "move", "copy", "mkdir", "chmod", "symlink", "touch"],
+                                "description": "list,search,grep,read,info,inspect,find - безопасные. delete,move,copy,mkdir,chmod,symlink,touch - требуют dangerous_mode"
+                            },
+                            "path": {"type": "string", "description": "Исходный путь (для всех команд)"},
+                            "dest": {"type": "string", "description": "Целевой путь (для move, copy, symlink)"},
+                            "mode": {"type": "string", "description": "Права доступа в octal или символьном виде (для chmod, mkdir)"},
+                            "pattern": {"type": "string"},
+                            "recursive": {"type": "boolean"},
+                            "content_query": {"type": "string"},
+                            "max_results": {"type": "integer"},
+                            "offset": {"type": "integer"},
+                            "limit": {"type": "integer"}
+                        },
+                        "required": ["action"]
+                    }
                 }
             },
             "journal": {
@@ -338,8 +357,11 @@ class ToolManager:
         if name not in self._tool_registry:
             return f"Error: unknown tool '{name}'"
 
-        if (not self.dangerous_mode) and name in ("shell_exec", "code_editor"):
-            return f"Error: tool '{name}' requires dangerous mode"
+        # Опасные команды file_system
+        DANGEROUS_FILESYSTEM_ACTIONS = ("delete", "move", "copy", "mkdir", "chmod", "symlink", "touch")
+        
+        if (not self.dangerous_mode) and name == "file_system" and isinstance(args, dict) and args.get("action") in DANGEROUS_FILESYSTEM_ACTIONS:
+            return f"Error: file_system action '{args.get('action')}' requires dangerous mode"
 
         tool = self.get_tool(name)
         if not tool or "function" not in tool:
@@ -354,12 +376,18 @@ class ToolManager:
                     # Для curl передаем progress_callback
                     if name == "curl" and progress_callback is not None:
                         return func(session_path=session_path, progress_callback=progress_callback, **args)
+                    # Для file_system передаем dangerous_mode
+                    if name == "file_system":
+                        return func(session_path=session_path, dangerous_mode=self.dangerous_mode, **args)
                     return func(session_path=session_path, **args)
                 except TypeError:
                     return func(**args)
             # Для curl без session_path тоже передаем progress_callback
             if name == "curl" and progress_callback is not None:
                 return func(progress_callback=progress_callback, **args)
+            # Для file_system без session_path тоже передаем dangerous_mode
+            if name == "file_system":
+                return func(dangerous_mode=self.dangerous_mode, **args)
             return func(**args)
         except Exception as e:
             tb = traceback.format_exc()

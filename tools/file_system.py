@@ -6,6 +6,9 @@ import json
 import hashlib
 import platform
 import subprocess
+import shutil
+import stat
+import time
 from datetime import datetime
 from typing import List, Optional, Dict, Union, Tuple
 
@@ -26,7 +29,11 @@ def file_system_tool(
     pid: Optional[int] = None,
     unit: Optional[str] = None,
     since: Optional[str] = None,
-    lines: int = 200
+    lines: int = 200,
+    dest: Optional[str] = None,
+    mode: Optional[str] = None,
+    session_path: Optional[str] = None,
+    dangerous_mode: bool = False,
 ) -> str:
     """
     Универсальный инструмент для работы с файловой системой.
@@ -38,6 +45,15 @@ def file_system_tool(
     - read: Чтение содержимого файла с поддержкой пагинации
     - info: Получение метаданных о файле
     - inspect: Набор read-only команд для аналитики (fs/du/grep/log/sys/proc/service/journal)
+    
+    Dangerous actions (требуют dangerous_mode и подтверждения вне сессии):
+    - delete: Удаление файла или директории
+    - move: Перемещение/переименование файла или директории
+    - copy: Копирование файла или директории
+    - mkdir: Создание директории
+    - chmod: Изменение прав доступа
+    - symlink: Создание символической ссылки
+    - touch: Создание пустого файла или обновление времени модификации
     """
     try:
         if action == "list":
@@ -68,6 +84,26 @@ def file_system_tool(
                 unit=unit,
                 since=since,
                 lines=lines,
+            )
+        elif action == "find":
+            return _find_files(
+                path=path,
+                pattern=pattern,
+                ftype=content_query or "any",
+                min_size=max(0, offset) if offset > 0 else None,
+                max_size=limit if limit < 1000 and limit > 0 else None,
+                mtime_days=depth if depth > 0 and depth < 100 else None,
+                max_depth=10,
+                max_results=max_results,
+            )
+        elif action in ("delete", "move", "copy", "mkdir", "chmod", "symlink", "touch"):
+            return _dangerous_action(
+                action=action,
+                path=path,
+                dest=dest,
+                mode=mode,
+                session_path=session_path,
+                dangerous_mode=dangerous_mode,
             )
         else:
             return f"Ошибка: Неизвестное действие '{action}'"
@@ -576,3 +612,227 @@ def _grep_regex(path: str, pattern: str, regex: str, recursive: bool, max_result
             continue
 
     return "\n".join(matches) if matches else "Совпадений не найдено"
+
+
+def _is_within_session(target_path: str, session_path: Optional[str]) -> bool:
+    """Проверяет, находится ли путь внутри сессии."""
+    if not session_path:
+        return False
+    try:
+        session = os.path.realpath(session_path)
+        target = os.path.realpath(target_path)
+        return target == session or target.startswith(session + os.sep)
+    except Exception:
+        return False
+
+
+def _confirm_action(action: str, path: str, dest: Optional[str] = None) -> bool:
+    """Запрашивает подтверждение у пользователя для опасного действия."""
+    try:
+        if dest:
+            prompt = f"\n⚠️  Подтвердите {action}: '{path}' -> '{dest}' [y/N]: "
+        else:
+            prompt = f"\n⚠️  Подтвердите {action}: '{path}' [y/N]: "
+        response = input(prompt).strip().lower()
+        return response in ("y", "yes", "д", "да")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def _parse_mode(mode_str: str) -> int:
+    """Парсит строку режима доступа (octal или символьную) в число."""
+    if not mode_str:
+        return 0o755
+    try:
+        # Пробуем octal (например, "755" или "0755")
+        return int(mode_str, 8)
+    except ValueError:
+        pass
+    
+    # Символьное представение (например, "rwxr-xr-x")
+    mode = 0
+    parts = mode_str.split(",")
+    for part in parts:
+        part = part.strip()
+        if len(part) >= 3 and part[0] in ("r", "-"):
+            # Формат rwxr-xr-x
+            m = 0
+            for i, c in enumerate(part[:9]):
+                if c != "-":
+                    m |= [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001][i]
+            return m
+    return 0o755
+
+
+def _dangerous_action(
+    action: str,
+    path: str,
+    dest: Optional[str] = None,
+    mode: Optional[str] = None,
+    session_path: Optional[str] = None,
+    dangerous_mode: bool = False,
+) -> str:
+    """Обработчик опасных операций с файловой системой."""
+    if not dangerous_mode:
+        return f"Ошибка: действие '{action}' требует dangerous mode"
+    
+    # Проверка на пути вне сессии теперь выполняется на уровне botinok.py
+    # с интерактивным подтверждением. Здесь только выполнение.
+    
+    try:
+        if action == "delete":
+            if not os.path.lexists(path):
+                return f"Ошибка: путь не существует: {path}"
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+            return f"Удалено: {path}"
+        
+        elif action == "move":
+            if not dest:
+                return "Ошибка: для move нужен параметр dest"
+            if not os.path.exists(path):
+                return f"Ошибка: исходный путь не существует: {path}"
+            os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
+            shutil.move(path, dest)
+            return f"Перемещено: {path} -> {dest}"
+        
+        elif action == "copy":
+            if not dest:
+                return "Ошибка: для copy нужен параметр dest"
+            if not os.path.exists(path):
+                return f"Ошибка: исходный путь не существует: {path}"
+            os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
+            if os.path.isdir(path):
+                shutil.copytree(path, dest)
+            else:
+                shutil.copy2(path, dest)
+            return f"Скопировано: {path} -> {dest}"
+        
+        elif action == "mkdir":
+            mode_val = _parse_mode(mode) if mode else 0o755
+            os.makedirs(path, mode=mode_val, exist_ok=True)
+            return f"Создана директория: {path} (mode={oct(mode_val)})"
+        
+        elif action == "chmod":
+            if not os.path.exists(path):
+                return f"Ошибка: путь не существует: {path}"
+            mode_val = _parse_mode(mode) if mode else 0o644
+            os.chmod(path, mode_val)
+            return f"Изменены права: {path} -> {oct(mode_val)}"
+        
+        elif action == "symlink":
+            if not dest:
+                return "Ошибка: для symlink нужен параметр dest (целевая ссылка)"
+            os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
+            if os.path.exists(dest):
+                os.remove(dest)
+            os.symlink(path, dest)
+            return f"Создана ссылка: {dest} -> {path}"
+        
+        elif action == "touch":
+            if os.path.exists(path):
+                # Обновляем время модификации
+                os.utime(path, None)
+                return f"Обновлено время модификации: {path}"
+            else:
+                # Создаем пустой файл
+                os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+                with open(path, "w") as f:
+                    pass
+                return f"Создан файл: {path}"
+        
+        else:
+            return f"Ошибка: неизвестное опасное действие '{action}'"
+            
+    except Exception as e:
+        return f"Ошибка при {action}: {str(e)}"
+
+
+def _find_files(
+    path: str,
+    pattern: str = "*",
+    ftype: str = "any",
+    min_size: Optional[int] = None,
+    max_size: Optional[int] = None,
+    mtime_days: Optional[int] = None,
+    max_depth: int = 10,
+    max_results: int = 50,
+) -> str:
+    """Продвинутый поиск файлов с фильтрами (read-only, безопасный)."""
+    if not os.path.exists(path):
+        return f"Путь не существует: {path}"
+    
+    results = []
+    now = time.time()
+    cutoff_time = now - (mtime_days * 86400) if mtime_days else None
+    
+    try:
+        for root, dirs, files in os.walk(path):
+            # Ограничиваем глубину
+            depth = root.count(os.sep) - path.count(os.sep)
+            if depth >= max_depth:
+                del dirs[:]
+                continue
+            
+            for name in files + dirs:
+                if len(results) >= max_results:
+                    break
+                    
+                full_path = os.path.join(root, name)
+                
+                # Проверяем паттерн
+                if not fnmatch.fnmatch(name, pattern):
+                    continue
+                
+                # Определяем тип
+                is_file = os.path.isfile(full_path)
+                is_dir = os.path.isdir(full_path) and not os.path.islink(full_path)
+                is_link = os.path.islink(full_path)
+                
+                # Фильтр по типу
+                if ftype == "file" and not is_file:
+                    continue
+                if ftype == "dir" and not is_dir:
+                    continue
+                if ftype == "link" and not is_link:
+                    continue
+                
+                # Фильтр по размеру
+                if is_file:
+                    try:
+                        size = os.path.getsize(full_path)
+                        if min_size is not None and size < min_size:
+                            continue
+                        if max_size is not None and size > max_size:
+                            continue
+                    except Exception:
+                        continue
+                
+                # Фильтр по времени модификации
+                if cutoff_time:
+                    try:
+                        mtime = os.path.getmtime(full_path)
+                        if mtime < cutoff_time:
+                            continue
+                    except Exception:
+                        continue
+                
+                # Добавляем в результаты
+                tag = "[LINK]" if is_link else "[DIR]" if is_dir else "[FILE]"
+                size_str = str(os.path.getsize(full_path)) if is_file else "-"
+                results.append(f"{tag} {full_path} (size={size_str})")
+            
+            if len(results) >= max_results:
+                break
+    except Exception as e:
+        return f"Ошибка при поиске: {str(e)}"
+    
+    if not results:
+        return f"Ничего не найдено в {path} с фильтрами: pattern='{pattern}', type='{ftype}'"
+    
+    header = f"Найдено {len(results)} элементов (max_results={max_results}):"
+    output = [header] + results
+    
+    return "\n".join(output)

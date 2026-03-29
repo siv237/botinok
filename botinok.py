@@ -1461,8 +1461,58 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                         func_args_display = func_args
                     
                     # Логика подтверждения для опасных инструментов
-                    if func_name in ("shell_exec", "code_editor") and tm.dangerous_mode:
-                        if func_name == "code_editor" and isinstance(func_args, dict):
+                    if func_name in ("shell_exec", "code_editor", "file_system") and tm.dangerous_mode:
+                        # file_system: проверяем опасные действия вне сессии
+                        if func_name == "file_system" and isinstance(func_args, dict):
+                            fs_action = func_args.get("action", "")
+                            DANGEROUS_FS_ACTIONS = ("delete", "move", "copy", "mkdir", "chmod", "symlink", "touch")
+                            if fs_action in DANGEROUS_FS_ACTIONS:
+                                fs_path = func_args.get("path", "")
+                                fs_dest = func_args.get("dest")
+                                # Проверяем, находятся ли пути внутри сессии
+                                if not _is_within(session_path, fs_path) or (fs_dest and not _is_within(session_path, fs_dest)):
+                                    live.stop()
+                                    warn_text = (
+                                        "\n\n[bold red]ВНИМАНИЕ:[/bold red] путь находится вне папки сессии. "
+                                        f"\n[bold yellow]Действие:[/bold yellow] {fs_action}"
+                                        f"\n[bold yellow]Путь:[/bold yellow] {fs_path}"
+                                        + (f"\n[bold yellow]Цель:[/bold yellow] {fs_dest}" if fs_dest else "")
+                                    )
+                                    console.print("\n" + "═" * 80)
+                                    console.print(Panel(
+                                        Markdown(
+                                            f"### Запрос на использование инструмента: `{func_name}`\n\n"
+                                            f"**Аргументы:**\n```json\n{json.dumps(func_args, indent=2, ensure_ascii=False)}\n```"
+                                            f"{warn_text}"
+                                        ),
+                                        title="[bold red]ВНИМАНИЕ: ОПАСНОЕ ДЕЙСТВИЕ ВНЕ СЕССИИ[/bold red]",
+                                        border_style="red"
+                                    ))
+                                    ans = console.input("\n[bold yellow]Разрешить выполнение? (y/n): [/bold yellow]").strip().lower()
+                                    if ans not in ("y", "yes", "д", "да"):
+                                        reason = console.input("[bold cyan]Укажите причину отказа для бота: [/bold cyan]").strip()
+                                        if not reason:
+                                            reason = "Отменено пользователем без объяснения причин."
+                                        result = f"ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Причина: {reason}"
+                                        live.start()
+                                        vis.add_tool_activity(func_name, str(func_args), status="aborted")
+                                        compact_msg = _compact_tool_message(func_name, func_args, result, "")
+                                        messages.append({
+                                            "role": "tool",
+                                            "tool_call_id": tool_call["id"],
+                                            "name": func_name,
+                                            "content": compact_msg
+                                        })
+                                        sm.update_context(session_path, "tool", compact_msg)
+                                        continue
+                                    live.start()
+                        
+                        # Пропускаем дальнейшие проверки для file_system если пути ВНУТРИ сессии
+                        # Если пути вне сессии - подтверждение уже запрошено выше
+                        if func_name == "file_system":
+                            # file_system выполняется ниже как обычный инструмент
+                            live.start()
+                        elif func_name == "code_editor" and isinstance(func_args, dict):
                             ans = "y"
                             # Skip confirmation for safe edits inside session project workspace.
                             if 'needs_confirm' in locals() and not needs_confirm:
