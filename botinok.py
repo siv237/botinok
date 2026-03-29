@@ -1511,6 +1511,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                         # Если пути вне сессии - подтверждение уже запрошено выше
                         if func_name == "file_system":
                             # file_system выполняется ниже как обычный инструмент
+                            ans = "y"
                             live.start()
                         elif func_name == "code_editor" and isinstance(func_args, dict):
                             ans = "y"
