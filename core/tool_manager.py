@@ -145,7 +145,7 @@ class ToolManager:
                 "type": "function",
                 "function": {
                     "name": "curl",
-                    "description": "HTTP GET запросы для readonly-режима. Только чтение - без записи на диск, POST/PUT/DELETE запрещены. Поддерживает jq фильтрацию JSON",
+                    "description": "HTTP GET запросы. Readonly по умолчанию. Запись файлов разрешена только внутри папки сессии (session_path). Для записи вне сессии требуется dangerous_mode",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -154,7 +154,8 @@ class ToolManager:
                             "timeout_sec": {"type": "integer", "description": "Таймаут в секундах (по умолчанию 30)"},
                             "max_bytes": {"type": "integer", "description": "Максимальный размер ответа (по умолчанию 256000)"},
                             "follow_redirects": {"type": "boolean", "description": "Следовать за редиректами (по умолчанию true)"},
-                            "jq_filter": {"type": "string", "description": "Фильтр jq для обработки JSON. Примеры: .userId | .items[] | {name:.name}. ВАЖНО: без кавычек вокруг фильтра, точка в начале обязательна (автодобавится если пропущена)"}
+                            "jq_filter": {"type": "string", "description": "Фильтр jq для обработки JSON. Примеры: .userId | .items[] | {name:.name}. ВАЖНО: без кавычек вокруг фильтра"},
+                            "output_path": {"type": "string", "description": "Путь для сохранения ответа в файл (опционально, только внутри папки сессии без dangerous_mode)"}
                         },
                         "required": ["url"]
                     }
@@ -274,11 +275,12 @@ class ToolManager:
         info += "Агент может исправить инструменты изучив лог и исходный код."
         return info
 
-    def call_tool(self, name, args=None, session_path=None):
+    def call_tool(self, name, args=None, session_path=None, progress_callback=None):
         """Выполнить инструмент по имени.
 
         args может быть dict или JSON-строкой (как в tool_calls от моделей).
         session_path прокидывается в инструменты, которые его поддерживают (например code_editor).
+        progress_callback используется для curl чтобы обновлять прогресс скачивания.
         """
         if args is None:
             args = {}
@@ -311,9 +313,15 @@ class ToolManager:
         try:
             if session_path is not None:
                 try:
+                    # Для curl передаем progress_callback
+                    if name == "curl" and progress_callback is not None:
+                        return func(session_path=session_path, progress_callback=progress_callback, **args)
                     return func(session_path=session_path, **args)
                 except TypeError:
                     return func(**args)
+            # Для curl без session_path тоже передаем progress_callback
+            if name == "curl" and progress_callback is not None:
+                return func(progress_callback=progress_callback, **args)
             return func(**args)
         except Exception as e:
             tb = traceback.format_exc()

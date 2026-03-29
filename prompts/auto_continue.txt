@@ -1,0 +1,8 @@
+Продолжай выполнение последнего запроса пользователя после авто-очистки контекста.
+Не повторяй длинные куски текста. Не зацикливайся. Если нужны детали — смотри в артефактах/логах.
+
+last_user_prompt: {{LAST_USER_PROMPT}}
+session_path: {{SESSION_PATH}}
+full_history_artifact: {{ARTIFACT_PATH}}
+files: response.md, thinking.md, tools.log, session_raw.log, context.json, artifacts/
+Твоя цель: завершить задачу пользователя и дать финальный ответ.

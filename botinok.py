@@ -449,6 +449,16 @@ def _ollama_summarize_and_reset_context(
     reserve_tokens: int = 1600,
 ):
     system_msgs = [m for m in messages if m.get("role") == "system"]
+    
+    # Находим последний запрос пользователя для сохранения контекста задачи
+    last_user_prompt = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            content = m.get("content", "")
+            # Пропускаем системные auto-continue сообщения
+            if not content.startswith("Auto-continue:") and not content.startswith("Сформулируй финальный ответ"):
+                last_user_prompt = content
+                break
 
     artifact_name = f"context_overflow_full_{int(time.time())}.json"
     try:
@@ -460,26 +470,28 @@ def _ollama_summarize_and_reset_context(
     except Exception:
         artifact_path = f"./artifacts/{artifact_name}"
 
+    summary_system_content = sm.load_prompt(
+        session_path,
+        "context_overflow_summary",
+        REASON=reason,
+        ORIGINAL_TASK=last_user_prompt[:300]
+    )
+    
     summary_system = {
         "role": "system",
-        "content": (
-            "Ты — BOTINOK. Сформируй краткий протокол сессии для продолжения работы при переполнении контекста. "
-            "Не повторяй длинный текст. Не вызывай инструменты.\n\n"
-            "Формат:\n"
-            "- SESSION_PROTOCOL\n"
-            "- reason: ...\n"
-            "- key_facts: (5-10 пунктов)\n"
-            "- open_questions: (если есть)\n"
-            "- next_steps: (3-7 пунктов)\n"
-        ),
+        "content": summary_system_content or "Create session protocol",
     }
+    summary_user_content = sm.load_prompt(
+        session_path,
+        "context_overflow_user",
+        REASON=reason,
+        ORIGINAL_TASK=last_user_prompt[:500],
+        ARTIFACT_PATH=artifact_path
+    )
+    
     summary_user = {
         "role": "user",
-        "content": (
-            f"Контекст близок к лимиту или модель зациклилась. reason={reason}. "
-            f"Полная история сохранена в {artifact_path}. "
-            "Сделай протокол сессии, чтобы можно было продолжить работу с чистым контекстом."
-        ),
+        "content": summary_user_content or f"Create session protocol. Reason: {reason}",
     }
 
     summary_messages = system_msgs + [summary_system, summary_user]
@@ -499,6 +511,7 @@ def _ollama_summarize_and_reset_context(
         "SESSION_PROTOCOL\n"
         f"reason: {reason}\n"
         f"artifact: {artifact_path}\n"
+        f"original_task: {last_user_prompt[:200]}...\n"
         "key_facts:\n"
         "- (summary generation failed)\n"
         "next_steps:\n"
@@ -526,13 +539,17 @@ def _ollama_summarize_and_reset_context(
     except Exception:
         pass
 
+    protocol_content = sm.load_prompt(
+        session_path,
+        "context_overflow_protocol",
+        ARTIFACT_PATH=artifact_path,
+        SESSION_PROTOCOL=summary_text,
+        ORIGINAL_TASK=last_user_prompt[:300]
+    )
+    
     protocol_msg = {
         "role": "system",
-        "content": (
-            "Контекст был очищен из-за риска переполнения/зацикливания. "
-            f"Полная история: {artifact_path}\n\n"
-            f"{summary_text}"
-        ),
+        "content": protocol_content or f"Context cleared. Continue task: {last_user_prompt[:100]}",
     }
 
     messages.clear()
@@ -626,6 +643,19 @@ class BotVisualizer:
             if tool["name"] == name and tool["status"] == "running":
                 tool["status"] = status
                 tool["size_kb"] = size_kb
+                break
+
+    def update_tool_progress(self, name, bytes_downloaded, total_bytes):
+        """Обновляет прогресс скачивания для curl в реальном времени"""
+        for tool in self.active_tools:
+            if tool["name"] == name and tool["status"] == "running":
+                size_kb = bytes_downloaded / 1024
+                tool["size_kb"] = size_kb
+                if total_bytes > 0:
+                    pct = (bytes_downloaded / total_bytes) * 100
+                    tool["query"] = f"{size_kb:.1f} KB / {total_bytes/1024:.1f} KB ({pct:.0f}%)"
+                else:
+                    tool["query"] = f"{size_kb:.1f} KB downloaded"
                 break
 
     @property
@@ -931,17 +961,16 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     )
                     auto_recoveries += 1
                     tool_rounds = 0
+                    cont_user_content = sm.load_prompt(
+                        session_path,
+                        "auto_continue",
+                        LAST_USER_PROMPT=turn_prompt,
+                        SESSION_PATH=session_path,
+                        ARTIFACT_PATH=artifact_path
+                    )
                     cont_user = {
                         "role": "user",
-                        "content": (
-                            "Продолжай выполнение последнего запроса пользователя после авто-очистки контекста. "
-                            "Не повторяй длинные куски текста. Не зацикливайся. Если нужны детали — смотри в артефактах/логах.\n\n"
-                            f"last_user_prompt: {turn_prompt}\n"
-                            f"session_path: {session_path}\n"
-                            f"full_history_artifact: {artifact_path}\n"
-                            "files: response.md, thinking.md, tools.log, session_raw.log, context.json, artifacts/\n"
-                            "Твоя цель: завершить задачу пользователя и дать финальный ответ."
-                        )
+                        "content": cont_user_content or f"Continue task: {turn_prompt[:100]}",
                     }
                     messages.append(cont_user)
                     sm.update_context(session_path, "assistant", summary)
@@ -1251,35 +1280,43 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     raise RuntimeError(f"Ollama stream error: {stream_error}")
 
                 if (not tool_calls) and (not full_response.strip()) and full_thinking.strip():
-                    aborted_reason = "missing_final_response"
+                    # Модель сгенерировала thinking но не дала финальный ответ
+                    # НЕ очищаем контекст, просто просим сформулировать ответ
                     if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
-                        summary, _ = _ollama_summarize_and_reset_context(
-                            sm,
-                            model,
+                        # Если уже много попыток, просто добавляем системное сообщение
+                        # Загружаем промпт из файла для формулирования финального ответа
+                        cont_user_content = sm.load_prompt(
                             session_path,
-                            messages,
-                            num_ctx,
-                            reason=f"{aborted_reason}_recoveries_exhausted({MAX_AUTO_RECOVERIES_PER_TURN})",
+                            "auto_continue_final",
+                            LAST_USER_PROMPT=turn_prompt,
+                            SESSION_PATH=session_path
                         )
-                        sm.update_context(session_path, "assistant", summary)
-                        messages.append({"role": "assistant", "content": summary})
-                        break
+                        cont_user = {
+                            "role": "user",
+                            "content": cont_user_content or f"Formulate final answer for: {turn_prompt[:100]}",
+                        }
+                        messages.append(cont_user)
+                        sm.update_context(session_path, "user", cont_user["content"])
+                        continue
                     auto_recoveries += 1
                     tool_rounds = 0
+                    # Загружаем промпт из файла
+                    cont_user_content = sm.load_prompt(
+                        session_path,
+                        "auto_continue_final",
+                        LAST_USER_PROMPT=turn_prompt,
+                        SESSION_PATH=session_path
+                    )
                     cont_user = {
                         "role": "user",
-                        "content": (
-                            "Сформулируй финальный ответ на последний запрос пользователя. "
-                            "Не повторяй рассуждения и не вызывай инструменты без необходимости.\n\n"
-                            f"last_user_prompt: {turn_prompt}\n"
-                            f"session_path: {session_path}\n"
-                        ),
+                        "content": cont_user_content or f"Formulate final answer for: {turn_prompt[:100]}",
                     }
                     messages.append(cont_user)
                     sm.update_context(session_path, "user", cont_user["content"])
                     continue
 
-                if aborted_reason:
+                # Обрабатываем другие aborted_reason ТОЛЬКО если это repetition (не missing_final_response)
+                if aborted_reason and aborted_reason != "missing_final_response":
                     if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
                         summary, _ = _ollama_summarize_and_reset_context(
                             sm,
@@ -1303,17 +1340,16 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     )
                     auto_recoveries += 1
                     tool_rounds = 0
+                    cont_user_content = sm.load_prompt(
+                        session_path,
+                        "auto_continue",
+                        LAST_USER_PROMPT=turn_prompt,
+                        SESSION_PATH=session_path,
+                        ARTIFACT_PATH=artifact_path
+                    )
                     cont_user = {
                         "role": "user",
-                        "content": (
-                            "Продолжай выполнение последнего запроса пользователя после авто-очистки контекста. "
-                            "Не повторяй длинные куски текста. Не зацикливайся. Если нужны детали — смотри в артефактах/логах.\n\n"
-                            f"last_user_prompt: {turn_prompt}\n"
-                            f"session_path: {session_path}\n"
-                            f"full_history_artifact: {artifact_path}\n"
-                            "files: response.md, thinking.md, tools.log, session_raw.log, context.json, artifacts/\n"
-                            "Твоя цель: завершить задачу пользователя и дать финальный ответ."
-                        )
+                        "content": cont_user_content or f"Continue task: {turn_prompt[:100]}",
                     }
                     messages.append(cont_user)
                     sm.update_context(session_path, "assistant", summary)
@@ -1345,17 +1381,16 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     )
                     auto_recoveries += 1
                     tool_rounds = 0
+                    cont_user_content = sm.load_prompt(
+                        session_path,
+                        "auto_continue",
+                        LAST_USER_PROMPT=turn_prompt,
+                        SESSION_PATH=session_path,
+                        ARTIFACT_PATH=artifact_path
+                    )
                     cont_user = {
                         "role": "user",
-                        "content": (
-                            "Продолжай выполнение последнего запроса пользователя после авто-очистки контекста. "
-                            "Не повторяй длинные куски текста. Не зацикливайся. Если нужны детали — смотри в артефактах/логах.\n\n"
-                            f"last_user_prompt: {turn_prompt}\n"
-                            f"session_path: {session_path}\n"
-                            f"full_history_artifact: {artifact_path}\n"
-                            "files: response.md, thinking.md, tools.log, session_raw.log, context.json, artifacts/\n"
-                            "Твоя цель: завершить задачу пользователя и дать финальный ответ."
-                        )
+                        "content": cont_user_content or f"Continue task: {turn_prompt[:100]}",
                     }
                     messages.append(cont_user)
                     sm.update_context(session_path, "assistant", summary)
@@ -1576,10 +1611,14 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     result_queue = queue.Queue()
                     def run_tool():
                         try:
-                            # Для инструментов, поддерживающих стриминг или порционную отдачу,
-                            # здесь можно было бы реализовать колбэк. Но пока сделаем имитацию
-                            # живого набора токенов во время ожидания.
-                            res = tm.call_tool(func_name, func_args, session_path=effective_session_path)
+                            # Для curl передаем progress_callback для real-time обновления
+                            if func_name == "curl":
+                                def progress_callback(bytes_downloaded, total_bytes):
+                                    vis.update_tool_progress(func_name, bytes_downloaded, total_bytes)
+                                    layout["tools_panel"].update(vis.get_tools_panel())
+                                res = tm.call_tool(func_name, func_args, session_path=effective_session_path, progress_callback=progress_callback)
+                            else:
+                                res = tm.call_tool(func_name, func_args, session_path=effective_session_path)
                             result_queue.put(("success", res))
                         except Exception as e:
                             result_queue.put(("error", str(e)))
