@@ -821,6 +821,12 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
 
     turn_prompt = prompt
 
+    # Загружаем identity как первое системное сообщение (если еще не загружено)
+    if messages and not any(m.get("role") == "system" and "BOTINOK" in str(m.get("content", "")) for m in messages):
+        identity_content = sm.load_prompt(session_path, "identity")
+        if identity_content:
+            messages.insert(0, {"role": "system", "content": identity_content})
+
     layout = create_layout()
     
     # Подготовка инструментов
