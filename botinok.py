@@ -167,10 +167,17 @@ def _check_remote_version():
 
 
 def _perform_update():
-    """Выполняет git pull для обновления."""
+    """Выполняет git pull для обновления и при необходимости обновляет зависимости Python."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
     try:
+        # Запоминаем текущий хэш перед pull
+        old_hash_result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            capture_output=True, text=True, cwd=script_dir, timeout=5
+        )
+        old_hash = old_hash_result.stdout.strip() if old_hash_result.returncode == 0 else None
+        
         # Определяем текущую ветку
         branch_result = subprocess.run(
             ['git', 'branch', '--show-current'],
@@ -184,10 +191,27 @@ def _perform_update():
             capture_output=True, text=True, cwd=script_dir, timeout=60
         )
         
-        if pull_result.returncode == 0:
-            return True, pull_result.stdout
-        else:
+        if pull_result.returncode != 0:
             return False, pull_result.stderr
+        
+        # Проверяем, изменился ли requirements.txt
+        if old_hash:
+            diff_result = subprocess.run(
+                ['git', 'diff', '--name-only', old_hash, 'HEAD'],
+                capture_output=True, text=True, cwd=script_dir, timeout=5
+            )
+            if diff_result.returncode == 0:
+                changed_files = diff_result.stdout.strip().split('\n')
+                if 'requirements.txt' in changed_files:
+                    # Обнаружено изменение requirements.txt - запускаем установку
+                    pip_result = subprocess.run(
+                        [sys.executable, '-m', 'pip', 'install', '-r', 'requirements.txt'],
+                        capture_output=True, text=True, cwd=script_dir, timeout=120
+                    )
+                    pip_output = pip_result.stdout if pip_result.returncode == 0 else pip_result.stderr
+                    return True, f"{pull_result.stdout}\n[Обнаружено изменение requirements.txt]\nОбновление зависимостей:\n{pip_output}"
+        
+        return True, pull_result.stdout
     except Exception as e:
         return False, str(e)
 
