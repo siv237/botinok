@@ -19,8 +19,24 @@ import os
 import mimetypes
 from urllib.parse import urlparse
 from pathlib import Path
+from io import BytesIO
+
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 import httpx
+
+
+# Поддерживаемые форматы для Ollama vision моделей
+SUPPORTED_FORMATS = {"JPEG", "PNG", "GIF", "BMP", "WEBP"}
+SUPPORTED_MIMETYPES = {"image/jpeg", "image/png", "image/gif", "image/bmp", "image/webp"}
+
+# Лимиты для Qwen3.5 (можно переопределить через env)
+MAX_IMAGE_SIZE = int(os.environ.get("VISION_MAX_PIXELS", 16777216))  # 4096×4096
+MAX_EDGE = int(os.environ.get("VISION_MAX_EDGE", 4096))  # Максимальная сторона
 
 
 def _download_image(url: str, timeout_sec: int = 30) -> tuple[bytes, str]:
@@ -75,6 +91,143 @@ def _load_local_image(path: str) -> tuple[bytes, str]:
         return f.read(), mime_type
 
 
+def _validate_and_process_image(image_bytes: bytes, mime_type: str) -> tuple[bytes, str, dict]:
+    """
+    Проверяет и обрабатывает изображение для Ollama.
+    
+    Returns:
+        tuple: (processed_bytes, output_mime_type, metadata)
+        metadata содержит: original_size, final_size, was_resized, was_converted
+    """
+    metadata = {
+        "original_size": len(image_bytes),
+        "final_size": len(image_bytes),
+        "was_resized": False,
+        "was_converted": False,
+        "original_format": "unknown",
+        "final_format": mime_type,
+    }
+    
+    # Если Pillow недоступен - отправляем как есть (риск ошибки)
+    if not PIL_AVAILABLE:
+        return image_bytes, mime_type, metadata
+    
+    try:
+        # Открываем изображение
+        img = Image.open(BytesIO(image_bytes))
+        metadata["original_format"] = img.format
+        
+        # Проверяем формат
+        current_format = img.format
+        needs_conversion = False
+        
+        # SVG всегда конвертируем
+        if mime_type == "image/svg+xml" or current_format == "SVG":
+            needs_conversion = True
+        # Неподдерживаемые форматы конвертируем
+        elif current_format not in SUPPORTED_FORMATS:
+            needs_conversion = True
+        # Неподдерживаемые MIME-типы конвертируем
+        elif mime_type not in SUPPORTED_MIMETYPES:
+            needs_conversion = True
+        
+        # Проверяем размер
+        width, height = img.size
+        num_pixels = width * height
+        max_edge = max(width, height)
+        
+        needs_resize = False
+        if num_pixels > MAX_IMAGE_SIZE:
+            needs_resize = True
+        if max_edge > MAX_EDGE:
+            needs_resize = True
+        
+        # Если всё OK - отправляем как есть (только для поддерживаемых форматов)
+        if not needs_conversion and not needs_resize:
+            # Убедимся что это RGB (не RGBA с прозрачностью)
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+                needs_conversion = True  # Нужно пересохранить
+            else:
+                # Всё хорошо, возвращаем оригинал
+                return image_bytes, mime_type, metadata
+        
+        # Конвертация/ресайз нужен
+        # Сначала конвертируем в RGB если нужно
+        if img.mode in ("RGBA", "P", "L", "LA", "CMYK"):
+            img = img.convert("RGB")
+        
+        # Ресайз если нужно (только уменьшаем, не увеличиваем)
+        if needs_resize:
+            # Считаем новый размер сохраняя aspect ratio
+            if num_pixels > MAX_IMAGE_SIZE:
+                scale = (MAX_IMAGE_SIZE / num_pixels) ** 0.5
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+            elif max_edge > MAX_EDGE:
+                scale = MAX_EDGE / max_edge
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+            else:
+                new_width, new_height = width, height
+            
+            # Убеждаемся что не превышаем MAX_EDGE по любой стороне
+            if max(new_width, new_height) > MAX_EDGE:
+                scale = MAX_EDGE / max(new_width, new_height)
+                new_width = int(new_width * scale)
+                new_height = int(new_height * scale)
+            
+            # Ресайз с качеством LANCOZOS если доступен, иначем BICUBIC
+            try:
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            except AttributeError:
+                img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
+            
+            metadata["was_resized"] = True
+            metadata["new_size"] = f"{new_width}x{new_height}"
+        
+        # Сохраняем в JPEG (самый совместимый формат)
+        output = BytesIO()
+        img.save(output, format="JPEG", quality=85, optimize=True)
+        output_bytes = output.getvalue()
+        
+        metadata["was_converted"] = needs_conversion or img.mode != getattr(Image.open(BytesIO(image_bytes)), 'mode', 'RGB')
+        metadata["final_size"] = len(output_bytes)
+        metadata["final_format"] = "JPEG"
+        
+        return output_bytes, "image/jpeg", metadata
+        
+    except Exception as e:
+        # При ошибке обработки - пробуем конвертировать принудительно
+        try:
+            img = Image.open(BytesIO(image_bytes))
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            
+            # Проверяем размер и ресайзим если нужно
+            width, height = img.size
+            if width * height > MAX_IMAGE_SIZE or max(width, height) > MAX_EDGE:
+                scale = min((MAX_IMAGE_SIZE / (width * height)) ** 0.5, MAX_EDGE / max(width, height))
+                new_size = (int(width * scale), int(height * scale))
+                try:
+                    img = img.resize(new_size, Image.Resampling.LANCZOS)
+                except AttributeError:
+                    img = img.resize(new_size, Image.Resampling.BICUBIC)
+                metadata["was_resized"] = True
+            
+            output = BytesIO()
+            img.save(output, format="JPEG", quality=85)
+            output_bytes = output.getvalue()
+            metadata["was_converted"] = True
+            metadata["final_size"] = len(output_bytes)
+            metadata["final_format"] = "JPEG"
+            return output_bytes, "image/jpeg", metadata
+            
+        except Exception:
+            # Не удалось обработать - возвращаем как есть
+            return image_bytes, mime_type, metadata
+
+
 def execute(
     image_path: str = None,
     url: str = None,
@@ -113,17 +266,31 @@ def execute(
         if not mime_type.startswith("image/"):
             return f"❌ Error: File is not an image (detected: {mime_type})"
         
+        # Валидируем и обрабатываем изображение (конвертация/ресайз если нужно)
+        processed_bytes, final_mime_type, metadata = _validate_and_process_image(image_bytes, mime_type)
+        
         # Конвертируем в base64
-        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        image_b64 = base64.b64encode(processed_bytes).decode("utf-8")
         
         # Формируем результат
         result = {
             "image_data": image_b64,
-            "mime_type": mime_type,
+            "mime_type": final_mime_type,
             "prompt": prompt,
             "source": source,
-            "size_bytes": len(image_bytes),
+            "size_bytes": len(processed_bytes),
+            "original_size_bytes": metadata["original_size"],
+            "processing": {
+                "was_resized": metadata["was_resized"],
+                "was_converted": metadata["was_converted"],
+                "original_format": metadata["original_format"],
+                "final_format": metadata["final_format"],
+            }
         }
+        
+        # Добавляем новый размер если ресайзили
+        if metadata.get("new_size"):
+            result["processing"]["new_size"] = metadata["new_size"]
         
         return result
         
