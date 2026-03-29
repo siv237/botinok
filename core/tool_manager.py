@@ -39,6 +39,7 @@ class ToolManager:
             "experience": ("tools.experience", "experience"),
             "github": ("tools.github", "github"),
             "skills": ("tools.skills", "skills"),
+            "curl": ("tools.curl", "curl"),
         }
         
         # Базовые описания (пока tool не загружен)
@@ -137,6 +138,25 @@ class ToolManager:
                             "sort": {"type": "string"}
                         },
                         "required": ["action"]
+                    }
+                }
+            },
+            "curl": {
+                "type": "function",
+                "function": {
+                    "name": "curl",
+                    "description": "HTTP GET запросы для readonly-режима. Только чтение - без записи на диск, POST/PUT/DELETE запрещены. Поддерживает jq фильтрацию JSON",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string", "description": "URL для GET запроса (http/https)"},
+                            "headers": {"type": "array", "items": {"type": "string"}, "description": "HTTP заголовки (опционально)"},
+                            "timeout_sec": {"type": "integer", "description": "Таймаут в секундах (по умолчанию 30)"},
+                            "max_bytes": {"type": "integer", "description": "Максимальный размер ответа (по умолчанию 256000)"},
+                            "follow_redirects": {"type": "boolean", "description": "Следовать за редиректами (по умолчанию true)"},
+                            "jq_filter": {"type": "string", "description": "Фильтр jq для обработки JSON. Примеры: .userId | .items[] | {name:.name}. ВАЖНО: без кавычек вокруг фильтра, точка в начале обязательна (автодобавится если пропущена)"}
+                        },
+                        "required": ["url"]
                     }
                 }
             },

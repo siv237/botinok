@@ -81,14 +81,14 @@ install_dependencies() {
             BREW_USER="${SUDO_USER:-}"
             if [ -n "$BREW_USER" ] && [ "$BREW_USER" != "root" ]; then
                 sudo -u "$BREW_USER" brew update
-                sudo -u "$BREW_USER" brew install python3 lynx git curl
+                sudo -u "$BREW_USER" brew install python3 lynx git curl jq
             else
                 echo_red "Do not run Homebrew as root. Run installer via sudo from a normal user (so SUDO_USER is set), or install dependencies manually with brew."
                 exit 1
             fi
         else
             brew update
-            brew install python3 lynx git curl
+            brew install python3 lynx git curl jq
         fi
         return 0
     fi
@@ -96,11 +96,11 @@ install_dependencies() {
     # Detect package manager (Linux)
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update -y
-        apt-get install -y python3 python3-venv python3-pip lynx curl git ca-certificates
+        apt-get install -y python3 python3-venv python3-pip lynx curl git ca-certificates jq
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y python3 python3-virtualenv python3-pip lynx curl git ca-certificates
+        dnf install -y python3 python3-virtualenv python3-pip lynx curl git ca-certificates jq
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y python3 python3-virtualenv python3-pip lynx curl git ca-certificates
+        yum install -y python3 python3-virtualenv python3-pip lynx curl git ca-certificates jq
     else
         echo_red "No supported package manager found (apt-get, dnf, or yum)"
         exit 1
