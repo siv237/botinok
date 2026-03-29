@@ -32,6 +32,8 @@ class ToolManager:
         self._tool_registry = {
             "web_search": ("tools.web_search", "ddg_search"),
             "open_url": ("tools.open_url", "open_url"),
+            "web_extract": ("tools.web_extract", "web_extract"),
+            "web_extractor": ("tools.web_extract", "web_extract"),  # alias для совместимости
             "file_system": ("tools.file_system", "file_system_tool"),
             "journal": ("tools.journal", "journal_tool"),
             "code_editor": ("tools.code_editor", "code_editor"),
@@ -58,6 +60,24 @@ class ToolManager:
                     "name": "open_url",
                     "description": "Открыть ссылку и извлечь текст со страницы (использует lynx -dump)",
                     "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "URL страницы (http/https)"}}, "required": ["url"]}
+                }
+            },
+            "web_extract": {
+                "type": "function",
+                "function": {
+                    "name": "web_extract",
+                    "description": "Извлечь структурированные ресурсы со страницы: ссылки, картинки, заголовки, мета-теги, таблицы. Использует httpx + selectolax (быстрый парсер на C).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string", "description": "URL страницы (http/https)"},
+                            "extract": {"type": "array", "items": {"type": "string", "enum": ["links", "images", "headings", "meta", "tables", "all"]}, "description": "Что извлекать. По умолчанию ['all']"},
+                            "max_items": {"type": "integer", "description": "Максимум элементов на категорию (по умолчанию 100)"},
+                            "timeout_sec": {"type": "integer", "description": "Таймаут запроса в секундах (по умолчанию 15)"},
+                            "headers": {"type": "array", "items": {"type": "string"}, "description": "HTTP заголовки (опционально, формат 'Key: Value')"}
+                        },
+                        "required": ["url"]
+                    }
                 }
             },
             "file_system": {
