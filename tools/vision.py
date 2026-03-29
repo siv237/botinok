@@ -115,20 +115,24 @@ def _validate_and_process_image(image_bytes: bytes, mime_type: str) -> tuple[byt
     try:
         # Открываем изображение
         img = Image.open(BytesIO(image_bytes))
-        metadata["original_format"] = img.format
+        metadata["original_format"] = img.format or "unknown"
         
-        # Проверяем формат
+        # Определяем нужна ли конвертация
         current_format = img.format
         needs_conversion = False
         
-        # SVG всегда конвертируем
-        if mime_type == "image/svg+xml" or current_format == "SVG":
+        # Если формат не определен или не поддерживается - конвертируем
+        if current_format is None:
             needs_conversion = True
-        # Неподдерживаемые форматы конвертируем
         elif current_format not in SUPPORTED_FORMATS:
             needs_conversion = True
-        # Неподдерживаемые MIME-типы конвертируем
         elif mime_type not in SUPPORTED_MIMETYPES:
+            needs_conversion = True
+        # SVG всегда конвертируем
+        elif mime_type == "image/svg+xml" or current_format == "SVG":
+            needs_conversion = True
+        # Прозрачность требует конвертации в RGB
+        elif img.mode in ("RGBA", "P"):
             needs_conversion = True
         
         # Проверяем размер
@@ -142,19 +146,14 @@ def _validate_and_process_image(image_bytes: bytes, mime_type: str) -> tuple[byt
         if max_edge > MAX_EDGE:
             needs_resize = True
         
-        # Если всё OK - отправляем как есть (только для поддерживаемых форматов)
+        # Если ничего не нужно - возвращаем как есть
         if not needs_conversion and not needs_resize:
-            # Убедимся что это RGB (не RGBA с прозрачностью)
-            if img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
-                needs_conversion = True  # Нужно пересохранить
-            else:
-                # Всё хорошо, возвращаем оригинал
-                return image_bytes, mime_type, metadata
+            metadata["original_format"] = current_format or "unknown"
+            return image_bytes, mime_type, metadata
         
         # Конвертация/ресайз нужен
-        # Сначала конвертируем в RGB если нужно
-        if img.mode in ("RGBA", "P", "L", "LA", "CMYK"):
+        # Конвертируем в RGB для JPEG
+        if img.mode in ("RGBA", "P", "L", "LA", "CMYK", "I;16", "I;16B"):
             img = img.convert("RGB")
         
         # Ресайз если нужно (только уменьшаем, не увеличиваем)
@@ -164,12 +163,10 @@ def _validate_and_process_image(image_bytes: bytes, mime_type: str) -> tuple[byt
                 scale = (MAX_IMAGE_SIZE / num_pixels) ** 0.5
                 new_width = int(width * scale)
                 new_height = int(height * scale)
-            elif max_edge > MAX_EDGE:
+            else:
                 scale = MAX_EDGE / max_edge
                 new_width = int(width * scale)
                 new_height = int(height * scale)
-            else:
-                new_width, new_height = width, height
             
             # Убеждаемся что не превышаем MAX_EDGE по любой стороне
             if max(new_width, new_height) > MAX_EDGE:
@@ -191,17 +188,18 @@ def _validate_and_process_image(image_bytes: bytes, mime_type: str) -> tuple[byt
         img.save(output, format="JPEG", quality=85, optimize=True)
         output_bytes = output.getvalue()
         
-        metadata["was_converted"] = needs_conversion or img.mode != getattr(Image.open(BytesIO(image_bytes)), 'mode', 'RGB')
+        metadata["was_converted"] = True
         metadata["final_size"] = len(output_bytes)
         metadata["final_format"] = "JPEG"
         
         return output_bytes, "image/jpeg", metadata
         
     except Exception as e:
-        # При ошибке обработки - пробуем конвертировать принудительно
+        # При ошибке обработки - пробуем принудительную конвертацию через RGB
         try:
             img = Image.open(BytesIO(image_bytes))
-            if img.mode in ("RGBA", "P"):
+            # Принудительно конвертируем в RGB
+            if img.mode != "RGB":
                 img = img.convert("RGB")
             
             # Проверяем размер и ресайзим если нужно
@@ -224,7 +222,7 @@ def _validate_and_process_image(image_bytes: bytes, mime_type: str) -> tuple[byt
             return output_bytes, "image/jpeg", metadata
             
         except Exception:
-            # Не удалось обработать - возвращаем как есть
+            # Не удалось обработать - возвращаем как есть (пусть Ollama решает)
             return image_bytes, mime_type, metadata
 
 
