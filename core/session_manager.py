@@ -9,11 +9,25 @@ import re
 class SessionManager:
     def __init__(self):
         self.config = configparser.ConfigParser()
-        # Ищем конфиг: сначала локальный, потом системный
-        if os.path.exists("config.cfg"):
-            self.config_path = "config.cfg"
+        
+        # Приоритет конфигов: персональный > локальный > системный
+        personal_config = os.path.expanduser("~/.config/botinok/config.cfg")
+        local_config = "config.cfg"
+        system_config = os.getenv("BOTINOK_CONFIG", "/opt/botinok/config.cfg")
+        
+        self.config_path = None
+        self.config_source = None
+        
+        if os.path.exists(personal_config):
+            self.config_path = personal_config
+            self.config_source = "personal"
+        elif os.path.exists(local_config):
+            self.config_path = local_config
+            self.config_source = "local"
         else:
-            self.config_path = os.getenv("BOTINOK_CONFIG", "/opt/botinok/config.cfg")
+            self.config_path = system_config
+            self.config_source = "system"
+            
         if os.path.exists(self.config_path):
             self.config.read(self.config_path, encoding='utf-8')
         else:

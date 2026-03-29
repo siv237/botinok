@@ -1,6 +1,7 @@
 import requests
 import json
 import sys
+import os
 import inquirer
 from rich.console import Console
 from rich.panel import Panel
@@ -98,8 +99,29 @@ class ConfigWizard:
         self.config.set('Ollama', 'DefaultModel', chosen_model)
         
         # 3. Сохранение
-        self.sm.save_config()
-        console.print(Panel(f"[bold green]Настройка успешно завершена![/bold green]\nКонфигурация сохранена в: {self.sm.config_path}", border_style="green"))
+        success = self.sm.save_config()
+        if not success:
+            # Пробуем сохранить локально
+            local_config_dir = os.path.expanduser("~/.config/botinok")
+            local_config_path = os.path.join(local_config_dir, "config.cfg")
+            
+            console.print(f"\n[red]✗ Нет прав для сохранения в: {self.sm.config_path}[/red]")
+            if Confirm.ask(f"Сохранить конфигурацию локально в {local_config_path}?", default=True):
+                try:
+                    os.makedirs(local_config_dir, exist_ok=True)
+                    self.sm.config_path = local_config_path
+                    success = self.sm.save_config()
+                except Exception as e:
+                    console.print(f"[red]✗ Не удалось создать локальную директорию: {e}[/red]")
+                    # Последняя попытка - текущая директория
+                    self.sm.config_path = "config.cfg"
+                    console.print(f"[yellow]Пробуем сохранить в текущей директории: {self.sm.config_path}[/yellow]")
+                    success = self.sm.save_config()
+        
+        if success:
+            console.print(Panel(f"[bold green]Настройка успешно завершена![/bold green]\nКонфигурация сохранена в: {self.sm.config_path}", border_style="green"))
+        else:
+            console.print(Panel(f"[bold red]Ошибка сохранения конфигурации[/bold red]\nПопробуйте запустить с правами администратора или проверьте права доступа.", border_style="red"))
 
 def main():
     wizard = ConfigWizard()

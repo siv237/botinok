@@ -2120,6 +2120,11 @@ def main():
     parser = argparse.ArgumentParser(description="BOTINOK AGENT - Interactive AI Assistant")
     
     sm = SessionManager()
+    
+    # Уведомление о используемом конфиге
+    if sm.config_source == "personal":
+        console.print(f"[dim cyan]Using personal config: {sm.config_path}[/dim cyan]")
+    
     default_model = sm.config.get('Ollama', 'DefaultModel', fallback='qwen3.5:9b')
     default_ctx = sm.config.getint('Ollama', 'DefaultContext', fallback=8192)
     ollama_base_url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
