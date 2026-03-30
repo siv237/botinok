@@ -1160,7 +1160,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                         waiting_status_set = False
 
                         try:
-                            decoded_line = line.decode('utf-8')
+                            decoded_line = line.decode('utf-8', errors='replace')
                             chunk = json.loads(decoded_line)
 
                             msg = chunk.get("message", {})
@@ -1893,7 +1893,7 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
             for line in response.iter_lines():
                 if line:
                     try:
-                        chunk = json.loads(line.decode('utf-8'))
+                        chunk = json.loads(line.decode('utf-8', errors='replace'))
                         msg = chunk.get("message", {})
 
                         # Обработка logprobs для стриминга инструментов (stealth mode)
@@ -2325,7 +2325,15 @@ def main():
                     break
                 # В интерактивном режиме запрашиваем ввод
                 console.print(Panel(Text("Введите ваш вопрос (или 'exit' для выхода):", style="bold cyan"), border_style="cyan"))
-                prompt = console.input("[bold green]> [/bold green]")
+                try:
+                    prompt = console.input("[bold green]> [/bold green]")
+                except UnicodeDecodeError:
+                    # Fallback на стандартный input с переключением stdin в UTF-8
+                    try:
+                        sys.stdin = open('/dev/tty', 'r', encoding='utf-8', errors='replace')
+                    except Exception:
+                        pass
+                    prompt = input("> ")
 
                 if prompt.lower() in ["exit", "quit", "выход"]:
                     break
@@ -2379,6 +2387,8 @@ def main():
                         break
 
                 if last_assistant_message:
+                    # Очистка от невалидных UTF-8 байтов
+                    last_assistant_message = last_assistant_message.encode('utf-8', errors='ignore').decode('utf-8')
                     if not stealth_mode:
                         console.print("\n[bold green]Final Response:[/bold green]")
                         console.print(Markdown(last_assistant_message))
