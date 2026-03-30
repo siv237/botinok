@@ -2421,16 +2421,176 @@ def main():
                     # В stealth mode без начального промпта и без tty выходим
                     break
                 # В интерактивном режиме запрашиваем ввод
-                console.print(Panel(Text("Введите ваш вопрос (или 'exit' для выхода):", style="bold cyan"), border_style="cyan"))
+                console.print(Panel(Text("Введите ваш вопрос ('exit' = выход, '---' = многострочный):", style="bold cyan"), border_style="cyan"))
+                
                 try:
+                    import readchar
+                    
+                    # Сначала обычный ввод
+                    console.print("[bold green]> [/bold green]", end="")
+                    sys.stdout.flush()
+                    
+                    first_line = ""
+                    while True:
+                        key = readchar.readkey()
+                        
+                        if key == '\r' or key == '\n':  # Enter
+                            break
+                        elif key == '\x7f':  # Backspace
+                            if first_line:
+                                first_line = first_line[:-1]
+                                sys.stdout.write('\b \b')
+                                sys.stdout.flush()
+                        elif key == '\x03':  # Ctrl+C
+                            raise KeyboardInterrupt
+                        elif len(key) == 1 and ord(key) >= 32:
+                            first_line += key
+                            sys.stdout.write(key)
+                            sys.stdout.flush()
+                    
+                    console.print()
+                    
+                    # Если ввели только '---' — многострочный режим
+                    if first_line.strip() == '---':
+                        sys.stdout.write("Многострочный режим. Enter=новая строка, Ctrl+D=отправка, ↑↓=навигация:\n")
+                        lines = [""]
+                        cursor_line = 0
+                        cursor_col = 0
+                        
+                        def _redraw_line():
+                            # Перерисовка только текущей строки
+                            sys.stdout.write('\x1b[1G')   # В начало строки
+                            sys.stdout.write('\x1b[2K')   # Очистить всю строку
+                            line_num = cursor_line + 1
+                            sys.stdout.write(f"{line_num:2d}: {lines[cursor_line]}")
+                            sys.stdout.flush()
+                            # Позиционируем курсор
+                            sys.stdout.write(f'\x1b[{cursor_col + 5}G')
+                            sys.stdout.flush()
+                        
+                        def _redraw_full():
+                            # Полная перерисовка
+                            sys.stdout.write('\x1b[2J\x1b[H')  # Очистить экран, курсор в начало
+                            sys.stdout.write("Многострочный режим. Enter=новая строка, Ctrl+D=отправка, ↑↓=навигация:\n")
+                            for i, line in enumerate(lines):
+                                line_num = i + 1
+                                sys.stdout.write(f"{line_num:2d}: {line}\n")
+                            # Позиционируем курсор
+                            lines_up = len(lines) - cursor_line
+                            if lines_up > 0:
+                                sys.stdout.write(f'\x1b[{lines_up}A')
+                            sys.stdout.write(f'\x1b[{cursor_col + 4}C')
+                            sys.stdout.flush()
+                        
+                        # Начальная отрисовка
+                        sys.stdout.write(" 1: \n")
+                        sys.stdout.write('\x1b[1A\x1b[4C')
+                        sys.stdout.flush()
+                        
+                        while True:
+                            key = readchar.readkey()
+                            
+                            if key == '\r' or key == '\n':  # Enter
+                                # Проверяем, есть ли ещё данные (вставка многострочного текста)
+                                import select
+                                remaining = ""
+                                while select.select([sys.stdin], [], [], 0.01)[0]:
+                                    try:
+                                        ch = readchar.readchar()
+                                        if ch == '\r' or ch == '\n':
+                                            break
+                                        remaining += ch
+                                    except:
+                                        break
+                                
+                                if lines[cursor_line] == "" and cursor_col == 0:
+                                    # Пустая строка - проверим Ctrl+D или просто Enter
+                                    pass
+                                
+                                # Разбиваем строку в позиции курсора
+                                current = lines[cursor_line]
+                                before = current[:cursor_col]
+                                after = current[cursor_col:]
+                                lines[cursor_line] = before
+                                cursor_line += 1
+                                lines.insert(cursor_line, after + remaining)
+                                cursor_col = len(after + remaining)
+                                sys.stdout.write('\n')  # Новая строка
+                                sys.stdout.flush()
+                                _redraw_line()
+                            elif key == '\x04':  # Ctrl+D - отправка
+                                prompt = "\n".join(lines).rstrip()
+                                break
+                            elif key == '\x1b[A':  # Стрелка вверх
+                                if cursor_line > 0:
+                                    # Сохраняем текущую позицию курсора на экране
+                                    cursor_line -= 1
+                                    cursor_col = min(cursor_col, len(lines[cursor_line]))
+                                    sys.stdout.write('\x1b[1A')  # Вверх
+                                    sys.stdout.flush()
+                            elif key == '\x1b[B':  # Стрелка вниз
+                                if cursor_line < len(lines) - 1:
+                                    cursor_line += 1
+                                    cursor_col = min(cursor_col, len(lines[cursor_line]))
+                                    sys.stdout.write('\x1b[1B')  # Вниз
+                                    sys.stdout.flush()
+                            elif key == '\x1b[D':  # Стрелка влево
+                                if cursor_col > 0:
+                                    cursor_col -= 1
+                                    sys.stdout.write('\x1b[1D')  # Влево
+                                    sys.stdout.flush()
+                                elif cursor_line > 0:
+                                    cursor_line -= 1
+                                    cursor_col = len(lines[cursor_line])
+                                    sys.stdout.write('\x1b[1A')  # Вверх
+                                    sys.stdout.write(f'\x1b[{cursor_col + 2}C')  # В конец строки
+                                    sys.stdout.flush()
+                            elif key == '\x1b[C':  # Стрелка вправо
+                                if cursor_col < len(lines[cursor_line]):
+                                    cursor_col += 1
+                                    sys.stdout.write('\x1b[1C')  # Вправо
+                                    sys.stdout.flush()
+                                elif cursor_line < len(lines) - 1:
+                                    cursor_line += 1
+                                    cursor_col = 0
+                                    sys.stdout.write('\x1b[1B')  # Вниз
+                                    sys.stdout.write('\x1b[2C')  # После "> "
+                                    sys.stdout.flush()
+                            elif key == '\x7f':  # Backspace
+                                if cursor_col > 0:
+                                    line = lines[cursor_line]
+                                    lines[cursor_line] = line[:cursor_col-1] + line[cursor_col:]
+                                    cursor_col -= 1
+                                    _redraw_line()
+                                elif cursor_line > 0:
+                                    # Слияние с предыдущей строкой
+                                    cursor_col = len(lines[cursor_line - 1])
+                                    lines[cursor_line - 1] += lines[cursor_line]
+                                    lines.pop(cursor_line)
+                                    cursor_line -= 1
+                                    _redraw_full()
+                            elif key == '\x03':  # Ctrl+C
+                                raise KeyboardInterrupt
+                            elif len(key) == 1 and ord(key) >= 32:
+                                # Вставляем символ в текущую позицию
+                                line = lines[cursor_line]
+                                lines[cursor_line] = line[:cursor_col] + key + line[cursor_col:]
+                                cursor_col += 1
+                                _redraw_line()
+                        
+                        console.print()  # Новая строка после отправки
+                    else:
+                        # Обычный однострочный режим
+                        prompt = first_line
+                    
+                except KeyboardInterrupt:
+                    # Ctrl+C при прерывании ввода - чистый выход без traceback
+                    console.print("\n[dim]Ввод прерван[/dim]")
+                    prompt = ""
+                    
+                except Exception as e:
+                    # Fallback на обычный ввод
                     prompt = console.input("[bold green]> [/bold green]")
-                except UnicodeDecodeError:
-                    # Fallback на стандартный input с переключением stdin в UTF-8
-                    try:
-                        sys.stdin = open('/dev/tty', 'r', encoding='utf-8', errors='replace')
-                    except Exception:
-                        pass
-                    prompt = input("> ")
 
                 if prompt.lower() in ["exit", "quit", "выход"]:
                     break
