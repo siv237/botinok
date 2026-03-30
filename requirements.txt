@@ -5,3 +5,4 @@ configparser
 Pillow
 selectolax>=0.3.21
 httpx>=0.27.0
+readchar

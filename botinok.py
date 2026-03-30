@@ -1977,11 +1977,11 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
     except Exception:
         return messages
 
-def _choose_or_resume_session(sm: SessionManager, stealth_mode: bool, default_suffix: str) -> tuple[str, str]:
+def _choose_or_resume_session(sm: SessionManager, stealth_mode: bool, default_suffix: str) -> tuple[str | None, str]:
     """Выбор сессии при старте.
 
     Returns:
-      (session_path, resume_last_answer)
+      (session_path, resume_last_answer) или (None, "") при отмене
     """
     if stealth_mode or (not sys.stdin.isatty()):
         return sm.create_session(default_suffix), ""
@@ -2004,52 +2004,144 @@ def _choose_or_resume_session(sm: SessionManager, stealth_mode: bool, default_su
             message="Старт BOTINOK: выбрать сессию",
             choices=choices,
             default="continue_latest",
+            carousel=False,
         )
-    ])
+    ], raise_keyboard_interrupt=True)
 
     if not answers:
-        return sm.create_session(default_suffix), ""
+        return None, ""  # Отмена выбора - не создаём сессию
 
     action = answers.get('session_action')
     if action == "new":
         return sm.create_session(default_suffix), ""
 
     if action == "choose":
-        session_options = []
+        from rich.table import Table
+        from rich import box
+        from rich.live import Live
+        import readchar
+        
+        def _relative_time(timestamp):
+            if not timestamp:
+                return "unknown"
+            try:
+                now = datetime.now().timestamp()
+                diff = now - float(timestamp)
+                if diff < 60:
+                    return f"{int(diff)} сек назад"
+                elif diff < 3600:
+                    return f"{int(diff / 60)} мин назад"
+                elif diff < 86400:
+                    return f"{int(diff / 3600)} час назад"
+                elif diff < 604800:
+                    return f"{int(diff / 86400)} дн назад"
+                else:
+                    return f"{int(diff / 604800)} нед назад"
+            except Exception:
+                return "unknown"
+        
+        def _build_table(sessions_data, selected_idx, filter_text=""):
+            # Заголовок с фильтром
+            title = "[bold cyan]Выбор сессии"
+            if filter_text:
+                title += f"[/bold cyan] [yellow]Фильтр: '{filter_text}'[/yellow]"
+            else:
+                title += "[/bold cyan] [dim](↑↓ - навигация, Enter - выбрать, 0 - новая, буквы - фильтр, Backspace - сброс, Ctrl+C - отмена)[/dim]"
+            
+            table = Table(
+                show_header=True,
+                header_style="bold bright_cyan",
+                border_style="dim blue",
+                box=box.ROUNDED,
+                padding=(0, 1),
+                expand=True,
+                title=title,
+                title_justify="left"
+            )
+            table.add_column("#", style="bold yellow", width=4, justify="center")
+            table.add_column("Название", style="bright_white", min_width=20, ratio=2)
+            table.add_column("Время", style="dim cyan", width=13)
+            table.add_column("Назад", style="bright_green", width=12)
+            table.add_column("Превью", style="dim white", ratio=3, no_wrap=True)
+            
+            for idx, (name, path, mtime, preview) in enumerate(sessions_data):
+                is_selected = idx == selected_idx
+                ts = datetime.fromtimestamp(float(mtime)).strftime("%H:%M %d.%m") if mtime else "unknown"
+                rel_time = _relative_time(mtime)
+                preview_text = preview[:50] if preview else "..."
+                
+                if is_selected:
+                    row_style = "bold white on blue"
+                    marker = "▶"
+                else:
+                    row_style = None
+                    marker = str(idx + 1)
+                
+                table.add_row(marker, name, ts, rel_time, preview_text, style=row_style)
+            
+            return table
+        
+        session_data = []
         for s in sessions:
             name = s.get("name") or "(unknown)"
             path = s.get("path") or ""
             mtime = s.get("mtime")
-            try:
-                ts = datetime.fromtimestamp(float(mtime)).strftime("%Y-%m-%d %H:%M:%S") if mtime else "unknown"
-            except Exception:
-                ts = "unknown"
             preview = ""
             if path and os.path.isdir(path):
-                preview = sm.load_first_user_prompt(path, max_chars=120)
-            if preview:
-                session_options.append((f"{name:<35} | {ts} | {preview}", path))
-            else:
-                session_options.append((f"{name:<45} | {ts}", path))
-
-        picked = inquirer.prompt([
-            inquirer.List(
-                'session_path',
-                message="Выберите сессию для продолжения (Имя | last_modified)",
-                choices=session_options,
-                default=latest.get("path"),
-            )
-        ])
-
-        if not picked:
+                preview = sm.load_first_user_prompt(path, max_chars=60)
+            session_data.append((name, path, mtime, preview))
+        
+        if not session_data:
             return sm.create_session(default_suffix), ""
-
-        chosen_path = picked.get('session_path')
-        if chosen_path and os.path.isdir(chosen_path):
-            sm.ensure_session_structure(chosen_path)
-            return chosen_path, sm.load_last_assistant_answer(chosen_path)
-
-        return sm.create_session(default_suffix), ""
+        
+        filtered_data = list(session_data)
+        selected_idx = 0
+        filter_text = ""
+        
+        try:
+            with Live(_build_table(filtered_data, selected_idx, filter_text), refresh_per_second=30, console=console) as live:
+                while True:
+                    key = readchar.readkey()
+                    
+                    if key == readchar.key.UP:
+                        selected_idx = max(0, selected_idx - 1)
+                    elif key == readchar.key.DOWN:
+                        selected_idx = min(len(filtered_data) - 1, selected_idx + 1)
+                    elif key == readchar.key.ENTER:
+                        if 0 <= selected_idx < len(filtered_data):
+                            chosen_path = filtered_data[selected_idx][1]
+                            if chosen_path and os.path.isdir(chosen_path):
+                                sm.ensure_session_structure(chosen_path)
+                                return chosen_path, sm.load_last_assistant_answer(chosen_path)
+                        return sm.create_session(default_suffix), ""
+                    elif key == '0':
+                        return sm.create_session(default_suffix), ""
+                    elif key == readchar.key.BACKSPACE:
+                        filter_text = filter_text[:-1]
+                        if filter_text:
+                            filtered_data = [(n, p, m, pr) for n, p, m, pr in session_data 
+                                             if filter_text.lower() in n.lower() or filter_text.lower() in str(pr).lower()]
+                        else:
+                            filtered_data = list(session_data)
+                        selected_idx = min(selected_idx, max(0, len(filtered_data) - 1))
+                    elif len(key) == 1 and key.isprintable():
+                        filter_text += key
+                        filtered_data = [(n, p, m, pr) for n, p, m, pr in session_data 
+                                         if filter_text.lower() in n.lower() or filter_text.lower() in str(pr).lower()]
+                        selected_idx = min(selected_idx, max(0, len(filtered_data) - 1))
+                    
+                    if filtered_data:
+                        live.update(_build_table(filtered_data, selected_idx, filter_text))
+                    else:
+                        empty_table = Table(box=box.ROUNDED, expand=True)
+                        empty_table.add_column("", style="dim red")
+                        empty_table.add_row(f"Нет совпадений для: '{filter_text}' (Backspace - сброс)")
+                        live.update(empty_table)
+                        
+        except KeyboardInterrupt:
+            return None, ""  # Отмена выбора - не создаём сессию
+        finally:
+            console.print()
 
     if latest.get("path") and os.path.isdir(latest.get("path")):
         sm.ensure_session_structure(latest["path"])
@@ -2219,6 +2311,11 @@ def main():
 
     session_suffix = "visual_run" if not stealth_mode else "stealth_run"
     session_path, resume_last_answer = _choose_or_resume_session(sm, stealth_mode, session_suffix)
+    
+    # Если пользователь отменил выбор сессии - выходим
+    if session_path is None:
+        console.print("\n[dim]Старт отменён.[/dim]")
+        return
     
     # Подготовка начальных сообщений из промптов
     now = datetime.now().astimezone()
