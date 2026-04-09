@@ -2269,7 +2269,6 @@ def main():
             console.print("[yellow]Обновление может потребовать ручного разрешения конфликтов.[/yellow]")
         
         # Спрашиваем подтверждение
-        from rich.prompt import Confirm
         if Confirm.ask("\n[bold cyan]Установить обновление?[/bold cyan]", default=True):
             console.print("[bold cyan]Обновление...[/bold cyan]")
             success, output = _perform_update()
