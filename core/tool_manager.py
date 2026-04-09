@@ -43,6 +43,7 @@ class ToolManager:
             "skills": ("tools.skills", "skills"),
             "curl": ("tools.curl", "curl"),
             "vision": ("tools.vision", "execute"),
+            "session_memory": ("tools.session_memory", "session_memory_tool"),
         }
         
         # Базовые описания (пока tool не загружен)
@@ -215,6 +216,35 @@ class ToolManager:
                             "timeout_sec": {"type": "integer", "description": "Таймаут скачивания URL в секундах (по умолчанию 30)"}
                         },
                         "required": []
+                    }
+                }
+            },
+            "session_memory": {
+                "type": "function",
+                "function": {
+                    "name": "session_memory",
+                    "description": "Объектный доступ к истории сессии. Используй для получения сводки, просмотра обменов (turns), поиска по содержимому, анализа цепочки рассуждений. НЕ используй file_system для чтения context.json напрямую — используй этот инструмент.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain"],
+                                "description": "summary - сводка сессии, turns - список обменов, get_turn - конкретный turn, search - поиск по тексту, filter - фильтрация, timeline - хронология, stats - статистика, chain - цепочка turns"
+                            },
+                            "session_path": {"type": "string", "description": "Путь к сессии (опционально, по умолчанию текущая)"},
+                            "turn_id": {"type": "integer", "description": "ID turn для get_turn"},
+                            "query": {"type": "string", "description": "Строка поиска для search"},
+                            "since": {"type": "string", "description": "Фильтр: начальное время (ISO format)"},
+                            "until": {"type": "string", "description": "Фильтр: конечное время (ISO format)"},
+                            "role": {"type": "string", "enum": ["user", "assistant", "system"], "description": "Фильтр по роли сообщения"},
+                            "has_tool_calls": {"type": "boolean", "description": "Фильтр: только turns с tool_calls"},
+                            "limit": {"type": "integer", "description": "Лимит результатов (по умолчанию 20)"},
+                            "offset": {"type": "integer", "description": "Смещение для пагинации"},
+                            "include_content": {"type": "boolean", "description": "Включать полный content (иначе только preview)"},
+                            "include_thinking": {"type": "boolean", "description": "Включать полный thinking (иначе только preview)"}
+                        },
+                        "required": ["action"]
                     }
                 }
             },
