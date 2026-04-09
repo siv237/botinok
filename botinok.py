@@ -2178,7 +2178,11 @@ def run_proofreader_turn(model, session_path, num_ctx, developer_messages, vis=N
         f"Задача Исполнителя была: {developer_messages[0].get('content')[:500] if developer_messages else 'Неизвестно'}\n"
         "Твоя задача: самостоятельно изучить файлы в папке сессии (проект, логи, артефакты) "
         "с помощью инструментов и вынести вердикт о качестве работы Исполнителя.\n"
-        "Используй `file_system action=list` для начала обзора."
+        "ПОШАГОВЫЙ АЛГОРИТМ:\n"
+        "1. Вызови `file_system action=list` чтобы получить список файлов\n"
+        "2. ОБЯЗАТЕЛЬНО вызови `file_system action=read` для файлов thinking.md, response.md, tools.log\n"
+        "3. Проанализируй содержимое и выдай заключение: что сделано правильно, что исправить\n"
+        "НЕ выдавай вердикт без чтения содержимого файлов!"
     )
     
     proofreader_history.append({"role": "user", "content": status_report})
@@ -2655,6 +2659,10 @@ def main():
                     
                     # --- РЕЖИМ КОРРЕКТОРА ---
                     if args.proofread:
+                        if not stealth_mode:
+                            if not Confirm.ask("\n[bold yellow]Запустить корректора для проверки работы?[/bold yellow]", default=True):
+                                step_num += 1
+                                break
                         console.print("\n[bold magenta]>>> ПРОВЕРКА КОРРЕКТОРОМ...[/bold magenta]")
                         feedback, verdict_path = run_proofreader_turn(model, session_path, num_ctx, messages, None if stealth_mode else vis)
                         
