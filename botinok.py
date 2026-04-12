@@ -21,6 +21,8 @@ from rich.progress import Progress, BarColumn, TextColumn
 from core.session_manager import SessionManager
 from core.tool_manager import ToolManager
 from core.image_ascii import image_to_fullcolor
+from core.textual_history_viewer import view_history
+from core.textual_integration import ask_ollama_textual
 
 import subprocess
 
@@ -587,12 +589,13 @@ def create_layout():
     return layout
 
 class BotVisualizer:
-    def __init__(self, model, prompt, num_ctx, dangerous_mode: bool = False):
+    def __init__(self, model, prompt, num_ctx, dangerous_mode: bool = False, session_path: str = ""):
         self.model = model
         self.prompt = prompt
         self.num_ctx = num_ctx
         self.dangerous_mode = dangerous_mode
         self.response_text = ""
+        self.session_path = session_path
         self.streaming_tool_text = ""
         self.start_time = time.time()
         self.first_token_time = None
@@ -603,8 +606,8 @@ class BotVisualizer:
         self.streaming_tool_tokens = 0 # Токены инструмента во время стриминга (из logprobs)
         self.status = "Initializing..."
         self.vram_info = "Checking VRAM..."
-        self.current_vram_used = 0
-        self.total_vram = 8.0
+        self.current_vram_used = 0.0
+        self.is_proofreader = False
         self.prompt_eval_count = 0
         self.eval_count = 0
         self.session_ctx_est = 0
@@ -691,11 +694,10 @@ class BotVisualizer:
         full_display = self.response_text
         if self.streaming_tool_text and _tool_stream_has_payload(self.streaming_tool_text):
             # Очищаем текст от возможных артефактов и добавляем заголовок
-            # Используем r-строку или двойное экранирование для Rich разметки
             tool_content = _trim_tail(self.streaming_tool_text, STREAM_TOOL_TEXT_MAX_CHARS)
             tool_content = tool_content.replace("[", "\\[").replace("]", "\\]")
             full_display += f"\n\n[bold magenta]Streaming Tool Call JSON:[/bold magenta]\n{tool_content}"
-            
+
         # Используем Text.from_markup только если есть теги, иначе обычный Text для скорости
         if "[" in full_display:
             try:
@@ -706,8 +708,8 @@ class BotVisualizer:
             text_obj = Text(full_display, style="bold white")
 
         # console.render_lines делает всю магию учета переносов
-        lines = list(text_obj.wrap(console, width - 4)) 
-        
+        lines = list(text_obj.wrap(console, width - 4))
+
         # Если количество строк превышает высоту окна, берем ПОСЛЕДНИЕ height строк
         if len(lines) > height:
             display_text = Text("\n").join(lines[-height:])
@@ -811,11 +813,11 @@ class BotVisualizer:
 def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis=None, read_only_mode=False):
     sm = SessionManager()
     tm = ToolManager()
-    
+
     # Если визуализатор не передан, создаем новый (для первого запуска)
     prompt = messages[-1]["content"] if messages else ""
     if vis is None:
-        vis = BotVisualizer(model, prompt, num_ctx, dangerous_mode=tm.dangerous_mode)
+        vis = BotVisualizer(model, prompt, num_ctx, dangerous_mode=tm.dangerous_mode, session_path=session_path)
     else:
         vis.reset(prompt)
 
@@ -1215,7 +1217,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                                 # Очищаем текст стриминга инструмента при переходе к основному ответу
                                 if vis.streaming_tool_text:
                                     vis.streaming_tool_text = ""
-                                    
+
                                 if not thinking_ended:
                                     thinking_ended = True
                                     thinking_stats = {
@@ -1229,6 +1231,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                                     sm.write_file_footer(session_path, "thinking.md", thinking_stats)
 
                                 full_response += token
+                                # Обновляем response_text для отображения текущего контента
                                 vis.response_text = f"[dim]Thinking...[/dim]\n{full_thinking}\n\n[bold white]Response:[/bold white]\n{full_response}"
                                 vis.response_tokens += 1
                                 sm.log_chunk(session_path, "response", token)
@@ -1634,7 +1637,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                             sm.update_context(session_path, "tool", compact_msg)
                             
                             vis.update_tool_activity(func_name, "completed", size_kb=len(str(result))/1024)
-                            
+
                             console.print("\n" + "─" * 40)
                             console.print("[bold green]Команда завершена.[/bold green]")
                             user_comment = console.input("[bold cyan]Нажмите Enter для возврата или введите комментарий для модели: [/bold cyan]").strip()
@@ -2236,9 +2239,38 @@ def main():
     parser.add_argument("--proofread", action="store_true", help="Включить режим корректора (цикл: Исполнитель -> Корректор)")
     parser.add_argument("--debug", action="store_true", help="Включить отладочный вывод")
     parser.add_argument("--update", action="store_true", help="Проверить и установить обновления из git")
+    parser.add_argument("--view-history", metavar="SESSION_PATH", help="Просмотр истории сессии через Textual (с прокруткой)")
+    parser.add_argument("--textual-mode", action="store_true", help="Запустить основной интерфейс через Textual (с прокруткой истории)")
     
     args = parser.parse_args()
-    
+
+    # Обработка просмотра истории через Textual
+    if args.view_history:
+        console.print("[bold cyan]Запуск просмотра истории через Textual...[/bold cyan]")
+        view_history(args.view_history)
+        return
+
+    # Обработка Textual режима
+    if args.textual_mode:
+        console.print("[bold cyan]Запуск в Textual режиме (с прокруткой истории)...[/bold cyan]")
+        # Выбираем сессию
+        session_path, _ = _choose_or_resume_session(sm, args.stealth, "")
+        if not session_path:
+            console.print("[yellow]Сессия не выбрана. Выход.[/yellow]")
+            return
+
+        # Запускаем Textual режим
+        messages = []
+        ask_ollama_textual(
+            model=args.model,
+            messages=messages,
+            session_path=session_path,
+            step_num=1,
+            num_ctx=args.ctx,
+            read_only_mode=False
+        )
+        return
+
     # Обработка обновления
     if args.update:
         console.print("[bold cyan]Проверка обновлений BOTINOK...[/bold cyan]")
