@@ -7,6 +7,10 @@
 - Context overflow handling
 - Proper UI callbacks (add_tool_activity, append_assistant_chunk, etc.)
 - Repetition detection and recovery
+- auto_continue_final for missing final response
+- Logging (log_chunk, log_tool_call, log_step, file headers/footers)
+- Vision tool handling
+- HTTP retry logic
 """
 
 import os
@@ -29,6 +33,7 @@ STREAM_TOOL_TEXT_MAX_CHARS = 12000
 HARD_CTX_PCT = 0.90
 MAX_TOOL_ROUNDS_PER_TURN = 80
 MAX_AUTO_RECOVERIES_PER_TURN = 2
+MISSING_FINAL_AUTO_CONTINUE_MAX = 2
 REPEAT_LINE_WINDOW = 40
 REPEAT_LINE_MIN_OCCURRENCES = 6
 
@@ -174,6 +179,21 @@ def _compact_tool_message(tool_name, tool_args, result, artifact_path):
         args_preview = json.dumps(safe_args, ensure_ascii=False)
     except Exception:
         args_preview = str(tool_args)
+
+    extra_lines = ""
+    if tool_name == "code_editor":
+        try:
+            parsed = json.loads(res_str)
+            if isinstance(parsed, dict):
+                p = parsed.get("path")
+                changed = parsed.get("changed")
+                if p is not None:
+                    extra_lines += f"\nfile_path: {p}"
+                if changed is not None:
+                    extra_lines += f"\nchanged: {str(bool(changed)).lower()}"
+        except Exception:
+            pass
+
     msg = (
         f"TOOL_RESULT_SUMMARY\n"
         f"tool: {tool_name}\n"
@@ -182,10 +202,123 @@ def _compact_tool_message(tool_name, tool_args, result, artifact_path):
         f"size_kb: {size_kb:.2f}\n"
         f"truncated_in_context: {str(truncated).lower()}\n"
         f"content_preview:\n{shown}"
+        f"{extra_lines}"
     )
     if truncated:
         msg += f"\n...[TRUNCATED {len(res_str) - TOOL_OUTPUT_MAX_CHARS} chars]"
     return msg
+
+
+def _ollama_summarize_and_reset_context(
+    sm, model, session_path, messages, num_ctx,
+    reason, reserve_tokens=1600,
+):
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+
+    last_user_prompt = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            content = m.get("content", "")
+            if not content.startswith("Auto-continue:") and not content.startswith("Сформулируй финальный ответ"):
+                last_user_prompt = content
+                break
+
+    artifact_name = f"context_overflow_full_{int(time.time())}.json"
+    try:
+        artifact_path = sm.save_artifact(
+            session_path,
+            artifact_name,
+            json.dumps(messages, ensure_ascii=False, indent=2),
+        )
+    except Exception:
+        artifact_path = f"./artifacts/{artifact_name}"
+
+    summary_system_content = sm.load_prompt(
+        session_path,
+        "context_overflow_summary",
+        REASON=reason,
+        ORIGINAL_TASK=last_user_prompt[:300]
+    )
+
+    summary_system = {
+        "role": "system",
+        "content": summary_system_content or "Create session protocol",
+    }
+    summary_user_content = sm.load_prompt(
+        session_path,
+        "context_overflow_user",
+        REASON=reason,
+        ORIGINAL_TASK=last_user_prompt[:500],
+        ARTIFACT_PATH=artifact_path
+    )
+
+    summary_user = {
+        "role": "user",
+        "content": summary_user_content or f"Create session protocol. Reason: {reason}",
+    }
+
+    summary_messages = system_msgs + [summary_system, summary_user]
+    summary_messages = _prepare_messages_for_ollama(
+        sm,
+        session_path,
+        summary_messages,
+        num_ctx=num_ctx,
+        reserve_tokens=reserve_tokens,
+    )
+
+    ollama_base_url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+    verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
+    chat_url = f"{ollama_base_url}/api/chat"
+
+    summary_text = (
+        "SESSION_PROTOCOL\n"
+        f"reason: {reason}\n"
+        f"artifact: {artifact_path}\n"
+        f"original_task: {last_user_prompt[:200]}...\n"
+        "key_facts:\n"
+        "- (summary generation failed)\n"
+        "next_steps:\n"
+        "- Продолжить с очищенным контекстом\n"
+    )
+    try:
+        payload = {
+            "model": model,
+            "messages": summary_messages,
+            "stream": False,
+            "options": {
+                "num_ctx": num_ctx,
+                "num_predict": 450,
+            },
+        }
+        res = requests.post(
+            chat_url,
+            json=payload,
+            timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300),
+            verify=verify_ssl,
+        )
+        if res.status_code == 200:
+            data = res.json()
+            summary_text = data.get("message", {}).get("content") or summary_text
+    except Exception:
+        pass
+
+    protocol_content = sm.load_prompt(
+        session_path,
+        "context_overflow_protocol",
+        ARTIFACT_PATH=artifact_path,
+        SESSION_PROTOCOL=summary_text,
+        ORIGINAL_TASK=last_user_prompt[:300]
+    )
+
+    protocol_msg = {
+        "role": "system",
+        "content": protocol_content or f"Context cleared. Continue task: {last_user_prompt[:100]}",
+    }
+
+    messages.clear()
+    messages.extend(system_msgs + [protocol_msg])
+
+    return protocol_msg["content"], artifact_path
 
 
 def ask_ollama_textual(
@@ -202,6 +335,11 @@ def ask_ollama_textual(
     ollama_chat_url = f"{ollama_base_url}/api/chat"
     verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
     request_timeout = sm.config.getint('Ollama', 'RequestTimeout', fallback=300)
+
+    if messages and not any(m.get("role") == "system" and "BOTINOK" in str(m.get("content", "")) for m in messages):
+        identity_content = sm.load_prompt(session_path, "identity")
+        if identity_content:
+            messages.insert(0, {"role": "system", "content": identity_content})
 
     app = BotinokTextualApp(session_path=session_path)
     app.set_model_info(model, dangerous=dangerous_mode)
@@ -292,6 +430,14 @@ def ask_ollama_textual(
 
     def _do_vram_prep():
         try:
+            if "qwen3.5:9b" in _current_model:
+                _update_stats(status="Forced VRAM Cleanup...")
+                try:
+                    sm.unload_models()
+                except Exception:
+                    pass
+                time.sleep(1)
+
             _update_stats(status="Checking Memory...")
             try:
                 status = sm.get_ollama_status()
@@ -302,7 +448,7 @@ def ask_ollama_textual(
                 for m in status["models"]:
                     vram = m.get("size_vram", 0) / (1024**3)
                     vram_info_parts.append(f"{m['name']}: {vram:.2f}GB")
-                    if vram > 7.0 or (m['name'] != model and len(status['models']) > 0):
+                    if vram > 7.0 or (m['name'] != _current_model and len(status['models']) > 0):
                         _update_stats(status="Unloading Models...")
                         try:
                             sm.unload_models()
@@ -321,33 +467,64 @@ def ask_ollama_textual(
         stream_active.set()
         _set_input_enabled(False)
         _update_stats(status="Connecting...")
-        current_model = sm.config.get('Ollama', 'DefaultModel', fallback='qwen3.5:9b')
-        current_ctx = sm.config.getint('Ollama', 'DefaultContext', fallback=8192)
-        current_ollama_chat_url = f"{sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')}/api/chat"
-        current_verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
-        current_timeout = sm.config.getint('Ollama', 'RequestTimeout', fallback=300)
+
+        current_model = _current_model
+        current_ctx = _current_ctx
+        current_ollama_chat_url = _ollama_chat_url
+        current_verify_ssl = _verify_ssl
+        current_timeout = _request_timeout
 
         if current_model in MODELS_NO_TOOLS:
             _ensure_chat_only_system_message(messages)
 
+        sm.write_file_header(session_path, "thinking.md", current_model, current_ctx, user_text)
+        sm.write_file_header(session_path, "response.md", current_model, current_ctx, user_text)
+
         tool_rounds = 0
         auto_recoveries = 0
         turn_prompt = user_text
+        http_retries = 0
+        max_http_retries = 2
+        changed_project_files = []
+        start_time = time.time()
+        elapsed = 0.0
+        ttft_val = 0.0
+        tps_val = 0.0
+        full_response = ""
+        full_thinking = ""
+        metrics = {}
+        thinking_tokens = 0
+        response_tokens = 0
+        streaming_tool_tokens = 0
+        tool_tokens = 0
 
         while True:
             tool_rounds += 1
             if tool_rounds > MAX_TOOL_ROUNDS_PER_TURN:
                 if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
+                    summary, _ = _ollama_summarize_and_reset_context(
+                        sm, current_model, session_path, messages, current_ctx,
+                        reason=f"max_tool_rounds_exceeded({MAX_TOOL_ROUNDS_PER_TURN})_recoveries_exhausted({MAX_AUTO_RECOVERIES_PER_TURN})",
+                    )
+                    sm.update_context(session_path, "assistant", summary)
+                    messages.append({"role": "assistant", "content": summary})
                     break
+
+                summary, artifact_path = _ollama_summarize_and_reset_context(
+                    sm, current_model, session_path, messages, current_ctx,
+                    reason=f"max_tool_rounds_exceeded({MAX_TOOL_ROUNDS_PER_TURN})",
+                )
                 auto_recoveries += 1
                 tool_rounds = 0
                 cont_user_content = sm.load_prompt(
                     session_path, "auto_continue",
                     LAST_USER_PROMPT=turn_prompt,
                     SESSION_PATH=session_path,
+                    ARTIFACT_PATH=artifact_path,
                 )
                 cont_user = {"role": "user", "content": cont_user_content or f"Continue task: {turn_prompt[:100]}"}
                 messages.append(cont_user)
+                sm.update_context(session_path, "assistant", summary)
                 sm.update_context(session_path, "user", cont_user["content"])
                 continue
 
@@ -380,17 +557,28 @@ def ask_ollama_textual(
                 )
             except Exception as e:
                 _write_log(f"[red]Connection Error: {e}[/red]")
-                _update_stats(status=f"Connection Error")
+                _update_stats(status="Connection Error")
+                if http_retries < max_http_retries:
+                    http_retries += 1
+                    time.sleep(2)
+                    continue
                 break
 
             if response.status_code != 200:
                 error_msg = "Unknown Error"
+                error_text = ""
                 try:
                     data = response.json()
                     if isinstance(data, dict):
                         error_msg = data.get("error", error_msg)
+                        error_text = json.dumps(data, ensure_ascii=False, indent=2)
+                    else:
+                        error_text = str(data)
                 except Exception:
-                    error_msg = response.text[:500] if response.text else "Unknown Error"
+                    try:
+                        error_text = response.text[:500] if response.text else ""
+                    except Exception:
+                        error_text = ""
 
                 if (
                     response.status_code == 400
@@ -404,18 +592,36 @@ def ask_ollama_textual(
                     continue
 
                 _write_log(f"[red]Ollama Error {response.status_code}: {error_msg}[/red]")
-                _update_stats(status=f"Ollama Error")
+                _update_stats(status="Ollama Error")
+
+                ts = int(time.time())
+                try:
+                    sm.save_artifact(
+                        session_path,
+                        f"ollama_http_error_{response.status_code}_{ts}.txt",
+                        (error_text or "")[:200_000],
+                    )
+                except Exception:
+                    pass
+
+                if http_retries < max_http_retries:
+                    http_retries += 1
+                    time.sleep(3)
+                    continue
                 break
 
             full_response = ""
             full_thinking = ""
             tool_calls = []
+            metrics = {}
             start_time = time.time()
             first_token_time = None
+            thinking_ended = False
             thinking_tokens = 0
             response_tokens = 0
             streaming_tool_text = ""
             streaming_tool_tokens = 0
+            tool_tokens = 0
             prompt_eval_count = 0
             eval_count = 0
             last_chunk_time = time.time()
@@ -425,95 +631,217 @@ def ask_ollama_textual(
 
             sm.update_context(session_path, "user", user_text)
 
-            for line in response.iter_lines():
-                if not line:
-                    continue
+            stream_queue = queue.Queue()
 
-                last_chunk_time = time.time()
-                _call_from_thread(app.report_chunk)
-
+            def _stream_reader():
                 try:
-                    chunk = json.loads(line.decode('utf-8', errors='replace'))
-                except json.JSONDecodeError:
-                    continue
+                    for line in response.iter_lines():
+                        stream_queue.put(("line", line))
+                    stream_queue.put(("eof", None))
+                except Exception as e:
+                    stream_queue.put(("error", str(e)))
 
-                msg = chunk.get("message", {})
+            reader_thread = threading.Thread(target=_stream_reader, daemon=True)
+            reader_thread.start()
 
-                if "prompt_eval_count" in chunk:
-                    prompt_eval_count = chunk.get("prompt_eval_count", 0)
-                if "eval_count" in chunk:
-                    eval_count = chunk.get("eval_count", 0)
+            stream_done = False
+            stream_error = None
+            waiting_status_set = False
 
-                logprobs = chunk.get("logprobs")
-                if logprobs and isinstance(logprobs, list):
-                    for lp in logprobs:
-                        tok = lp.get("token", "")
-                        if tok and not tok.startswith("<|") and not tok.endswith("|>"):
+            while not stream_done:
+                while True:
+                    try:
+                        kind, item = stream_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+                    if kind == "eof":
+                        stream_done = True
+                        break
+                    if kind == "error":
+                        stream_error = item
+                        stream_done = True
+                        break
+
+                    line = item
+                    if not line:
+                        continue
+
+                    last_chunk_time = time.time()
+                    _call_from_thread(app.report_chunk)
+                    waiting_status_set = False
+
+                    try:
+                        chunk = json.loads(line.decode('utf-8', errors='replace'))
+                    except json.JSONDecodeError:
+                        continue
+
+                    msg = chunk.get("message", {})
+
+                    if "prompt_eval_count" in chunk:
+                        prompt_eval_count = chunk.get("prompt_eval_count", 0)
+                    if "eval_count" in chunk:
+                        eval_count = chunk.get("eval_count", 0)
+
+                    logprobs = chunk.get("logprobs")
+                    if logprobs and isinstance(logprobs, list):
+                        for lp in logprobs:
+                            token = lp.get("token", "")
+                            if token is None:
+                                token = ""
                             streaming_tool_tokens += 1
+                            if not msg.get("content") and not msg.get("thinking"):
+                                if token:
+                                    streaming_tool_text += str(token)
+                                    streaming_tool_text = _trim_tail(streaming_tool_text, STREAM_TOOL_TEXT_MAX_CHARS)
+                                if not waiting_status_set:
+                                    _update_stats(status="Streaming Tool JSON...")
+                                    waiting_status_set = True
 
-                thought = msg.get("thinking", "")
-                if thought:
-                    full_thinking += thought
-                    thinking_tokens += 1
-                    _stream_thought(thought)
-
-                token = msg.get("content", "")
-                if token:
-                    full_response += token
-                    response_tokens += 1
                     if not first_token_time:
                         first_token_time = time.time()
-                    _stream_chunk(content=token)
 
-                tc_list = msg.get("tool_calls")
-                if tc_list:
-                    tool_calls.extend(tc_list)
-                    for tc in tc_list:
-                        func = tc.get("function", {})
-                        tool_name = func.get("name", "unknown")
-                        try:
-                            tool_args = json.loads(func.get("arguments", "{}")) if isinstance(func.get("arguments"), str) else func.get("arguments", {})
-                        except Exception:
-                            tool_args = {}
-                        args_display = json.dumps(tool_args, ensure_ascii=False)[:60]
-                        _add_tool(tool_name, args_display)
+                    thought = msg.get("thinking", "")
+                    if thought:
+                        full_thinking += thought
+                        thinking_tokens += 1
+                        _stream_thought(thought)
+                        sm.log_chunk(session_path, "thinking", thought)
 
-                if chunk.get("done"):
-                    elapsed = time.time() - start_time
-                    ttft_val = first_token_time - start_time if first_token_time else elapsed
-                    tps_val = (thinking_tokens + response_tokens + streaming_tool_tokens) / (time.time() - first_token_time) if first_token_time and (time.time() - first_token_time) > 0 else 0
+                    token = msg.get("content", "")
+                    if token:
+                        if streaming_tool_text:
+                            streaming_tool_text = ""
 
-                    last_req_ctx = prompt_eval_count + eval_count
-                    _update_stats(
-                        status="Processing tool calls..." if tool_calls else "Done",
-                        elapsed=elapsed,
-                        ttft=f"{ttft_val:.2f}s",
-                        thinking_tokens=thinking_tokens,
-                        response_tokens=response_tokens,
-                        stream_tool_tokens=streaming_tool_tokens,
-                        tps=tps_val,
-                        session_ctx=session_ctx_est,
-                        last_req_ctx=last_req_ctx,
-                    )
+                        if not thinking_ended:
+                            thinking_ended = True
+                            thinking_stats = {
+                                "total_tokens": thinking_tokens,
+                                "thinking_tokens": thinking_tokens,
+                                "response_tokens": 0,
+                                "tps": thinking_tokens / (time.time() - first_token_time) if first_token_time else 0,
+                                "ttft": first_token_time - start_time if first_token_time else 0,
+                                "duration": time.time() - start_time,
+                            }
+                            sm.write_file_footer(session_path, "thinking.md", thinking_stats)
+
+                        full_response += token
+                        response_tokens += 1
+                        _stream_chunk(content=token)
+                        sm.log_chunk(session_path, "response", token)
+
+                        if len(full_response) % 800 == 0 and _detect_repetition(full_response):
+                            try:
+                                response.close()
+                            except Exception:
+                                pass
+                            stream_done = True
+                            break
+
+                    tc_list = msg.get("tool_calls")
+                    if tc_list:
+                        tool_calls.extend(tc_list)
+
+                    if chunk.get("done"):
+                        metrics = {
+                            "total_duration_ms": chunk.get("total_duration", 0) / 1_000_000,
+                            "load_duration_ms": chunk.get("load_duration", 0) / 1_000_000,
+                            "prompt_eval_count": chunk.get("prompt_eval_count", 0),
+                            "eval_count": chunk.get("eval_count", 0),
+                            "eval_duration_ms": chunk.get("eval_duration", 0) / 1_000_000,
+                        }
+                        sm.log_chunk(session_path, "metrics", "", metrics=metrics)
+                        stream_done = True
+                        break
+
+                if stream_done:
                     break
-            else:
-                _update_stats(status="Stream ended without done")
+
+                no_chunks_for = time.time() - last_chunk_time if last_chunk_time else 0.0
+                if no_chunks_for >= 1.0 and not waiting_status_set:
+                    _update_stats(status="Waiting for tool call...")
+                    waiting_status_set = True
+                elif no_chunks_for < 1.0 and app.stats_data.get("status") == "Waiting for tool call...":
+                    _update_stats(status="Generating...")
+
+                time.sleep(0.1)
+
+            if stream_error:
+                _write_log(f"[red]Ollama stream error: {stream_error}[/red]")
+                _update_stats(status="Stream Error")
                 break
+
+            elapsed = time.time() - start_time
+            ttft_val = first_token_time - start_time if first_token_time else elapsed
+            tps_val = (thinking_tokens + response_tokens + streaming_tool_tokens) / (time.time() - first_token_time) if first_token_time and (time.time() - first_token_time) > 0 else 0
+            last_req_ctx = prompt_eval_count + eval_count
+
+            _update_stats(
+                status="Processing tool calls..." if tool_calls else "Done",
+                elapsed=elapsed,
+                ttft=f"{ttft_val:.2f}s",
+                thinking_tokens=thinking_tokens,
+                response_tokens=response_tokens,
+                stream_tool_tokens=streaming_tool_tokens,
+                final_tool_tokens=tool_tokens,
+                tps=tps_val,
+                session_ctx=session_ctx_est,
+                last_req_ctx=last_req_ctx,
+                last_req_ctx_max=current_ctx,
+            )
 
             _flush_thinking_buf()
             _flush_stream_buf()
 
-            if _detect_repetition(full_response):
-                sm.update_context(session_path, "system", "Repetition detected, auto-continuing")
-                cont_content = sm.load_prompt(
-                    session_path, "auto_continue",
+            if (not tool_calls) and (not full_response.strip()) and full_thinking.strip():
+                if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
+                    cont_user_content = sm.load_prompt(
+                        session_path, "auto_continue_final",
+                        LAST_USER_PROMPT=turn_prompt,
+                        SESSION_PATH=session_path,
+                    )
+                    cont_user = {"role": "user", "content": cont_user_content or f"Formulate final answer for: {turn_prompt[:100]}"}
+                    messages.append(cont_user)
+                    sm.update_context(session_path, "user", cont_user["content"])
+                    continue
+                auto_recoveries += 1
+                tool_rounds = 0
+                cont_user_content = sm.load_prompt(
+                    session_path, "auto_continue_final",
                     LAST_USER_PROMPT=turn_prompt,
                     SESSION_PATH=session_path,
                 )
-                messages.append({"role": "assistant", "content": full_response, "thinking": full_thinking, "tool_calls": tool_calls if tool_calls else None})
-                sm.update_context(session_path, "assistant", full_response, thinking=full_thinking)
-                cont_user = {"role": "user", "content": cont_content or f"Continue task: {turn_prompt[:100]}"}
+                cont_user = {"role": "user", "content": cont_user_content or f"Formulate final answer for: {turn_prompt[:100]}"}
                 messages.append(cont_user)
+                sm.update_context(session_path, "user", cont_user["content"])
+                continue
+
+            if _detect_repetition(full_response):
+                sm.update_context(session_path, "system", "Repetition detected, auto-continuing")
+                if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
+                    summary, _ = _ollama_summarize_and_reset_context(
+                        sm, current_model, session_path, messages, current_ctx,
+                        reason=f"repetition_detected_recoveries_exhausted({MAX_AUTO_RECOVERIES_PER_TURN})",
+                    )
+                    sm.update_context(session_path, "assistant", summary)
+                    messages.append({"role": "assistant", "content": summary})
+                    break
+
+                summary, artifact_path = _ollama_summarize_and_reset_context(
+                    sm, current_model, session_path, messages, current_ctx,
+                    reason="repetition_detected",
+                )
+                auto_recoveries += 1
+                tool_rounds = 0
+                cont_user_content = sm.load_prompt(
+                    session_path, "auto_continue",
+                    LAST_USER_PROMPT=turn_prompt,
+                    SESSION_PATH=session_path,
+                    ARTIFACT_PATH=artifact_path,
+                )
+                cont_user = {"role": "user", "content": cont_user_content or f"Continue task: {turn_prompt[:100]}"}
+                messages.append(cont_user)
+                sm.update_context(session_path, "assistant", summary)
                 sm.update_context(session_path, "user", cont_user["content"])
                 _finalize_turn(full_response, full_thinking)
                 continue
@@ -521,98 +849,173 @@ def ask_ollama_textual(
             _flush_thinking_buf()
             _flush_stream_buf()
 
-            if tool_calls:
-                messages.append({"role": "assistant", "content": full_response, "thinking": full_thinking, "tool_calls": tool_calls})
-                sm.update_context(session_path, "assistant", full_response, thinking=full_thinking)
-
-                _finalize_turn(full_response, full_thinking, tool_calls)
-
-                for tc in tool_calls:
-                    func = tc.get("function", {})
-                    tool_name = func.get("name", "unknown")
-                    tc_id = tc.get("id", "")
-                    try:
-                        tool_args = json.loads(func.get("arguments", "{}")) if isinstance(func.get("arguments"), str) else func.get("arguments", {})
-                    except Exception:
-                        tool_args = {}
-
-                    _add_tool(tool_name, json.dumps(tool_args, ensure_ascii=False)[:60], status="running")
-
-                    progress_callback = None
-                    if tool_name == "curl":
-
-                        def _make_curl_cb(tn=tool_name):
-                            last_reported = [0.0]
-
-                            def cb(bytes_downloaded, total_bytes):
-                                size_kb = bytes_downloaded / 1024
-                                if total_bytes > 0:
-                                    pct = (bytes_downloaded / total_bytes) * 100
-                                    _update_tool(tn, status="running", size_kb=size_kb)
-                                else:
-                                    if bytes_downloaded - last_reported[0] > 10240:
-                                        _update_tool(tn, status="running", size_kb=size_kb)
-                                        last_reported[0] = bytes_downloaded
-                            return cb
-
-                        progress_callback = _make_curl_cb()
-
-                    effective_session_path = session_path
-                    if tool_name == "code_editor" and isinstance(tool_args, dict):
-                        raw_path = tool_args.get("path", "")
-                        if raw_path and not os.path.isabs(raw_path):
-                            project_dir = os.path.join(session_path, "project")
-                            tool_args["path"] = os.path.realpath(os.path.join(project_dir, raw_path))
-
-                    tool_result = tm.call_tool(
-                        tool_name,
-                        tool_args,
-                        session_path=effective_session_path,
-                        progress_callback=progress_callback,
+            ctx_used = metrics.get("prompt_eval_count", 0) + metrics.get("eval_count", 0)
+            if current_ctx > 0 and ctx_used >= int(current_ctx * HARD_CTX_PCT):
+                if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
+                    summary, _ = _ollama_summarize_and_reset_context(
+                        sm, current_model, session_path, messages, current_ctx,
+                        reason=f"hard_ctx_threshold_reached({ctx_used}/{current_ctx})_recoveries_exhausted({MAX_AUTO_RECOVERIES_PER_TURN})",
                     )
+                    sm.update_context(session_path, "assistant", summary)
+                    messages.append({"role": "assistant", "content": summary})
+                    break
 
-                    res_str = "" if tool_result is None else str(tool_result)
-                    size_kb = len(res_str.encode('utf-8', errors='ignore')) / 1024
+                summary, artifact_path = _ollama_summarize_and_reset_context(
+                    sm, current_model, session_path, messages, current_ctx,
+                    reason=f"hard_ctx_threshold_reached({ctx_used}/{current_ctx})",
+                )
+                auto_recoveries += 1
+                tool_rounds = 0
+                cont_user_content = sm.load_prompt(
+                    session_path, "auto_continue",
+                    LAST_USER_PROMPT=turn_prompt,
+                    SESSION_PATH=session_path,
+                    ARTIFACT_PATH=artifact_path,
+                )
+                cont_user = {"role": "user", "content": cont_user_content or f"Continue task: {turn_prompt[:100]}"}
+                messages.append(cont_user)
+                sm.update_context(session_path, "assistant", summary)
+                sm.update_context(session_path, "user", cont_user["content"])
+                continue
 
-                    artifact_name = f"tool_{tool_name}_{int(time.time())}.txt"
+            if current_model in MODELS_NO_TOOLS and tool_calls:
+                tool_calls = []
+
+            if not tool_calls:
+                sm.update_context(session_path, "assistant", full_response, thinking=full_thinking)
+                messages.append({"role": "assistant", "content": full_response})
+                _finalize_turn(full_response, full_thinking)
+                break
+
+            _update_stats(status="Tool-mode parsing...")
+            streaming_tool_text = ""
+            _update_stats(status="Calling Tools...")
+
+            messages.append({"role": "assistant", "content": full_response, "tool_calls": tool_calls})
+            sm.update_context(session_path, "assistant", full_response, thinking=full_thinking, tool_calls=tool_calls)
+
+            _finalize_turn(full_response, full_thinking, tool_calls)
+
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                tool_name = func.get("name", "unknown")
+                tc_id = tc.get("id", "")
+                try:
+                    tool_args = json.loads(func.get("arguments", "{}")) if isinstance(func.get("arguments"), str) else func.get("arguments", {})
+                except Exception:
+                    tool_args = {}
+
+                _add_tool(tool_name, json.dumps(tool_args, ensure_ascii=False)[:60], status="running")
+
+                sm.log_tool_call(session_path, tool_name, tool_args, "STARTED", status="running")
+
+                progress_callback = None
+                if tool_name == "curl":
+
+                    def _make_curl_cb(tn=tool_name):
+                        last_reported = [0.0]
+
+                        def cb(bytes_downloaded, total_bytes):
+                            size_kb = bytes_downloaded / 1024
+                            if total_bytes > 0:
+                                pct = (bytes_downloaded / total_bytes) * 100
+                                _update_tool(tn, status="running", size_kb=size_kb)
+                            else:
+                                if bytes_downloaded - last_reported[0] > 10240:
+                                    _update_tool(tn, status="running", size_kb=size_kb)
+                                    last_reported[0] = bytes_downloaded
+                        return cb
+
+                    progress_callback = _make_curl_cb()
+
+                effective_session_path = session_path
+                if tool_name == "code_editor" and isinstance(tool_args, dict):
+                    raw_path = tool_args.get("path", "")
+                    if raw_path and not os.path.isabs(raw_path):
+                        project_dir = os.path.join(session_path, "project")
+                        tool_args["path"] = os.path.realpath(os.path.join(project_dir, raw_path))
+
+                tool_result = tm.call_tool(
+                    tool_name,
+                    tool_args,
+                    session_path=effective_session_path,
+                    progress_callback=progress_callback,
+                )
+
+                if tool_name == "code_editor":
                     try:
-                        artifact_path = sm.save_artifact(session_path, artifact_name, res_str[:200_000])
+                        parsed = json.loads(str(tool_result))
+                        if isinstance(parsed, dict) and parsed.get("changed") and parsed.get("path"):
+                            changed_project_files.append(str(parsed.get("path")))
                     except Exception:
-                        artifact_path = f"./artifacts/{artifact_name}"
+                        pass
 
-                    compact_msg = _compact_tool_message(tool_name, tool_args, tool_result, artifact_path)
+                res_str = "" if tool_result is None else str(tool_result)
+                size_kb = len(res_str.encode('utf-8', errors='ignore')) / 1024
 
+                artifact_name = f"tool_{tool_name}_{tc_id or int(time.time())}.txt"
+                try:
+                    artifact_path = sm.save_artifact(session_path, artifact_name, res_str[:200_000])
+                except Exception:
+                    artifact_path = f"./artifacts/{artifact_name}"
+
+                compact_msg = _compact_tool_message(tool_name, tool_args, tool_result, artifact_path)
+
+                res_tokens = len(str(compact_msg)) // 4
+                tool_tokens += res_tokens
+
+                sm.log_tool_call(session_path, tool_name, tool_args, tool_result, status="completed")
+
+                if tool_name == "vision" and isinstance(tool_result, dict) and tool_result.get("image_data"):
+                    vision_prompt = tool_result.get("prompt", "Опиши что ты видишь на этом изображении")
+                    messages.append({
+                        "role": "user",
+                        "content": vision_prompt,
+                        "images": [tool_result["image_data"]]
+                    })
+                else:
                     tool_message = {
                         "role": "tool",
-                        "name": tool_name,
                         "content": compact_msg,
                     }
                     if tc_id:
                         tool_message["tool_call_id"] = tc_id
-
+                    if tool_name:
+                        tool_message["name"] = tool_name
                     messages.append(tool_message)
-                    sm.update_context(session_path, "tool", compact_msg)
 
-                    _update_tool(tool_name, status="completed", size_kb=size_kb)
-                    _append_tool_result(tool_name, compact_msg[:500])
+                sm.update_context(session_path, "tool", compact_msg)
 
-                tool_reminder_msg = sm.load_prompt(session_path, "tool_reminder",
-                                                    PROMPTS_DIR=os.path.join(session_path, 'prompts'))
-                if tool_reminder_msg:
-                    messages.append({"role": "system", "content": tool_reminder_msg})
+                sm.log_step(session_path, f"tool_{tool_name}_{int(time.time())}", tc, {"result": tool_result}, {})
 
-                user_text = ""
-                continue
-            else:
-                messages.append({"role": "assistant", "content": full_response, "thinking": full_thinking})
-                sm.update_context(session_path, "assistant", full_response, thinking=full_thinking)
-                _finalize_turn(full_response, full_thinking)
-                break
+                _update_tool(tool_name, status="completed", size_kb=size_kb)
+                _append_tool_result(tool_name, compact_msg[:500])
+
+            tool_reminder_msg = sm.load_prompt(session_path, "tool_reminder",
+                                                PROMPTS_DIR=os.path.join(session_path, 'prompts'))
+            if tool_reminder_msg:
+                messages.append({"role": "system", "content": tool_reminder_msg})
+
+            _update_stats(status="Resuming generation...")
+
+            user_text = ""
+            continue
 
         session_ctx_est = _estimate_messages_tokens(messages)
         _update_stats(session_ctx=session_ctx_est, status="Ready")
         _flush_thinking_buf()
         _flush_stream_buf()
+
+        final_stats = {
+            "total_tokens": thinking_tokens + response_tokens + tool_tokens + streaming_tool_tokens,
+            "thinking_tokens": thinking_tokens,
+            "response_tokens": response_tokens,
+            "tps": tps_val,
+            "ttft": ttft_val,
+            "duration": time.time() - start_time,
+        }
+        sm.log_step(session_path, f"step_textual_{int(time.time())}", {}, {"response": full_response, "thinking": full_thinking}, metrics)
+
         stream_active.clear()
         _set_input_enabled(True)
 
@@ -672,6 +1075,7 @@ def ask_ollama_textual(
                 sm.config.set('Ollama', 'DefaultModel', new_model)
                 with open(sm.config_path, 'w') as cf:
                     sm.config.write(cf)
+                _call_from_thread(app.set_model_info, new_model, dangerous=tm.dangerous_mode)
                 _write_log(f"[green]✅ Модель сменена на: {new_model}[/green]")
                 _write_log("[dim]Новая модель будет использована в следующем запросе.[/dim]")
 
@@ -702,6 +1106,7 @@ def ask_ollama_textual(
             os.environ["BOTINOK_DANGEROUS"] = new_val
             tm.dangerous_mode = not current
             status = "[green]ON[/green]" if not current else "[red]OFF[/red]"
+            _call_from_thread(app.set_model_info, _current_model, dangerous=tm.dangerous_mode)
             _write_log(f"[yellow]⚠️ Dangerous mode: {status}[/yellow]")
 
         elif command == "/vram":
@@ -727,7 +1132,7 @@ def ask_ollama_textual(
             _write_log(f"[yellow]Неизвестная команда: {command}. Введите /help для списка команд.[/yellow]")
 
     def on_user_input(text: str):
-        nonlocal _last_user_text
+        nonlocal _last_user_text, _ollama_chat_url, _verify_ssl
         if text.lower() in ("exit", "quit", "выход"):
             app.exit()
             return
@@ -736,10 +1141,14 @@ def ask_ollama_textual(
             return
 
         _last_user_text = text
-        nonlocal _ollama_chat_url, _request_timeout, _verify_ssl
         ollama_base_url_updated = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
         _ollama_chat_url = f"{ollama_base_url_updated}/api/chat"
         _verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
+
+        tool_reminder_msg = sm.load_prompt(session_path, "tool_reminder",
+                                            PROMPTS_DIR=os.path.join(session_path, 'prompts'))
+        if tool_reminder_msg:
+            messages.append({"role": "system", "content": tool_reminder_msg})
 
         messages.append({"role": "user", "content": text})
         sm.update_context(session_path, "user", text)
