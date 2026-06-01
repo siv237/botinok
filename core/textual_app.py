@@ -1,13 +1,18 @@
 """
 Textual приложение для Botinok с RichLog для истории и Input для ввода.
+Стилизовано максимально близко к старому Rich Live интерфейсу (BotVisualizer).
 """
 
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Header, Footer, Input, Static
+from textual.widgets import RichLog, Input, Static
 from textual.containers import Vertical, Horizontal
 from textual.geometry import Size
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
+from rich.progress import Progress, BarColumn, TextColumn
+from rich.console import Group
+from rich.text import Text
 from typing import Optional, Callable, List
 import json
 import os
@@ -16,20 +21,19 @@ from datetime import datetime
 
 
 class BotinokTextualApp(App):
-    """Textual приложение для Botinok."""
+    """Textual приложение для Botinok, стилизованное под старый Rich Live UI."""
 
     CSS = """
     Screen { layout: vertical; }
+    #header { height: 3; }
     #main { height: 1fr; }
-    #left { width: 2fr; min-width: 40; }
-    #right { width: 1fr; max-width: 30; }
+    #content { width: 2fr; border: solid green; }
+    #right { width: 1fr; }
+    #stats { height: 1fr; border: solid yellow; }
+    #tools { height: 1fr; border: solid magenta; }
+    #footer { height: 3; border: solid cyan; }
+    Input { height: 3; }
     RichLog { height: 100%; }
-    #right_panel { layout: vertical; height: 100%; }
-    #status_line { height: auto; color: $text-muted; background: $surface-darken-1; padding: 0 1; }
-    #stats { height: auto; }
-    #tools { height: 1fr; }
-    #ctx_bars { height: auto; padding: 0 1; background: $surface-darken-1; }
-    Input:focus { border: tall $success; }
     """
 
     def __init__(self, session_path: str = "", on_submit: Optional[Callable] = None,
@@ -41,11 +45,13 @@ class BotinokTextualApp(App):
         self.rich_log: Optional[RichLog] = None
         self.stats_display: Optional[Static] = None
         self.tools_display: Optional[Static] = None
-        self.ctx_bars: Optional[Static] = None
-        self.status_line: Optional[Static] = None
+        self.header_display: Optional[Static] = None
+        self.footer_display: Optional[Static] = None
+        self.content_container: Optional[Vertical] = None
         self.model_name = ""
         self.dangerous_mode = False
         self.is_proofreader = False
+        self.current_prompt = ""
         self.stats_data = {
             "status": "Ready", "elapsed": 0.0, "no_chunks": 0.0,
             "ttft": "...", "thinking_tokens": 0, "response_tokens": 0,
@@ -61,25 +67,23 @@ class BotinokTextualApp(App):
         self._stream_start_index = -1
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        self.header_display = Static("", id="header")
+        yield self.header_display
         with Horizontal(id="main"):
-            with Vertical(id="left"):
-                yield RichLog(markup=True, auto_scroll=True, wrap=True, highlight=True, min_width=0, id="content")
+            self.content_container = Vertical(id="content")
+            with self.content_container:
+                yield RichLog(markup=True, auto_scroll=True, wrap=True, highlight=True, min_width=0, id="content_log")
             with Vertical(id="right"):
-                with Vertical(id="right_panel"):
-                    self.status_line = Static("", id="status_line")
-                    yield self.status_line
-                    self.stats_display = Static(self._render_stats(), id="stats")
-                    yield self.stats_display
-                    self.ctx_bars = Static(self._render_ctx_bars(), id="ctx_bars")
-                    yield self.ctx_bars
-                    self.tools_display = Static(self._render_tools(), id="tools")
-                    yield self.tools_display
+                self.stats_display = Static("", id="stats")
+                yield self.stats_display
+                self.tools_display = Static("", id="tools")
+                yield self.tools_display
+        self.footer_display = Static("", id="footer")
+        yield self.footer_display
         yield Input(placeholder="Введите ваш вопрос (exit = выход)...", id="input")
-        yield Footer()
 
     def on_mount(self) -> None:
-        self.rich_log = self.query_one(RichLog)
+        self.rich_log = self.query_one("#content_log", RichLog)
         self.load_history()
         try:
             self.set_focus(self.query_one("#input", Input))
@@ -90,6 +94,16 @@ class BotinokTextualApp(App):
             t = threading.Thread(target=self._vram_prep_fn, daemon=True)
             t.start()
         self.set_interval(1, self._tick_stats)
+        # установить заголовки рамок
+        if self.content_container:
+            self.content_container.border_title = "Response"
+        if self.stats_display:
+            self.stats_display.border_title = "Performance"
+        if self.tools_display:
+            self.tools_display.border_title = "Tools Activity"
+        if self.footer_display:
+            self.footer_display.border_title = "Diagnostic Log"
+        self.update_stats_display()
 
     def set_model_info(self, model: str, dangerous: bool = False, proofreader: bool = False):
         self.model_name = model
@@ -109,67 +123,122 @@ class BotinokTextualApp(App):
             self.stats_data["no_chunks"] = now - self._last_chunk_time
         self.update_stats_display()
 
-    def _render_status_line(self) -> str:
-        parts = []
-        if self.is_proofreader:
-            parts.append("[bold black on yellow]PROOFREADER[/bold black on yellow]")
-        else:
-            parts.append("[bold white on blue]BOTINOK[/bold white on blue]")
-        if self.model_name:
-            parts.append(f"[cyan]{self.model_name}[/cyan]")
-        if self.dangerous_mode:
-            parts.append("[bold red]⚠ DANGEROUS[/bold red]")
-        return " ".join(parts)
+    def _render_header(self):
+        header_style = "bold black on yellow" if self.is_proofreader else "bold white on blue"
+        panel_style = "yellow" if self.is_proofreader else "blue"
+        danger_tag = " | DANGEROUS MODE: ON" if self.dangerous_mode else ""
+        agent_type = "PROOFREADER AGENT" if self.is_proofreader else "BOTINOK AGENT"
+        vram = self.stats_data.get("vram", "...")
+        ctx = self.stats_data.get("session_ctx_max", 8192)
+        text = Text(
+            f"{agent_type}{danger_tag} | Model: {self.model_name} | Context: {ctx} | {vram}",
+            justify="center",
+            style=header_style,
+        )
+        return Panel(text, style=panel_style)
 
-    def _render_ctx_bars(self) -> str:
+    def _render_footer(self) -> Text:
+        return Text(f"Prompt: {self.current_prompt}", overflow="ellipsis", style="dim")
+
+    def _render_stats(self):
         s = self.stats_data
-        session_pct = (s['session_ctx'] / s['session_ctx_max']) * 100 if s['session_ctx_max'] > 0 else 0
-        bw = 20
-        s_filled = int(bw * session_pct / 100)
-        s_bar = "█" * s_filled + "░" * (bw - s_filled)
-        s_style = "green" if session_pct < 70 else "yellow" if session_pct < 90 else "red"
-        last_pct = (s['last_req_ctx'] / s['last_req_ctx_max']) * 100 if s['last_req_ctx_max'] > 0 else 0
-        l_filled = int(bw * last_pct / 100)
-        l_bar = "█" * l_filled + "░" * (bw - l_filled)
-        l_style = "green" if last_pct < 70 else "yellow" if last_pct < 90 else "red"
-        return f"[{s_style}]Session {s_bar}[/{s_style}] {session_pct:.0f}%\n[{l_style}]LastReq {l_bar}[/{l_style}] {last_pct:.0f}% {s['last_req_ctx']}"
+        elapsed = s.get("elapsed", 0.0)
+        no_chunks = s.get("no_chunks", 0.0)
+        ttft = s.get("ttft", "...")
+        tps = s.get("tps", 0.0)
+        vram = s.get("vram", "...")
+        thinking_tokens = s.get("thinking_tokens", 0)
+        response_tokens = s.get("response_tokens", 0)
+        stream_tool_tokens = s.get("stream_tool_tokens", 0)
+        final_tool_tokens = s.get("final_tool_tokens", 0)
+        status = s.get("status", "Ready")
 
-    def _render_stats(self) -> str:
-        s = self.stats_data
-        lines = []
-        lines.append(f"[bold cyan]Status:[/bold cyan] {s['status']}")
-        lines.append(f"[bold cyan]Elapsed:[/bold cyan] {s['elapsed']:.1f}s")
-        lines.append(f"[bold cyan]No chunks:[/bold cyan] {s['no_chunks']:.1f}s")
-        lines.append(f"[bold cyan]TTFT:[/bold cyan] {s['ttft']}")
-        lines.append(f"[bold cyan]Thinking:[/bold cyan] {s['thinking_tokens']}")
-        lines.append(f"[bold cyan]Response:[/bold cyan] {s['response_tokens']}")
-        lines.append(f"[bold cyan]StreamTool:[/bold cyan] {s['stream_tool_tokens']}")
-        lines.append(f"[bold cyan]FinalTool:[/bold cyan] {s['final_tool_tokens']}")
-        lines.append(f"[bold cyan]TPS:[/bold cyan] {s['tps']:.2f}")
-        lines.append(f"[bold cyan]VRAM:[/bold cyan] {s['vram']}")
-        return "\n".join(lines)
+        table = Table(show_header=False, box=None, padding=(0, 1))
 
-    def _render_tools(self) -> str:
+        active_statuses = [
+            "Generating...", "Waiting for tool call...", "Calling Tools...",
+            "Resuming generation...", "Checking Memory...", "Unloading Models...",
+            "Forced VRAM Cleanup...", "Connecting...", "Tool-mode parsing..."
+        ]
+        activity = ""
+        if status in active_statuses or "Tool:" in status:
+            spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            spinner_index = int(time.time() * 5) % len(spinner_chars)
+            activity = f"[bold magenta]{spinner_chars[spinner_index]}[/bold magenta]"
+
+        table.add_row("[cyan]Status:[/cyan]", f"[bold]{status}[/bold] {activity}")
+        table.add_row("[cyan]Elapsed:[/cyan]", f"{elapsed:.1f}s")
+        table.add_row("[cyan]No chunks:[/cyan]", f"{no_chunks:.1f}s")
+        table.add_row("[cyan]TTFT:[/cyan]", f"[bold yellow]{ttft}[/bold yellow]")
+        table.add_row("[cyan]Thinking:[/cyan]", f"[bold yellow]{thinking_tokens}[/bold yellow]")
+        table.add_row("[cyan]Response:[/cyan]", f"[bold green]{response_tokens}[/bold green]")
+        table.add_row("[cyan]Stream Tool:[/cyan]", f"[bold magenta]{stream_tool_tokens}[/bold magenta]")
+        table.add_row("[cyan]Final Tool:[/cyan]", f"[bold magenta]{final_tool_tokens}[/bold magenta]")
+        table.add_row("[cyan]TPS:[/cyan]", f"[bold green]{tps:.2f}[/bold green]")
+        table.add_row("[cyan]VRAM:[/cyan]", f"[bold yellow]{vram}[/bold yellow]")
+        table.add_row("", "")
+
+        session_ctx_max = s.get("session_ctx_max", 8192)
+        session_ctx = s.get("session_ctx", 0)
+        session_ctx_pct = (session_ctx / session_ctx_max) * 100 if session_ctx_max > 0 else 0
+        session_ctx_style = "green" if session_ctx_pct < 70 else "yellow" if session_ctx_pct < 90 else "red"
+        table.add_row("[cyan]SessionCtx:[/cyan]", f"[{session_ctx_style}]{session_ctx}/{session_ctx_max} ({session_ctx_pct:.1f}%)[/{session_ctx_style}]")
+
+        last_req_ctx = s.get("last_req_ctx", 0)
+        last_req_ctx_pct = (last_req_ctx / session_ctx_max) * 100 if session_ctx_max > 0 else 0
+        last_req_ctx_style = "green" if last_req_ctx_pct < 70 else "yellow" if last_req_ctx_pct < 90 else "red"
+        table.add_row("[cyan]LastReqCtx:[/cyan]", f"[{last_req_ctx_style}]{last_req_ctx}/{session_ctx_max} ({last_req_ctx_pct:.1f}%)[/{last_req_ctx_style}]")
+
+        table.add_row("", "")
+        table.add_row("[bold cyan]Context Window Fill:[/bold cyan]", "")
+
+        progress = Progress(
+            BarColumn(bar_width=None, complete_style=session_ctx_style, finished_style=session_ctx_style),
+            TextColumn("{task.percentage:>5.1f}%"),
+            expand=True,
+        )
+        progress.add_task("ctx", total=100.0, completed=float(session_ctx_pct))
+
+        return Group(table, progress)
+
+    def _render_tools(self):
         if not self.active_tools:
-            return "[dim]No active tools[/dim]"
-        result = ""
+            return Text("No active tools", style="dim")
+
+        table = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 1), expand=True)
+        table.add_column("Tool", style="cyan")
+        table.add_column("Query", style="white", overflow="ellipsis")
+        table.add_column("Status", style="yellow")
+        table.add_column("Size", style="green")
+
         for tool in reversed(self.active_tools):
             status_style = "yellow" if tool["status"] == "running" else "green" if tool["status"] == "completed" else "red"
-            size_display = f"{tool['size_kb']:.1f}KB" if tool['size_kb'] > 0 else "..."
-            query_short = tool['query'][:25] + "..." if len(tool['query']) > 25 else tool['query']
-            tag = "►" if tool["status"] == "running" else "✓"
-            result += f"[bold magenta]{tool['name']}[/bold magenta] [{status_style}]{tag}[/{status_style}] [green]{size_display}[/green]\n  [dim]{query_short}[/dim]\n"
-        return result
+            size_display = f"{tool['size_kb']:.2f} KB" if tool['size_kb'] > 0 else "..."
+            query_short = tool['query'][:20] + "..." if len(tool['query']) > 20 else tool['query']
+            table.add_row(
+                tool["name"],
+                query_short,
+                f"[{status_style}]{tool['status']}[/{status_style}]",
+                size_display
+            )
+        return table
 
     def update_stats_display(self) -> None:
-        if self.status_line:
-            self.status_line.update(self._render_status_line())
+        if self.header_display:
+            self.header_display.update(self._render_header())
+        if self.content_container and self.rich_log:
+            try:
+                h = self.content_container.size.height if self.content_container else 20
+                lines_count = len(self.rich_log.lines) if self.rich_log else 0
+                self.content_container.border_title = f"Response (Lines: {lines_count}/{max(h, 1)})"
+            except Exception:
+                self.content_container.border_title = "Response"
         if self.stats_display:
             self.stats_display.update(self._render_stats())
         if self.tools_display:
             self.tools_display.update(self._render_tools())
-        if self.ctx_bars:
-            self.ctx_bars.update(self._render_ctx_bars())
+        if self.footer_display:
+            self.footer_display.update(self._render_footer())
 
     def load_history(self) -> None:
         if not self.session_path:
@@ -369,6 +438,7 @@ class BotinokTextualApp(App):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         user_input = event.value
         event.input.value = ""
+        self.current_prompt = user_input
         if user_input.startswith("/"):
             if self.on_slash_command:
                 self.on_slash_command(user_input)
@@ -378,3 +448,4 @@ class BotinokTextualApp(App):
             self.rich_log.write(f"[bold blue]User:[/bold blue] {user_input}")
             self.rich_log.write("")
             self.on_submit(user_input)
+        self.update_stats_display()
