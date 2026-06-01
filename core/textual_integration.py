@@ -428,6 +428,21 @@ def ask_ollama_textual(
         except Exception:
             pass
 
+    def _refresh_vram():
+        try:
+            status = sm.get_ollama_status()
+            if status and "models" in status:
+                vram_info_parts = []
+                for m in status["models"]:
+                    vram = m.get("size_vram", 0) / (1024**3)
+                    vram_info_parts.append(f"{m['name']}: {vram:.2f}GB")
+                vram_str = " | ".join(vram_info_parts) if vram_info_parts else "No models loaded"
+                _update_stats(vram=vram_str)
+            else:
+                _update_stats(vram="No models loaded")
+        except Exception:
+            pass
+
     def _do_vram_prep():
         try:
             if "qwen3.5:9b" in _current_model:
@@ -439,15 +454,14 @@ def ask_ollama_textual(
                 time.sleep(1)
 
             _update_stats(status="Checking Memory...")
+            status = None
             try:
                 status = sm.get_ollama_status()
             except Exception:
-                status = None
+                pass
             if status and "models" in status:
-                vram_info_parts = []
                 for m in status["models"]:
                     vram = m.get("size_vram", 0) / (1024**3)
-                    vram_info_parts.append(f"{m['name']}: {vram:.2f}GB")
                     if vram > 7.0 or (m['name'] != _current_model and len(status['models']) > 0):
                         _update_stats(status="Unloading Models...")
                         try:
@@ -455,10 +469,8 @@ def ask_ollama_textual(
                         except Exception:
                             pass
                         break
-                vram_str = " | ".join(vram_info_parts) if vram_info_parts else "No models loaded"
-                _update_stats(vram=vram_str, status="Ready")
-            else:
-                _update_stats(vram="No models loaded", status="Ready")
+            _refresh_vram()
+            _update_stats(status="Ready")
         except Exception:
             _update_stats(status="Ready")
 
@@ -466,6 +478,7 @@ def ask_ollama_textual(
         nonlocal _stream_buf
         stream_active.set()
         _set_input_enabled(False)
+        _refresh_vram()
         _update_stats(status="Connecting...")
 
         current_model = _current_model
@@ -648,6 +661,8 @@ def ask_ollama_textual(
             stream_error = None
             waiting_status_set = False
 
+            total_tokens_counter = 0
+
             while not stream_done:
                 while True:
                     try:
@@ -700,6 +715,19 @@ def ask_ollama_textual(
 
                     if not first_token_time:
                         first_token_time = time.time()
+
+                    total_tokens_counter += 1
+                    if total_tokens_counter % 50 == 0:
+                        try:
+                            ollama_status = sm.get_ollama_status()
+                            if ollama_status and "models" in ollama_status:
+                                vram_parts = []
+                                for ms in ollama_status["models"]:
+                                    v = ms.get("size_vram", 0) / (1024**3)
+                                    vram_parts.append(f"{ms['name']}: {v:.2f}GB")
+                                _update_stats(vram=" | ".join(vram_parts) if vram_parts else "No models loaded")
+                        except Exception:
+                            pass
 
                     thought = msg.get("thinking", "")
                     if thought:
@@ -1002,6 +1030,7 @@ def ask_ollama_textual(
             continue
 
         session_ctx_est = _estimate_messages_tokens(messages)
+        _refresh_vram()
         _update_stats(session_ctx=session_ctx_est, status="Ready")
         _flush_thinking_buf()
         _flush_stream_buf()
