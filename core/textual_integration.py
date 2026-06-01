@@ -204,6 +204,7 @@ def ask_ollama_textual(
     request_timeout = sm.config.getint('Ollama', 'RequestTimeout', fallback=300)
 
     app = BotinokTextualApp(session_path=session_path)
+    app.set_model_info(model, dangerous=dangerous_mode)
 
     stream_active = threading.Event()
     stream_active.clear()
@@ -246,6 +247,14 @@ def ask_ollama_textual(
         _call_from_thread(app.rich_log.write, text)
 
     _stream_buf = []
+    _thinking_buf = []
+
+    def _flush_thinking_buf():
+        nonlocal _thinking_buf
+        if _thinking_buf:
+            text = "".join(_thinking_buf)
+            _thinking_buf = []
+            _call_from_thread(app.append_assistant_chunk, thinking=text)
 
     def _flush_stream_buf():
         nonlocal _stream_buf
@@ -261,6 +270,14 @@ def ask_ollama_textual(
             _flush_stream_buf()
         elif len("".join(_stream_buf)) > 200:
             _flush_stream_buf()
+
+    def _stream_thought(thought: str):
+        nonlocal _thinking_buf
+        _thinking_buf.append(thought)
+        if "\n" in thought:
+            _flush_thinking_buf()
+        elif len("".join(_thinking_buf)) > 200:
+            _flush_thinking_buf()
 
     def _set_input_enabled(enabled):
         if enabled:
@@ -403,6 +420,8 @@ def ask_ollama_textual(
             eval_count = 0
             last_chunk_time = time.time()
             _stream_buf.clear()
+            _thinking_buf.clear()
+            _call_from_thread(app.start_assistant_turn)
 
             sm.update_context(session_path, "user", user_text)
 
@@ -411,6 +430,7 @@ def ask_ollama_textual(
                     continue
 
                 last_chunk_time = time.time()
+                _call_from_thread(app.report_chunk)
 
                 try:
                     chunk = json.loads(line.decode('utf-8', errors='replace'))
@@ -435,6 +455,7 @@ def ask_ollama_textual(
                 if thought:
                     full_thinking += thought
                     thinking_tokens += 1
+                    _stream_thought(thought)
 
                 token = msg.get("content", "")
                 if token:
@@ -479,6 +500,7 @@ def ask_ollama_textual(
                 _update_stats(status="Stream ended without done")
                 break
 
+            _flush_thinking_buf()
             _flush_stream_buf()
 
             if _detect_repetition(full_response):
@@ -496,6 +518,7 @@ def ask_ollama_textual(
                 _finalize_turn(full_response, full_thinking)
                 continue
 
+            _flush_thinking_buf()
             _flush_stream_buf()
 
             if tool_calls:
@@ -588,6 +611,8 @@ def ask_ollama_textual(
 
         session_ctx_est = _estimate_messages_tokens(messages)
         _update_stats(session_ctx=session_ctx_est, status="Ready")
+        _flush_thinking_buf()
+        _flush_stream_buf()
         stream_active.clear()
         _set_input_enabled(True)
 
