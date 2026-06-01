@@ -2252,22 +2252,74 @@ def main():
 
     # Обработка Textual режима
     if args.textual_mode:
-        console.print("[bold cyan]Запуск в Textual режиме (с прокруткой истории)...[/bold cyan]")
-        # Выбираем сессию
-        session_path, _ = _choose_or_resume_session(sm, args.stealth, "")
+        if args.dangerous:
+            os.environ["BOTINOK_DANGEROUS"] = "1"
+
+        session_suffix = "visual_run"
+        session_path, resume_last_answer = _choose_or_resume_session(sm, False, session_suffix)
         if not session_path:
             console.print("[yellow]Сессия не выбрана. Выход.[/yellow]")
             return
 
-        # Запускаем Textual режим
-        messages = []
+        now = datetime.now().astimezone()
+        steps_subdir = sm.config.get('Storage', 'StepsSubDir', fallback='steps')
+
+        system_time_msg = sm.load_prompt(session_path, "system_time",
+                                          TIMESTAMP=now.isoformat(),
+                                          TZNAME=now.tzname() or "unknown")
+        session_location_msg = sm.load_prompt(session_path, "session_location",
+                                               SESSION_PATH=session_path,
+                                               PROJECT_DIR=os.path.join(session_path, 'project'))
+        session_files_msg = sm.load_prompt(session_path, "session_files",
+                                            SESSION_PATH=session_path,
+                                            CONTEXT_JSON=os.path.join(session_path, 'context.json'),
+                                            RESPONSE_MD=os.path.join(session_path, 'response.md'),
+                                            THINKING_MD=os.path.join(session_path, 'thinking.md'),
+                                            TOOLS_LOG=os.path.join(session_path, 'tools.log'),
+                                            SESSION_RAW_LOG=os.path.join(session_path, 'session_raw.log'),
+                                            PERFORMANCE_LOG=os.path.join(session_path, 'performance.log'),
+                                            STEPS_DIR=os.path.join(session_path, steps_subdir),
+                                            ARTIFACTS_DIR=os.path.join(session_path, 'artifacts'),
+                                            PROJECT_DIR=os.path.join(session_path, 'project'),
+                                            PROMPTS_DIR=os.path.join(session_path, 'prompts'))
+        tool_policy_msg = sm.load_prompt(session_path, "tool_policy")
+
+        dangerous_status = "ON" if args.dangerous else "OFF"
+        dangerous_details = ("В этой сессии разрешены опасные инструменты: code_editor, shell_exec. shell_exec всегда требует подтверждение пользователя перед выполнением."
+                            if args.dangerous else "Опасные инструменты отключены.")
+        dangerous_mode_msg = sm.load_prompt(session_path, "dangerous_mode",
+                                             DANGEROUS_STATUS=dangerous_status,
+                                             DANGEROUS_DETAILS=dangerous_details)
+
+        tm = ToolManager()
+        broken_tools_info = tm.get_broken_tools_info() or ""
+        broken_tools_msg = sm.load_prompt(session_path, "broken_tools", BROKEN_TOOLS_INFO=broken_tools_info) if broken_tools_info else ""
+
+        resume_context_msg = ""
+        if resume_last_answer:
+            resume_context_msg = sm.load_prompt(session_path, "resume_context",
+                                                 RESUME_LAST_ANSWER=resume_last_answer)
+
+        messages = [
+            {"role": "system", "content": system_time_msg},
+            {"role": "system", "content": session_location_msg},
+            {"role": "system", "content": session_files_msg},
+            {"role": "system", "content": tool_policy_msg},
+            {"role": "system", "content": dangerous_mode_msg},
+        ]
+
+        if broken_tools_msg:
+            messages.append({"role": "system", "content": broken_tools_msg})
+
+        if resume_context_msg:
+            messages.append({"role": "system", "content": resume_context_msg})
+
         ask_ollama_textual(
             model=args.model,
             messages=messages,
             session_path=session_path,
-            step_num=1,
             num_ctx=args.ctx,
-            read_only_mode=False
+            dangerous_mode=args.dangerous,
         )
         return
 
