@@ -17,6 +17,7 @@ from typing import Optional, Callable, List
 import json
 import os
 import time
+import threading
 from datetime import datetime
 
 
@@ -25,15 +26,16 @@ class BotinokTextualApp(App):
 
     CSS = """
     Screen { layout: vertical; }
-    #header { height: 3; }
+    #header { height: 3; min-height: 3; max-height: 3; padding: 0; margin: 0; }
     #main { height: 1fr; }
-    #content { width: 2fr; border: solid green; }
+    #content { width: 2fr; height: 1fr; padding: 0; }
+    #content_title { height: 1; color: green; padding: 0 1; }
+    #content_log { height: 1fr; border: solid green; padding: 0 1; }
     #right { width: 1fr; }
-    #stats { height: 1fr; border: solid yellow; }
-    #tools { height: 1fr; border: solid magenta; }
-    #footer { height: 3; border: solid cyan; }
+    #stats { height: 1fr; }
+    #tools { height: 1fr; }
+    #footer { height: 3; }
     Input { height: 3; }
-    RichLog { height: 100%; }
     """
 
     def __init__(self, session_path: str = "", on_submit: Optional[Callable] = None,
@@ -48,6 +50,7 @@ class BotinokTextualApp(App):
         self.header_display: Optional[Static] = None
         self.footer_display: Optional[Static] = None
         self.content_container: Optional[Vertical] = None
+        self.content_title: Optional[Static] = None
         self.model_name = ""
         self.dangerous_mode = False
         self.is_proofreader = False
@@ -65,6 +68,8 @@ class BotinokTextualApp(App):
         self._stream_content_buffer = ""
         self._stream_thinking_buffer = ""
         self._stream_start_index = -1
+        self._confirmation_event: Optional[threading.Event] = None
+        self._confirmation_result: bool = False
 
     def compose(self) -> ComposeResult:
         self.header_display = Static("", id="header")
@@ -72,6 +77,8 @@ class BotinokTextualApp(App):
         with Horizontal(id="main"):
             self.content_container = Vertical(id="content")
             with self.content_container:
+                self.content_title = Static("Response", id="content_title")
+                yield self.content_title
                 yield RichLog(markup=True, auto_scroll=True, wrap=True, highlight=True, min_width=0, id="content_log")
             with Vertical(id="right"):
                 self.stats_display = Static("", id="stats")
@@ -94,15 +101,6 @@ class BotinokTextualApp(App):
             t = threading.Thread(target=self._vram_prep_fn, daemon=True)
             t.start()
         self.set_interval(1, self._tick_stats)
-        # установить заголовки рамок
-        if self.content_container:
-            self.content_container.border_title = "Response"
-        if self.stats_display:
-            self.stats_display.border_title = "Performance"
-        if self.tools_display:
-            self.tools_display.border_title = "Tools Activity"
-        if self.footer_display:
-            self.footer_display.border_title = "Diagnostic Log"
         self.update_stats_display()
 
     def set_model_info(self, model: str, dangerous: bool = False, proofreader: bool = False):
@@ -124,23 +122,37 @@ class BotinokTextualApp(App):
         self.update_stats_display()
 
     def _render_header(self):
-        header_style = "bold black on yellow" if self.is_proofreader else "bold white on blue"
-        panel_style = "yellow" if self.is_proofreader else "blue"
         danger_tag = " | DANGEROUS MODE: ON" if self.dangerous_mode else ""
         agent_type = "PROOFREADER AGENT" if self.is_proofreader else "BOTINOK AGENT"
+        BLUE_BG = "#0055aa"
+        if self.dangerous_mode:
+            header_style = "bold white on red"
+            panel_style = "red"
+        elif self.is_proofreader:
+            header_style = "bold black on yellow"
+            panel_style = "yellow"
+        else:
+            header_style = f"bold white on {BLUE_BG}"
+            panel_style = BLUE_BG
         vram = self.stats_data.get("vram", "...")
         ctx = self.stats_data.get("session_ctx_max", 8192)
-        text = Text(
-            f"{agent_type}{danger_tag} | Model: {self.model_name} | Context: {ctx} | {vram}",
-            justify="center",
-            style=header_style,
+        return Panel(
+            Text(
+                f"{agent_type}{danger_tag} | Model: {self.model_name} | Context: {ctx} | {vram}",
+                justify="center",
+                style=header_style,
+            ),
+            style=panel_style,
         )
-        return Panel(text, style=panel_style)
 
-    def _render_footer(self) -> Text:
-        return Text(f"Prompt: {self.current_prompt}", overflow="ellipsis", style="dim")
+    def _render_footer(self) -> Panel:
+        return Panel(
+            Text(f"Prompt: {self.current_prompt}", overflow="ellipsis", style="dim"),
+            title="[bold cyan]Diagnostic Log[/bold cyan]",
+            border_style="cyan",
+        )
 
-    def _render_stats(self):
+    def _render_stats(self) -> Panel:
         s = self.stats_data
         elapsed = s.get("elapsed", 0.0)
         no_chunks = s.get("no_chunks", 0.0)
@@ -199,13 +211,22 @@ class BotinokTextualApp(App):
         )
         progress.add_task("ctx", total=100.0, completed=float(session_ctx_pct))
 
-        return Group(table, progress)
+        return Panel(
+            Group(table, progress),
+            title="[bold yellow]Performance[/bold yellow]",
+            border_style="yellow",
+            expand=True,
+        )
 
-    def _render_tools(self):
+    def _render_tools(self) -> Panel:
         if not self.active_tools:
-            return Text("No active tools", style="dim")
+            return Panel(
+                Text("No active tools", style="dim"),
+                title="[bold cyan]Tools Activity[/bold cyan]",
+                border_style="cyan",
+            )
 
-        table = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 1), expand=True)
+        table = Table(show_header=True, header_style="bold yellow", box=None, padding=(0, 1), expand=True)
         table.add_column("Tool", style="cyan")
         table.add_column("Query", style="white", overflow="ellipsis")
         table.add_column("Status", style="yellow")
@@ -221,18 +242,22 @@ class BotinokTextualApp(App):
                 f"[{status_style}]{tool['status']}[/{status_style}]",
                 size_display
             )
-        return table
+        return Panel(
+            table,
+            title="[bold cyan]Tools Activity[/bold cyan]",
+            border_style="cyan",
+        )
 
     def update_stats_display(self) -> None:
         if self.header_display:
             self.header_display.update(self._render_header())
-        if self.content_container and self.rich_log:
+        if self.content_title and self.content_container and self.rich_log:
             try:
                 h = self.content_container.size.height if self.content_container else 20
                 lines_count = len(self.rich_log.lines) if self.rich_log else 0
-                self.content_container.border_title = f"Response (Lines: {lines_count}/{max(h, 1)})"
+                self.content_title.update(f"Response (Lines: {lines_count}/{max(h, 1)})")
             except Exception:
-                self.content_container.border_title = "Response"
+                self.content_title.update("Response")
         if self.stats_display:
             self.stats_display.update(self._render_stats())
         if self.tools_display:
@@ -346,12 +371,17 @@ class BotinokTextualApp(App):
             self._write_markdown(self._stream_content_buffer)
         self.rich_log.refresh()
 
-    def append_assistant_chunk(self, content: str = "", thinking: str = "") -> None:
+    def append_assistant_chunk(self, content: str = "", thinking: str = "",
+                                tool_stream_json: str = "") -> None:
         if thinking:
             self._stream_thinking_buffer += thinking
         if content:
             self._stream_content_buffer += content
             self._refresh_live_content()
+        if tool_stream_json:
+            now = datetime.now().strftime("%H:%M:%S")
+            self.rich_log.write(f"[dim]{now}[/dim] [bold yellow]Tool JSON:[/bold yellow]")
+            self.rich_log.write(f"[dim]{tool_stream_json}[/dim]")
 
     def finalize_assistant_turn(self, content: str, thinking: str = "",
                                 tool_calls: Optional[list] = None) -> None:
@@ -423,11 +453,13 @@ class BotinokTextualApp(App):
         })
         self.update_stats_display()
 
-    def update_tool_activity(self, name: str, status: str = "completed", size_kb: float = 0) -> None:
+    def update_tool_activity(self, name: str, status: str = "completed", size_kb: float = 0, query: str = "") -> None:
         for tool in reversed(self.active_tools):
             if tool["name"] == name:
                 tool["status"] = status
                 tool["size_kb"] = size_kb
+                if query:
+                    tool["query"] = query
                 break
         self.update_stats_display()
 
@@ -435,10 +467,44 @@ class BotinokTextualApp(App):
         if self.rich_log:
             self.rich_log.clear()
 
+    def show_confirmation_prompt(self, tool_name: str, args_display: str, warn_text: str) -> None:
+        self._confirmation_event = threading.Event()
+        self._confirmation_result = False
+        msg = (
+            f"\n[bold red]⚠️  ПОДТВЕРДИТЕ ОПАСНОЕ ДЕЙСТВИЕ[/bold red]\n"
+            f"[bold yellow]Инструмент:[/bold yellow] {tool_name}\n"
+            f"[bold yellow]Аргументы:[/bold yellow] {args_display}\n"
+            f"{warn_text}\n"
+            f"[bold cyan]Введите 'y' для подтверждения или 'n' для отмены:[/bold cyan]"
+        )
+        self.rich_log.write(msg)
+        self.rich_log.write("")
+        input_widget = self.query_one("#input", Input)
+        input_widget.placeholder = "подтвердите действие (y/n)..."
+
+    def wait_for_confirmation(self, timeout: float = 300) -> bool:
+        if self._confirmation_event:
+            self._confirmation_event.wait(timeout=timeout)
+            return self._confirmation_result
+        return False
+
+    def _restore_input_placeholder(self) -> None:
+        try:
+            input_widget = self.query_one("#input", Input)
+            input_widget.placeholder = "Введите ваш вопрос (exit = выход)..."
+        except Exception:
+            pass
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         user_input = event.value
         event.input.value = ""
         self.current_prompt = user_input
+        if self._confirmation_event and self._confirmation_event.is_set() is False:
+            self._confirmation_result = user_input.strip().lower() in ("y", "yes", "д", "да")
+            self._confirmation_event.set()
+            self._restore_input_placeholder()
+            self.update_stats_display()
+            return
         if user_input.startswith("/"):
             if self.on_slash_command:
                 self.on_slash_command(user_input)

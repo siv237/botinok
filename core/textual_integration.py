@@ -358,6 +358,15 @@ def ask_ollama_textual(
             except Exception:
                 pass
 
+    def _call_from_thread_result(fn, *args, **kwargs):
+        try:
+            return app.call_from_thread(fn, *args, **kwargs).result()
+        except Exception:
+            try:
+                return fn(*args, **kwargs)
+            except Exception:
+                return None
+
     def _update_stats(**kwargs):
         s = dict(app.stats_data)
         s.update(kwargs)
@@ -366,14 +375,14 @@ def ask_ollama_textual(
     def _add_tool(name, query, status="running", size_kb=0):
         _call_from_thread(app.add_tool_activity, name, query, status, size_kb)
 
-    def _update_tool(name, status="completed", size_kb=0):
-        _call_from_thread(app.update_tool_activity, name, status, size_kb)
+    def _update_tool(name, status="completed", size_kb=0, query=""):
+        _call_from_thread(app.update_tool_activity, name, status, size_kb, query)
 
     def _append_user(text):
         _call_from_thread(app.append_user_message, text)
 
-    def _append_chunk(content="", thinking=""):
-        _call_from_thread(app.append_assistant_chunk, content, thinking)
+    def _append_chunk(content="", thinking="", tool_stream_json=""):
+        _call_from_thread(app.append_assistant_chunk, content, thinking, tool_stream_json)
 
     def _finalize_turn(content, thinking="", tool_calls=None):
         _call_from_thread(app.finalize_assistant_turn, content, thinking, tool_calls)
@@ -707,8 +716,12 @@ def ask_ollama_textual(
                             streaming_tool_tokens += 1
                             if not msg.get("content") and not msg.get("thinking"):
                                 if token:
+                                    had_text_before = bool(streaming_tool_text)
                                     streaming_tool_text += str(token)
                                     streaming_tool_text = _trim_tail(streaming_tool_text, STREAM_TOOL_TEXT_MAX_CHARS)
+                                    if _tool_stream_has_payload(streaming_tool_text):
+                                        if not had_text_before or streaming_tool_tokens % 30 == 0:
+                                            _append_chunk(tool_stream_json=_trim_tail(streaming_tool_text, 500))
                                 if not waiting_status_set:
                                     _update_stats(status="Streaming Tool JSON...")
                                     waiting_status_set = True
@@ -947,10 +960,12 @@ def ask_ollama_textual(
                             size_kb = bytes_downloaded / 1024
                             if total_bytes > 0:
                                 pct = (bytes_downloaded / total_bytes) * 100
-                                _update_tool(tn, status="running", size_kb=size_kb)
+                                query = f"{size_kb:.1f} KB / {total_bytes/1024:.1f} KB ({pct:.0f}%)"
+                                _update_tool(tn, status="running", size_kb=size_kb, query=query)
                             else:
                                 if bytes_downloaded - last_reported[0] > 10240:
-                                    _update_tool(tn, status="running", size_kb=size_kb)
+                                    query = f"{size_kb:.1f} KB downloaded"
+                                    _update_tool(tn, status="running", size_kb=size_kb, query=query)
                                     last_reported[0] = bytes_downloaded
                         return cb
 
@@ -962,6 +977,35 @@ def ask_ollama_textual(
                     if raw_path and not os.path.isabs(raw_path):
                         project_dir = os.path.join(session_path, "project")
                         tool_args["path"] = os.path.realpath(os.path.join(project_dir, raw_path))
+
+                DANGEROUS_FS_ACTIONS = ("delete", "move", "copy", "mkdir", "chmod", "symlink", "touch")
+                is_dangerous_tool = tool_name in ("shell_exec", "code_editor") or (
+                    tool_name == "file_system" and isinstance(tool_args, dict)
+                    and tool_args.get("action", "") in DANGEROUS_FS_ACTIONS
+                )
+                if is_dangerous_tool and tm.dangerous_mode:
+                    _call_from_thread(
+                        app.show_confirmation_prompt,
+                        tool_name,
+                        json.dumps(tool_args, ensure_ascii=False)[:120],
+                        ""
+                    )
+                    app._confirmation_event.wait(timeout=300)
+                    confirmed = app._confirmation_result
+                    if not confirmed:
+                        result = f"ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Причина: пользователь отклонил выполнение."
+                        artifact_path = ""
+                        compact_msg = _compact_tool_message(tool_name, tool_args, result, "")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "name": tool_name,
+                            "content": compact_msg
+                        })
+                        sm.update_context(session_path, "tool", compact_msg)
+                        _update_tool(tool_name, status="aborted", size_kb=0)
+                        _append_tool_result(tool_name, compact_msg[:500])
+                        continue
 
                 tool_result = tm.call_tool(
                     tool_name,
