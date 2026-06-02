@@ -411,20 +411,10 @@ def ask_ollama_textual(
             _call_from_thread(app.append_assistant_chunk, content=text)
 
     def _stream_chunk(content: str):
-        nonlocal _stream_buf
-        _stream_buf.append(content)
-        if "\n" in content:
-            _flush_stream_buf()
-        elif len("".join(_stream_buf)) > 200:
-            _flush_stream_buf()
+        _call_from_thread(app.append_assistant_chunk, content=content)
 
     def _stream_thought(thought: str):
-        nonlocal _thinking_buf
-        _thinking_buf.append(thought)
-        if "\n" in thought:
-            _flush_thinking_buf()
-        elif len("".join(_thinking_buf)) > 200:
-            _flush_thinking_buf()
+        _call_from_thread(app.append_assistant_chunk, thinking=thought)
 
     def _set_input_enabled(enabled):
         if enabled:

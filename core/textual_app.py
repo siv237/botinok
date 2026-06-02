@@ -6,7 +6,6 @@ Textual приложение для Botinok с RichLog для истории и 
 from textual.app import App, ComposeResult
 from textual.widgets import RichLog, Input, Static
 from textual.containers import Vertical, Horizontal
-from textual.geometry import Size
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
@@ -70,6 +69,12 @@ class BotinokTextualApp(App):
         self._stream_start_index = -1
         self._confirmation_event: Optional[threading.Event] = None
         self._confirmation_result: bool = False
+        self._last_refresh_time = 0.0
+        self._REFRESH_INTERVAL = 0.03
+        self._refresh_pending = False
+        self._stats_dirty = True
+        self._tools_dirty = True
+        self._footer_dirty = True
 
     def compose(self) -> ComposeResult:
         self.header_display = Static("", id="header")
@@ -100,13 +105,20 @@ class BotinokTextualApp(App):
             import threading
             t = threading.Thread(target=self._vram_prep_fn, daemon=True)
             t.start()
-        self.set_interval(1, self._tick_stats)
+        self.set_interval(self._REFRESH_INTERVAL, self._flush_refresh)
+        self.set_interval(0.1, self._tick_stats)
+        self._stats_dirty = True
+        self._tools_dirty = True
+        self._footer_dirty = True
         self.update_stats_display()
 
     def set_model_info(self, model: str, dangerous: bool = False, proofreader: bool = False):
         self.model_name = model
         self.dangerous_mode = dangerous
         self.is_proofreader = proofreader
+        self._stats_dirty = True
+        self._tools_dirty = True
+        self._footer_dirty = True
         self.update_stats_display()
 
     def report_chunk(self) -> None:
@@ -117,9 +129,14 @@ class BotinokTextualApp(App):
         active = ("Generating...", "Connecting...", "Processing tool calls...", "Checking Memory...")
         if self.stats_data["status"] in active:
             self.stats_data["elapsed"] = now - self._start_time
+            self._stats_dirty = True
         if self._last_chunk_time > 0:
-            self.stats_data["no_chunks"] = now - self._last_chunk_time
-        self.update_stats_display()
+            new_val = now - self._last_chunk_time
+            if abs(new_val - self.stats_data["no_chunks"]) > 0.1:
+                self.stats_data["no_chunks"] = new_val
+                self._stats_dirty = True
+        if self._stats_dirty or self._tools_dirty or self._footer_dirty:
+            self.update_stats_display()
 
     def _render_header(self):
         danger_tag = " | DANGEROUS MODE: ON" if self.dangerous_mode else ""
@@ -251,19 +268,22 @@ class BotinokTextualApp(App):
     def update_stats_display(self) -> None:
         if self.header_display:
             self.header_display.update(self._render_header())
-        if self.content_title and self.content_container and self.rich_log:
+        if self.content_title and self.content_container and self.rich_log and self._stats_dirty:
             try:
                 h = self.content_container.size.height if self.content_container else 20
                 lines_count = len(self.rich_log.lines) if self.rich_log else 0
                 self.content_title.update(f"Response (Lines: {lines_count}/{max(h, 1)})")
             except Exception:
                 self.content_title.update("Response")
-        if self.stats_display:
+        if self.stats_display and self._stats_dirty:
             self.stats_display.update(self._render_stats())
-        if self.tools_display:
+            self._stats_dirty = False
+        if self.tools_display and self._tools_dirty:
             self.tools_display.update(self._render_tools())
-        if self.footer_display:
+            self._tools_dirty = False
+        if self.footer_display and self._footer_dirty:
             self.footer_display.update(self._render_footer())
+            self._footer_dirty = False
 
     def load_history(self) -> None:
         if not self.session_path:
@@ -358,17 +378,25 @@ class BotinokTextualApp(App):
     def _refresh_live_content(self) -> None:
         if not self.rich_log or self._stream_start_index < 0:
             return
+        now = time.time()
+        if now - self._last_refresh_time < self._REFRESH_INTERVAL:
+            self._refresh_pending = True
+            return
+        self._last_refresh_time = now
+        self._refresh_pending = False
+        self._do_refresh()
+
+    def _flush_refresh(self) -> None:
+        if self._refresh_pending:
+            self._last_refresh_time = time.time()
+            self._refresh_pending = False
+            self._do_refresh()
+
+    def _do_refresh(self):
         self.rich_log.lines = self.rich_log.lines[:self._stream_start_index]
-        max_width = 0
-        for line in self.rich_log.lines:
-            w = sum(segment.cell_length for segment in line)
-            if w > max_width:
-                max_width = w
-        self.rich_log._widest_line_width = max_width
-        self.rich_log.virtual_size = Size(max_width, len(self.rich_log.lines))
         self.rich_log._line_cache.clear()
         if self._stream_content_buffer:
-            self._write_markdown(self._stream_content_buffer)
+            self.rich_log.write(self._rich_escape_tags(self._stream_content_buffer))
         self.rich_log.refresh()
 
     def append_assistant_chunk(self, content: str = "", thinking: str = "",
@@ -387,13 +415,6 @@ class BotinokTextualApp(App):
                                 tool_calls: Optional[list] = None) -> None:
         if self.rich_log and self._stream_start_index >= 0:
             self.rich_log.lines = self.rich_log.lines[:self._stream_start_index]
-            max_width = 0
-            for line in self.rich_log.lines:
-                w = sum(segment.cell_length for segment in line)
-                if w > max_width:
-                    max_width = w
-            self.rich_log._widest_line_width = max_width
-            self.rich_log.virtual_size = Size(max_width, len(self.rich_log.lines))
             self.rich_log._line_cache.clear()
             self._stream_start_index = -1
 
@@ -403,10 +424,11 @@ class BotinokTextualApp(App):
             self.rich_log.write(f"[dim]{final_thinking}[/dim]")
             self.rich_log.write("")
         self._stream_thinking_buffer = ""
-        self._stream_content_buffer = ""
 
-        if content:
-            self._write_markdown(content)
+        final_content = content or self._stream_content_buffer
+        self._stream_content_buffer = ""
+        if final_content:
+            self._write_markdown(final_content)
             self.rich_log.write("")
 
         if tool_calls:
@@ -444,6 +466,7 @@ class BotinokTextualApp(App):
             "session_ctx": session_ctx, "session_ctx_max": session_ctx_max,
             "last_req_ctx": last_req_ctx, "last_req_ctx_max": last_req_ctx_max,
         }
+        self._stats_dirty = True
         self.update_stats_display()
 
     def add_tool_activity(self, name: str, query: str, status: str = "running", size_kb: float = 0) -> None:
@@ -451,6 +474,7 @@ class BotinokTextualApp(App):
             "name": name, "query": query, "status": status,
             "size_kb": size_kb, "start_time": time.time()
         })
+        self._tools_dirty = True
         self.update_stats_display()
 
     def update_tool_activity(self, name: str, status: str = "completed", size_kb: float = 0, query: str = "") -> None:
@@ -461,6 +485,7 @@ class BotinokTextualApp(App):
                 if query:
                     tool["query"] = query
                 break
+        self._tools_dirty = True
         self.update_stats_display()
 
     def clear_log(self) -> None:
@@ -499,6 +524,7 @@ class BotinokTextualApp(App):
         user_input = event.value
         event.input.value = ""
         self.current_prompt = user_input
+        self._footer_dirty = True
         if self._confirmation_event and self._confirmation_event.is_set() is False:
             self._confirmation_result = user_input.strip().lower() in ("y", "yes", "д", "да")
             self._confirmation_event.set()
