@@ -391,7 +391,7 @@ def ask_ollama_textual(
         _call_from_thread(app.append_tool_result, tool_name, result)
 
     def _write_log(text):
-        _call_from_thread(app.rich_log.write, text)
+        _call_from_thread(app.append_log, text)
 
     _stream_buf = []
     _thinking_buf = []
@@ -706,12 +706,10 @@ def ask_ollama_textual(
                             streaming_tool_tokens += 1
                             if not msg.get("content") and not msg.get("thinking"):
                                 if token:
-                                    had_text_before = bool(streaming_tool_text)
                                     streaming_tool_text += str(token)
                                     streaming_tool_text = _trim_tail(streaming_tool_text, STREAM_TOOL_TEXT_MAX_CHARS)
                                     if _tool_stream_has_payload(streaming_tool_text):
-                                        if not had_text_before or streaming_tool_tokens % 30 == 0:
-                                            _append_chunk(tool_stream_json=_trim_tail(streaming_tool_text, 500))
+                                        _append_chunk(tool_stream_json=_trim_tail(streaming_tool_text, 2000))
                                 if not waiting_status_set:
                                     _update_stats(status="Streaming Tool JSON...")
                                     waiting_status_set = True
@@ -1081,6 +1079,7 @@ def ask_ollama_textual(
 
         stream_active.clear()
         _set_input_enabled(True)
+        _call_from_thread(app.flush_tool_buffer)
 
     _current_model = model
     _current_ctx = num_ctx
