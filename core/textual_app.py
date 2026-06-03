@@ -74,6 +74,9 @@ class BotinokTextualApp(App):
         self._tool_items: List[str] = []
         self._pending_content = ""
         self._has_pending_content = False
+        self.is_streaming = False
+        self._stop_requested = False
+        self._queued_inputs: List[str] = []
         self._confirmation_event: Optional[threading.Event] = None
         self._confirmation_result: bool = False
         self._stats_dirty = True
@@ -92,10 +95,18 @@ class BotinokTextualApp(App):
         c = Collapsible(*content_widgets, title=title, collapsed=True, collapsed_symbol="", expanded_symbol="")
         self.chat.mount(c)
         self.chat.scroll_end(animate=False)
+        self._keep_focus()
+
+    def _keep_focus(self) -> None:
+        try:
+            self.set_focus(self.query_one("#input", Input))
+        except Exception:
+            pass
 
     def _add_static(self, content, markup=True):
         s = Static(content, markup=markup)
         self.chat.mount(s)
+        self._keep_focus()
         return s
 
     def compose(self) -> ComposeResult:
@@ -333,6 +344,28 @@ class BotinokTextualApp(App):
         self._stream_content = ""
         self._stream_thinking = ""
         self._last_tool_content = ""
+        self.is_streaming = True
+        self._stop_requested = False
+
+    def _update_queue_placeholder(self) -> None:
+        try:
+            q = len(self._queued_inputs)
+            inp = self.query_one("#input", Input)
+            if q:
+                inp.placeholder = f"[{q} queued] Введите ваш вопрос..."
+            else:
+                inp.placeholder = "Введите ваш вопрос (exit = выход)..."
+        except Exception:
+            pass
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    def on_key(self, event) -> None:
+        if event.key == "escape" and self.is_streaming:
+            self.request_stop()
+            self.append_log("[dim]⏹ Stop requested[/dim]")
+            event.stop()
 
     def append_assistant_chunk(self, content: str = "", thinking: str = "",
                                 tool_stream_json: str = "") -> None:
@@ -442,6 +475,15 @@ class BotinokTextualApp(App):
 
     def flush_tool_buffer(self) -> None:
         self._flush_tool_spoilers()
+        self.is_streaming = False
+        if self._queued_inputs:
+            text = "\n\n".join(self._queued_inputs)
+            self._queued_inputs = []
+            self._update_queue_placeholder()
+            self.append_user_message(text)
+            if self.on_submit:
+                self.is_streaming = True
+                self.on_submit(text)
 
     def append_log(self, text: str) -> None:
         if self.chat:
@@ -473,10 +515,7 @@ class BotinokTextualApp(App):
         return False
 
     def _restore_input_placeholder(self) -> None:
-        try:
-            self.query_one("#input", Input).placeholder = "Введите ваш вопрос (exit = выход)..."
-        except Exception:
-            pass
+        self._update_queue_placeholder()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         user_input = event.value
@@ -492,6 +531,11 @@ class BotinokTextualApp(App):
         if user_input.startswith("/"):
             if self.on_slash_command:
                 self.on_slash_command(user_input)
+        elif self.is_streaming:
+            self._queued_inputs.append(user_input)
+            self._update_queue_placeholder()
+            self._add_static(f"[dim]⏸ +{len(self._queued_inputs)}: {user_input}[/dim]")
+            self.chat.scroll_end(animate=False)
         elif self.on_submit:
             self._start_time = time.time()
             self._add_static(f"[dim]━━━ {datetime.now().strftime('%H:%M:%S')} ━━━[/dim]")

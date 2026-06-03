@@ -346,8 +346,6 @@ def ask_ollama_textual(
 
     stream_active = threading.Event()
     stream_active.clear()
-    input_enabled = threading.Event()
-    input_enabled.set()
 
     def _call_from_thread(fn, *args, **kwargs):
         try:
@@ -416,17 +414,6 @@ def ask_ollama_textual(
     def _stream_thought(thought: str):
         _call_from_thread(app.append_assistant_chunk, thinking=thought)
 
-    def _set_input_enabled(enabled):
-        if enabled:
-            input_enabled.set()
-        else:
-            input_enabled.clear()
-        try:
-            input_widget = app.query_one("#input")
-            _call_from_thread(setattr, input_widget, "disabled", not enabled)
-        except Exception:
-            pass
-
     def _refresh_vram():
         try:
             status = sm.get_ollama_status()
@@ -476,7 +463,6 @@ def ask_ollama_textual(
     def _stream_turn(user_text):
         nonlocal _stream_buf
         stream_active.set()
-        _set_input_enabled(False)
         _refresh_vram()
         _update_stats(status="Connecting...")
 
@@ -494,6 +480,7 @@ def ask_ollama_textual(
 
         tool_rounds = 0
         auto_recoveries = 0
+        stopped_by_user = False
         turn_prompt = user_text
         http_retries = 0
         max_http_retries = 2
@@ -786,6 +773,15 @@ def ask_ollama_textual(
                 if stream_done:
                     break
 
+                if app._stop_requested:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                    stream_done = True
+                    stopped_by_user = True
+                    break
+
                 no_chunks_for = time.time() - last_chunk_time if last_chunk_time else 0.0
                 if no_chunks_for >= 1.0 and not waiting_status_set:
                     _update_stats(status="Waiting for tool call...")
@@ -794,6 +790,16 @@ def ask_ollama_textual(
                     _update_stats(status="Generating...")
 
                 time.sleep(0.1)
+
+                if app._stop_requested:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                    _write_log("[yellow]⏹ Stopped by user[/yellow]")
+                    stream_done = True
+                    stopped_by_user = True
+                    break
 
             if stream_error:
                 _write_log(f"[red]Ollama stream error: {stream_error}[/red]")
@@ -909,6 +915,12 @@ def ask_ollama_textual(
 
             if current_model in MODELS_NO_TOOLS and tool_calls:
                 tool_calls = []
+
+            if stopped_by_user:
+                sm.update_context(session_path, "assistant", full_response, thinking=full_thinking)
+                messages.append({"role": "assistant", "content": full_response})
+                _finalize_turn(full_response, full_thinking)
+                break
 
             if not tool_calls:
                 sm.update_context(session_path, "assistant", full_response, thinking=full_thinking)
@@ -1078,7 +1090,6 @@ def ask_ollama_textual(
         sm.log_step(session_path, f"step_textual_{int(time.time())}", {}, {"response": full_response, "thinking": full_thinking}, metrics)
 
         stream_active.clear()
-        _set_input_enabled(True)
         _call_from_thread(app.flush_tool_buffer)
 
     _current_model = model
@@ -1200,6 +1211,10 @@ def ask_ollama_textual(
             return
 
         if stream_active.is_set():
+            app._queued_inputs.append(text)
+            q = len(app._queued_inputs)
+            app._update_queue_placeholder()
+            app._add_static(f"[dim]⏸ +{q}: {text}[/dim]")
             return
 
         _last_user_text = text
