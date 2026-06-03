@@ -2240,7 +2240,7 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Включить отладочный вывод")
     parser.add_argument("--update", action="store_true", help="Проверить и установить обновления из git")
     parser.add_argument("--view-history", metavar="SESSION_PATH", help="Просмотр истории сессии через Textual (с прокруткой)")
-    parser.add_argument("--textual-mode", action="store_true", help="Запустить основной интерфейс через Textual (с прокруткой истории)")
+    parser.add_argument("--rich-mode", action="store_true", help="Запустить основной интерфейс через Rich Live (устаревший)")
     
     args = parser.parse_args()
 
@@ -2250,8 +2250,8 @@ def main():
         view_history(args.view_history)
         return
 
-    # Обработка Textual режима
-    if args.textual_mode:
+    # Обработка Textual режима (по умолчанию)
+    if not args.rich_mode:
         if args.dangerous:
             os.environ["BOTINOK_DANGEROUS"] = "1"
 
