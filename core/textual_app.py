@@ -14,11 +14,13 @@ from rich.text import Text
 from typing import Optional, Callable, List
 import json
 import os
+import re
 import time
 import threading
 from datetime import datetime
 
 SPOILER_PREVIEW = 80
+SCROLL_THRESHOLD = 30  # пикселей отступа от конца, чтобы считать что пользователь внизу
 
 
 class BotinokTextualApp(App):
@@ -72,10 +74,12 @@ class BotinokTextualApp(App):
         self._stream_thinking = ""
         self._last_tool_content = ""
         self._tool_items: List[str] = []
+        self._tool_static: Optional[Static] = None
         self._pending_content = ""
         self._has_pending_content = False
         self.is_streaming = False
         self._stop_requested = False
+        self._user_scrolled_away = False
         self._queued_inputs: List[str] = []
         self._confirmation_event: Optional[threading.Event] = None
         self._confirmation_result: bool = False
@@ -94,7 +98,7 @@ class BotinokTextualApp(App):
     def _mount_spoiler(self, title: str, *content_widgets):
         c = Collapsible(*content_widgets, title=title, collapsed=True, collapsed_symbol="", expanded_symbol="")
         self.chat.mount(c)
-        self.chat.scroll_end(animate=False)
+        self._auto_scroll_chat(animate=False)
         self._keep_focus()
 
     def _keep_focus(self) -> None:
@@ -102,6 +106,19 @@ class BotinokTextualApp(App):
             self.set_focus(self.query_one("#input", Input))
         except Exception:
             pass
+
+    def _is_at_bottom(self) -> bool:
+        try:
+            return self.chat.scroll_y >= (self.chat.max_scroll_y - SCROLL_THRESHOLD)
+        except Exception:
+            return True
+
+    def _auto_scroll_chat(self, animate: bool = False) -> None:
+        if self._is_at_bottom():
+            self._user_scrolled_away = False
+            self.chat.scroll_end(animate=animate)
+        else:
+            self._user_scrolled_away = True
 
     def _add_static(self, content, markup=True):
         s = Static(content, markup=markup)
@@ -166,6 +183,13 @@ class BotinokTextualApp(App):
             if abs(new_val - self.stats_data["no_chunks"]) > 0.1:
                 self.stats_data["no_chunks"] = new_val
                 self._stats_dirty = True
+        if self.chat:
+            if self._is_at_bottom():
+                if self._user_scrolled_away:
+                    self._user_scrolled_away = False
+                self.chat.scroll_end(animate=False)
+            else:
+                self._user_scrolled_away = True
         if self._stats_dirty or self._tools_dirty or self._footer_dirty:
             self.update_stats_display()
 
@@ -272,7 +296,13 @@ class BotinokTextualApp(App):
             self._footer_dirty = False
 
     def _rich_escape(self, text: str) -> str:
-        return text.replace("[", r"\[")
+        text = text.replace("[", r"\[")
+        # ASCII control chars кроме \n \r \t
+        if isinstance(text, str):
+            text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+            # C1 control chars (0x80-0x9F) — мусор от GGUF моделей
+            text = re.sub(r'[\x80-\x9f]', '', text)
+        return text
 
     def load_history(self) -> None:
         if not self.session_path:
@@ -341,6 +371,7 @@ class BotinokTextualApp(App):
         self._add_static("[bold green]Assistant:[/bold green]")
         self.stream_static = Static("", markup=True)
         self.chat.mount(self.stream_static)
+        self._tool_static = None
         self._stream_content = ""
         self._stream_thinking = ""
         self._last_tool_content = ""
@@ -367,18 +398,34 @@ class BotinokTextualApp(App):
             self.append_log("[dim]⏹ Stop requested[/dim]")
             event.stop()
 
+    @staticmethod
+    def _collapse_newlines(text: str) -> str:
+        return re.sub(r'\n{3,}', '\n\n', text)
+
     def append_assistant_chunk(self, content: str = "", thinking: str = "",
                                 tool_stream_json: str = "") -> None:
         if thinking:
             self._stream_thinking += thinking
         if content:
             self._stream_content += content
-            if self.stream_static:
-                self.stream_static.update(self._rich_escape(self._stream_content))
         if tool_stream_json:
             self._last_tool_content = tool_stream_json
-            if self.stream_static:
-                self.stream_static.update(f"[bold magenta]Streaming Tool JSON...[/bold magenta]")
+        if self.stream_static:
+            parts = []
+            if self._stream_thinking:
+                t = self._collapse_newlines(self._rich_escape(self._stream_thinking))
+                parts.append(f"[#555555]Thinking...[/#555555]\n[#555555]{t}[/#555555]")
+            if self._stream_content:
+                t = self._collapse_newlines(self._rich_escape(self._stream_content))
+                parts.append(f"[#555555]Response:[/#555555]\n[#555555]{t}[/#555555]")
+            self.stream_static.update("\n\n".join(parts) if parts else "")
+        if tool_stream_json and not self._tool_static:
+            self._tool_static = Static("", markup=True)
+            try:
+                self.chat.mount(self._tool_static, after=self.stream_static)
+            except Exception:
+                self.chat.mount(self._tool_static)
+            self._tool_static.update("[#555555]Processing tool call...[/#555555]")
 
     def finalize_assistant_turn(self, content: str, thinking: str = "",
                                 tool_calls: Optional[list] = None) -> None:
@@ -387,10 +434,14 @@ class BotinokTextualApp(App):
             title = self._spoiler_title("Thinking", final_thinking)
             self._mount_spoiler(title, Static(final_thinking))
 
-        if self._last_tool_content:
-            title = self._spoiler_title("Tool JSON", self._last_tool_content)
-            self._mount_spoiler(title, Static(f"[dim]{self._last_tool_content}[/dim]"))
-            self._last_tool_content = ""
+        if self._tool_static:
+            try:
+                self._tool_static.remove()
+            except Exception:
+                pass
+            self._tool_static = None
+
+        self._last_tool_content = ""
 
         final_content = content or self._stream_content
         if self.stream_static:
@@ -399,14 +450,8 @@ class BotinokTextualApp(App):
 
         if tool_calls:
             for tc in tool_calls:
-                func = tc.get("function", {})
-                name = func.get("name", "unknown")
-                try:
-                    args = json.loads(func.get("arguments", "{}")) if isinstance(func.get("arguments"), str) else func.get("arguments", {})
-                except Exception:
-                    args = {}
-                args_str = json.dumps(args, ensure_ascii=False)[:80]
-                self._tool_items.append(f"🔧 {name}({args_str})")
+                name = tc.get("function", {}).get("name", "unknown")
+                self._tool_items.append(f"🔧 {name}")
 
         self._pending_content = final_content
         self._has_pending_content = bool(final_content)
@@ -433,12 +478,7 @@ class BotinokTextualApp(App):
         self._write_pending_content()
 
     def append_tool_result(self, tool_name: str, result: str) -> None:
-        self._tool_items.append(f"🔧 Tool: {tool_name}")
-        for line in str(result).split('\n')[:5]:
-            self._tool_items.append(line)
-        if len(str(result).split('\n')) > 5:
-            self._tool_items.append("...")
-        self._tool_items.append("")
+        self._tool_items.append(f"  └ ✔ {tool_name}")
 
     def update_stats(self, status: str, elapsed: float, no_chunks: float, ttft,
                      thinking_tokens: int, response_tokens: int, stream_tool_tokens: int,

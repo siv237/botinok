@@ -29,13 +29,14 @@ from core.textual_app import BotinokTextualApp
 MODELS_NO_TOOLS = set()
 
 TOOL_OUTPUT_MAX_CHARS = 100000
-STREAM_TOOL_TEXT_MAX_CHARS = 12000
+STREAM_TOOL_TEXT_MAX_CHARS = 12000  # не используется, оставлено для совместимости
 HARD_CTX_PCT = 0.90
 MAX_TOOL_ROUNDS_PER_TURN = 80
 MAX_AUTO_RECOVERIES_PER_TURN = 2
 MISSING_FINAL_AUTO_CONTINUE_MAX = 2
 REPEAT_LINE_WINDOW = 40
 REPEAT_LINE_MIN_OCCURRENCES = 6
+
 
 _TOOL_STREAM_TAG_RE = re.compile(
     r"(?:<\|[^\n\r]*?\|>|</?[^>\n\r]+?>)",
@@ -694,9 +695,8 @@ def ask_ollama_textual(
                             if not msg.get("content") and not msg.get("thinking"):
                                 if token:
                                     streaming_tool_text += str(token)
-                                    streaming_tool_text = _trim_tail(streaming_tool_text, STREAM_TOOL_TEXT_MAX_CHARS)
                                     if _tool_stream_has_payload(streaming_tool_text):
-                                        _append_chunk(tool_stream_json=_trim_tail(streaming_tool_text, 2000))
+                                        _append_chunk(tool_stream_json=streaming_tool_text)
                                 if not waiting_status_set:
                                     _update_stats(status="Streaming Tool JSON...")
                                     waiting_status_set = True

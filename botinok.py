@@ -228,7 +228,7 @@ OLLAMA_PS_URL = "http://localhost:11434/api/ps"
 console = Console()
 
 TOOL_OUTPUT_MAX_CHARS = 100000
-STREAM_TOOL_TEXT_MAX_CHARS = 12000
+STREAM_TOOL_TEXT_MAX_CHARS = 12000  # не используется, оставлено для совместимости
 
 HARD_CTX_PCT = 0.90
 REPEAT_LINE_WINDOW = 40
@@ -694,8 +694,7 @@ class BotVisualizer:
         full_display = self.response_text
         if self.streaming_tool_text and _tool_stream_has_payload(self.streaming_tool_text):
             # Очищаем текст от возможных артефактов и добавляем заголовок
-            tool_content = _trim_tail(self.streaming_tool_text, STREAM_TOOL_TEXT_MAX_CHARS)
-            tool_content = tool_content.replace("[", "\\[").replace("]", "\\]")
+            tool_content = self.streaming_tool_text.replace("[", "\\[").replace("]", "\\]")
             full_display += f"\n\n[bold magenta]Streaming Tool Call JSON:[/bold magenta]\n{tool_content}"
 
         # Используем Text.from_markup только если есть теги, иначе обычный Text для скорости
@@ -1186,7 +1185,6 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                                     if not msg.get("content") and not msg.get("thinking"):
                                         if token:
                                             vis.streaming_tool_text += str(token)
-                                            vis.streaming_tool_text = _trim_tail(vis.streaming_tool_text, STREAM_TOOL_TEXT_MAX_CHARS)
                                         if not waiting_status_set:
                                             vis.status = "Streaming Tool JSON..."
                                             waiting_status_set = True

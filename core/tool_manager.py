@@ -122,7 +122,19 @@ class ToolManager:
                 "function": {
                     "name": "code_editor",
                     "description": "Редактирование файлов (dangerous mode)",
-                    "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["read", "write", "replace", "apply"]}, "path": {"type": "string"}}, "required": ["action", "path"]}
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["read", "write", "replace", "apply"], "description": "Действие: read — чтение, write — запись (требует content), replace/apply — замена текста (требуют old_text и new_text)"},
+                            "path": {"type": "string", "description": "Путь к файлу"},
+                            "content": {"type": "string", "description": "Содержимое для записи (только для action=write)"},
+                            "old_text": {"type": "string", "description": "Текст для замены (только для action=replace/apply)"},
+                            "new_text": {"type": "string", "description": "Новый текст (только для action=replace/apply)"},
+                            "create": {"type": "boolean", "description": "Создавать файл если не существует (по умолчанию false)"},
+                            "expected_sha256": {"type": "string", "description": "Ожидаемый SHA256 файла для проверки перед записью"}
+                        },
+                        "required": ["action", "path"]
+                    }
                 }
             },
             "shell_exec": {
