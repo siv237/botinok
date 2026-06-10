@@ -97,8 +97,50 @@ class ConfigWizard:
             
         chosen_model = answers['model']
         self.config.set('Ollama', 'DefaultModel', chosen_model)
-        
-        # 3. Сохранение
+
+        # 3. Контекст по умолчанию
+        console.print(f"\n[bold]3. Размер контекста по умолчанию[/bold]")
+        current_ctx = self.config.getint('Ollama', 'DefaultContext', fallback=8192)
+
+        ctx_options = [
+            ("8192    — минимальный", 8192),
+            ("16384   — компактный", 16384),
+            ("32768   — стандартный", 32768),
+            ("65536   — расширенный", 65536),
+            ("131072  — большой", 131072),
+            ("262144  — максимальный", 262144),
+            ("Свой вариант", "custom"),
+        ]
+
+        default_ctx_val = current_ctx
+        if not any(v == current_ctx for _, v in ctx_options):
+            default_ctx_val = "custom"
+
+        ctx_questions = [
+            inquirer.List('ctx',
+                         message="Выберите размер контекста (влияет на потребление памяти и длину диалога)",
+                         choices=ctx_options,
+                         default=default_ctx_val,
+                         ),
+        ]
+
+        ctx_answers = inquirer.prompt(ctx_questions)
+        if not ctx_answers:
+            console.print("[yellow]Настройка прервана.[/yellow]")
+            return
+
+        chosen_ctx = ctx_answers['ctx']
+        if chosen_ctx == "custom":
+            chosen_ctx = Prompt.ask("Введите размер контекста (в токенах, кратно 1024)", default=str(current_ctx))
+            try:
+                chosen_ctx = int(chosen_ctx)
+            except ValueError:
+                console.print(f"[red]Некорректное значение, используется {current_ctx}[/red]")
+                chosen_ctx = current_ctx
+
+        self.config.set('Ollama', 'DefaultContext', str(chosen_ctx))
+
+        # 4. Сохранение
         success = self.sm.save_config()
         if not success:
             # Пробуем сохранить локально

@@ -2248,6 +2248,60 @@ def main():
         view_history(args.view_history)
         return
 
+    # Обработка мастера настройки
+    if args.wizard:
+        from core.config_wizard import ConfigWizard
+        wizard = ConfigWizard()
+        wizard.run()
+        return
+
+    # Обработка обновления
+    if args.update:
+        console.print("[bold cyan]Проверка обновлений BOTINOK...[/bold cyan]")
+        
+        result, error = _check_remote_version()
+        
+        if error:
+            console.print(f"[bold red]Ошибка проверки обновлений:[/bold red] {error}")
+            # Если это установленная версия (не git), предлагаем переустановить
+            if "Not a git repository" in error:
+                console.print("[yellow]Похоже BOTINOK установлен не из git.[/yellow]")
+                console.print("[yellow]Для обновления запустите:[/yellow]")
+                console.print("[green]  curl -sSL https://raw.githubusercontent.com/siv237/botinok/main/install.sh | bash[/green]")
+            return
+        
+        if not result['has_update']:
+            console.print(f"[bold green]У вас актуальная версия![/bold green]")
+            console.print(f"[cyan]Текущая версия:[/cyan] {result['local_date']} | {_COMMIT_HASH}")
+            return
+        
+        # Есть обновление
+        console.print(f"\n[bold yellow]Доступно обновление![/bold yellow]")
+        console.print(f"[cyan]Текущая версия:[/cyan] {result['local_date']} | {result['local_hash']}")
+        console.print(f"[green]Новая версия:[/green] {result['remote_display']}")
+        
+        if not result['can_fast_forward']:
+            console.print("[yellow]\nВнимание: у вас есть локальные изменения, отсутствующие в основной ветке.[/yellow]")
+            console.print("[yellow]Обновление может потребовать ручного разрешения конфликтов.[/yellow]")
+        
+        # Спрашиваем подтверждение
+        if Confirm.ask("\n[bold cyan]Установить обновление?[/bold cyan]", default=True):
+            console.print("[bold cyan]Обновление...[/bold cyan]")
+            success, output = _perform_update()
+            
+            if success:
+                console.print("[bold green]Обновление успешно установлено![/bold green]")
+                console.print(f"[dim]{output}[/dim]")
+                console.print("\n[bold yellow]Перезапустите BOTINOK для применения изменений.[/bold yellow]")
+            else:
+                console.print("[bold red]Ошибка при обновлении:[/bold red]")
+                console.print(f"[red]{output}[/red]")
+                console.print("[yellow]Попробуйте обновить вручную:[/yellow]")
+                console.print("[green]  git pull origin main[/green]")
+        else:
+            console.print("[yellow]Обновление отменено.[/yellow]")
+        return
+
     # Обработка Textual режима (по умолчанию)
     if not args.rich_mode:
         if args.dangerous:
@@ -2321,59 +2375,6 @@ def main():
         )
         return
 
-    # Обработка обновления
-    if args.update:
-        console.print("[bold cyan]Проверка обновлений BOTINOK...[/bold cyan]")
-        
-        result, error = _check_remote_version()
-        
-        if error:
-            console.print(f"[bold red]Ошибка проверки обновлений:[/bold red] {error}")
-            # Если это установленная версия (не git), предлагаем переустановить
-            if "Not a git repository" in error:
-                console.print("[yellow]Похоже BOTINOK установлен не из git.[/yellow]")
-                console.print("[yellow]Для обновления запустите:[/yellow]")
-                console.print("[green]  curl -sSL https://raw.githubusercontent.com/siv237/botinok/main/install.sh | bash[/green]")
-            return
-        
-        if not result['has_update']:
-            console.print(f"[bold green]У вас актуальная версия![/bold green]")
-            console.print(f"[cyan]Текущая версия:[/cyan] {result['local_date']} | {_COMMIT_HASH}")
-            return
-        
-        # Есть обновление
-        console.print(f"\n[bold yellow]Доступно обновление![/bold yellow]")
-        console.print(f"[cyan]Текущая версия:[/cyan] {result['local_date']} | {result['local_hash']}")
-        console.print(f"[green]Новая версия:[/green] {result['remote_display']}")
-        
-        if not result['can_fast_forward']:
-            console.print("[yellow]\nВнимание: у вас есть локальные изменения, отсутствующие в основной ветке.[/yellow]")
-            console.print("[yellow]Обновление может потребовать ручного разрешения конфликтов.[/yellow]")
-        
-        # Спрашиваем подтверждение
-        if Confirm.ask("\n[bold cyan]Установить обновление?[/bold cyan]", default=True):
-            console.print("[bold cyan]Обновление...[/bold cyan]")
-            success, output = _perform_update()
-            
-            if success:
-                console.print("[bold green]Обновление успешно установлено![/bold green]")
-                console.print(f"[dim]{output}[/dim]")
-                console.print("\n[bold yellow]Перезапустите BOTINOK для применения изменений.[/bold yellow]")
-            else:
-                console.print("[bold red]Ошибка при обновлении:[/bold red]")
-                console.print(f"[red]{output}[/red]")
-                console.print("[yellow]Попробуйте обновить вручную:[/yellow]")
-                console.print("[green]  git pull origin main[/green]")
-        else:
-            console.print("[yellow]Обновление отменено.[/yellow]")
-        return
-    
-    if args.wizard:
-        from core.config_wizard import ConfigWizard
-        wizard = ConfigWizard()
-        wizard.run()
-        return
-    
     # Определяем параметры из аргументов или конфига
     arg_prompt = args.prompt if args.prompt else args.prompt_pos
     model = args.model
