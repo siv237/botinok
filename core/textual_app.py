@@ -74,7 +74,6 @@ class BotinokTextualApp(App):
         self._stream_thinking = ""
         self._last_tool_content = ""
         self._tool_items: List[str] = []
-        self._tool_static: Optional[Static] = None
         self._pending_content = ""
         self._has_pending_content = False
         self.is_streaming = False
@@ -295,6 +294,11 @@ class BotinokTextualApp(App):
             self.footer_display.update(self._render_footer())
             self._footer_dirty = False
 
+    _GGUF_TAG_RE = re.compile(r"(?:<\|[^\n\r]*?\|>|</?[^>\n\r]+?>)", re.IGNORECASE)
+    _GGUF_QUOTE_RE = re.compile(r'<\|"|>', re.IGNORECASE)
+    _KNOWN_TOOLS = {"code_editor", "shell_exec", "file_system", "web_search", "open_url",
+                    "curl", "skills", "experience", "journal", "session_memory"}
+
     def _rich_escape(self, text: str) -> str:
         text = text.replace("[", r"\[")
         # ASCII control chars кроме \n \r \t
@@ -371,7 +375,6 @@ class BotinokTextualApp(App):
         self._add_static("[bold green]Assistant:[/bold green]")
         self.stream_static = Static("", markup=True)
         self.chat.mount(self.stream_static)
-        self._tool_static = None
         self._stream_content = ""
         self._stream_thinking = ""
         self._last_tool_content = ""
@@ -415,17 +418,18 @@ class BotinokTextualApp(App):
             if self._stream_thinking:
                 t = self._collapse_newlines(self._rich_escape(self._stream_thinking))
                 parts.append(f"[#555555]Thinking...[/#555555]\n[#555555]{t}[/#555555]")
+            if tool_stream_json:
+                tool_display = self._GGUF_TAG_RE.sub("", tool_stream_json)
+                tool_display = self._GGUF_QUOTE_RE.sub('"', tool_display)
+                tool_display = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', tool_display)
+                tool_display = re.sub(r'[\x80-\x9f]', '', tool_display)
+                tool_display = tool_display.replace("[", r"\[")
+                if any(t in tool_display for t in self._KNOWN_TOOLS) or ("call:" in tool_display) or ("{" in tool_display and ":" in tool_display):
+                    parts.append(f"[bold magenta]Tool Call:[/bold magenta]\n{tool_display}")
             if self._stream_content:
                 t = self._collapse_newlines(self._rich_escape(self._stream_content))
                 parts.append(f"[#555555]Response:[/#555555]\n[#555555]{t}[/#555555]")
             self.stream_static.update("\n\n".join(parts) if parts else "")
-        if tool_stream_json and not self._tool_static:
-            self._tool_static = Static("", markup=True)
-            try:
-                self.chat.mount(self._tool_static, after=self.stream_static)
-            except Exception:
-                self.chat.mount(self._tool_static)
-            self._tool_static.update("[#555555]Processing tool call...[/#555555]")
 
     def finalize_assistant_turn(self, content: str, thinking: str = "",
                                 tool_calls: Optional[list] = None) -> None:
@@ -433,13 +437,6 @@ class BotinokTextualApp(App):
         if final_thinking:
             title = self._spoiler_title("Thinking", final_thinking)
             self._mount_spoiler(title, Static(final_thinking))
-
-        if self._tool_static:
-            try:
-                self._tool_static.remove()
-            except Exception:
-                pass
-            self._tool_static = None
 
         self._last_tool_content = ""
 
