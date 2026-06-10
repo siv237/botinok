@@ -74,8 +74,6 @@ class BotinokTextualApp(App):
         self._stream_thinking = ""
         self._last_tool_content = ""
         self._tool_items: List[str] = []
-        self._pending_content = ""
-        self._has_pending_content = False
         self.is_streaming = False
         self._stop_requested = False
         self._user_scrolled_away = False
@@ -85,7 +83,7 @@ class BotinokTextualApp(App):
         self._stats_dirty = True
         self._tools_dirty = True
         self._footer_dirty = True
-        self._chat_widgets: List = []
+        self._last_open_spoiler: Optional[Collapsible] = None
 
     def _spoiler_title(self, label: str, text: str) -> str:
         preview = text[:SPOILER_PREVIEW].replace("\n", " ")
@@ -95,7 +93,13 @@ class BotinokTextualApp(App):
         return f"{label}: {preview}  {ts}"
 
     def _mount_spoiler(self, title: str, *content_widgets):
-        c = Collapsible(*content_widgets, title=title, collapsed=True, collapsed_symbol="", expanded_symbol="")
+        if self._last_open_spoiler:
+            try:
+                self._last_open_spoiler.collapsed = True
+            except Exception:
+                pass
+        c = Collapsible(*content_widgets, title=title, collapsed=False, collapsed_symbol="", expanded_symbol="")
+        self._last_open_spoiler = c
         self.chat.mount(c)
         self._auto_scroll_chat(animate=False)
         self._keep_focus()
@@ -441,8 +445,13 @@ class BotinokTextualApp(App):
         self._last_tool_content = ""
 
         final_content = content or self._stream_content
-        if self.stream_static:
-            self.stream_static.remove()
+
+        # Конвертируем stream_static на месте в Markdown, без удаления
+        if self.stream_static and final_content:
+            try:
+                self.stream_static.update(RichMarkdown(final_content))
+            except Exception:
+                self.stream_static.update(self._rich_escape(final_content))
             self.stream_static = None
 
         if tool_calls:
@@ -450,21 +459,8 @@ class BotinokTextualApp(App):
                 name = tc.get("function", {}).get("name", "unknown")
                 self._tool_items.append(f"🔧 {name}")
 
-        self._pending_content = final_content
-        self._has_pending_content = bool(final_content)
-
-        if not tool_calls:
-            self._write_pending_content()
-
-    def _write_pending_content(self) -> None:
-        if self._has_pending_content and self._pending_content:
-            try:
-                self._add_static(RichMarkdown(self._pending_content))
-            except Exception:
-                self._add_static(self._rich_escape(self._pending_content))
+        if not tool_calls and final_content:
             self._add_static("")
-        self._has_pending_content = False
-        self._pending_content = ""
 
     def _flush_tool_spoilers(self) -> None:
         if self._tool_items:
@@ -472,7 +468,6 @@ class BotinokTextualApp(App):
             title = self._spoiler_title("Tool calls", text)
             self._mount_spoiler(title, Static(f"[dim]{text}[/dim]"))
             self._tool_items = []
-        self._write_pending_content()
 
     def append_tool_result(self, tool_name: str, result: str) -> None:
         self._tool_items.append(f"  └ ✔ {tool_name}")
