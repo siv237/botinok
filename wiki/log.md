@@ -100,3 +100,6 @@ Wizard: контекст по умолчанию, `--wizard` без `--rich-mode
 
 ## [2026-08-23] ingest | Textual: детекция скролла вверх по позиции и сброс No chunks
 `core/textual_app.py`: дефолтный хендлер колеса на чате делает `event.stop()`, поэтому App-хендлер не срабатывал — прилипание не отключалось. Добавлен опрос в `_tick_stats`: `_last_scroll_y` сравнивается с `scroll_y`, уменьшение позиции помечает `_user_scrolled_away=True` (работает от любого источника: колесо, клавиши, тачпад). Плюс сброс `_last_chunk_time=0.0` в `start_assistant_turn` и `flush_tool_buffer` — счётчик No chunks больше не растёт бесконечно между ходами. Обновлён `entities/textual_ui.md`.
+
+## [2026-08-23] ingest | Мастер OpenAI: получение провайдерского контекста моделей
+`core/config_wizard.py`: `check_openai` теперь возвращает `list[dict] {'id','context'}` — максимальный контекст извлекается из полей провайдера (`context_length`, `context_window`, `max_model_len`, вложено в `meta`/`meta.llama`), для llama.cpp пробуется `/props`. Добавлены `_model_context`, `_context_ladder`, `_server_context`. В шаге выбора модели контекст отображается в списке; в шаге контекста для OpenAI предлагается рекомендуемый (максимальный) контекст провайдера или меньше, вместо фиксированной лесенки. Обновлены `entities/openai_compat.md`, `concepts/config_priority.md`.

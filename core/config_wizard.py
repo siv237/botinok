@@ -53,12 +53,90 @@ class ConfigWizard:
                 seen.add(c)
         return uniq
 
+    @staticmethod
+    def _model_context(m):
+        """Извлекает максимальный контекст модели из полей провайдера.
+
+        Разные серверы (llama.cpp, vLLM, прокси) отдают его в разных
+        полях: context_length, context_window, max_model_len и т.п.,
+        иногда вложено в meta / meta.llama. Если контекст не найден —
+        возвращает None.
+        """
+        if not isinstance(m, dict):
+            return None
+        top_keys = ('context_length', 'context_window', 'max_context_length',
+                    'max_model_len', 'context_len', 'n_ctx')
+        meta = m.get('meta') or {}
+        meta_keys = ('context_length', 'context_window', 'max_model_len', 'n_ctx')
+        llama = meta.get('llama') if isinstance(meta, dict) else None
+        for target in (m, meta if isinstance(meta, dict) else None,
+                       llama if isinstance(llama, dict) else None):
+            if not isinstance(target, dict):
+                continue
+            for key in top_keys if target is m else meta_keys:
+                v = target.get(key)
+                if isinstance(v, (int, float)) and v > 0:
+                    return int(v)
+                if isinstance(v, str) and v.strip().isdigit():
+                    return int(v.strip())
+        # Отдельные провайдеры отдают число напрямую (некоторые прокси)
+        for key in top_keys:
+            if key in m and isinstance(m[key], (int, float)) and m[key] > 0:
+                return int(m[key])
+        return None
+
+    @staticmethod
+    def _context_ladder(max_ctx, current_ctx):
+        """Строит лесенку размеров контекста от рекомендуемого (провайдерского)
+        вниз, кратно убывая вдвое, но не ниже 8192."""
+        ladder = []
+        v = max_ctx if max_ctx and max_ctx > 0 else current_ctx
+        if v and v > 0:
+            v = int(v)
+            while v >= 8192 and len(ladder) < 8:
+                ladder.append(v)
+                v = v // 2
+        # Гарантируем, что текущий тоже попадёт в список (если в диапазоне)
+        if current_ctx and current_ctx > 0:
+            if 8192 <= current_ctx <= (max_ctx or current_ctx):
+                if current_ctx not in ladder:
+                    ladder.append(int(current_ctx))
+        return ladder
+
+    def _server_context(self, url, headers):
+        """Для llama.cpp-подобных серверов пробует вытащить контекст из `/props`
+        (значение сервера по умолчанию). Иначе None."""
+        base = url.rstrip('/')
+        if base.endswith('/v1'):
+            base = base[:-3]
+        for path in (f"{base}/props",):
+            try:
+                r = requests.get(path, timeout=5, verify=False, headers=headers)
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                dgs = data.get('default_generation_settings') or {}
+                if isinstance(dgs, dict):
+                    for key in ('n_ctx_per_seq', 'n_ctx_seq', 'n_ctx'):
+                        v = dgs.get(key)
+                        if isinstance(v, (int, float)) and v > 0:
+                            return int(v)
+            except Exception:
+                continue
+        return None
+
     def check_openai(self, url, api_key=""):
         """Проверка доступности OpenAI-совместимого API по указанному URL.
 
         Пробует GET списка моделей (стандартный эндпоинт) по нескольким
         возможным путям: {@base}/v1/models, {@base}/models, и с учётом
         уже указанного пути /v1. Опционально передаёт Bearer-токен.
+
+        Возвращает (True, list[dict]) — список моделей вида
+        {'id': str, 'context': int|None}, где context — максимальный
+        контекст, сообщаемый провайдером (или None, если провайдер его
+        не отдаёт). Если ни у одной модели контекста нет, но сервер
+        отдаёт его через /props — подставляем серверное значение.
         """
         headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
         for path in self._candidate_model_urls(url):
@@ -66,7 +144,18 @@ class ConfigWizard:
                 response = requests.get(path, timeout=5, verify=False, headers=headers)
                 if response.status_code == 200:
                     data = response.json()
-                    models = [m.get('id') for m in data.get('data', []) if m.get('id')]
+                    models = []
+                    for m in data.get('data', []):
+                        mid = m.get('id')
+                        if not mid:
+                            continue
+                        models.append({'id': mid, 'context': self._model_context(m)})
+                    if models:
+                        server_ctx = self._server_context(url, headers)
+                        if server_ctx:
+                            for entry in models:
+                                if not entry.get('context'):
+                                    entry['context'] = server_ctx
                     return True, models
             except Exception:
                 pass
@@ -100,7 +189,7 @@ class ConfigWizard:
         Позволяет указать BaseUrl и (опционально) API-ключ. Обязательно
         проверяет доступность списка моделей (/models): подключение
         принимается только если список удалось получить. Возвращает список
-        имён моделей.
+        моделей вида list[dict]: {'id', 'context'}.
         """
         console.print(f"\n[bold]1. Настройка OpenAI-совместимого API[/bold]")
 
@@ -194,13 +283,24 @@ class ConfigWizard:
                 console.print("Пожалуйста, скачайте модель командой 'ollama pull qwen3.5:4b' и запустите мастер снова.")
                 return
         else:
-            default_model = self.config.get('Ollama', 'DefaultModel', fallback=models[0] if models else 'qwen3.5:4b')
-            if default_model not in models and models:
-                default_model = models[0]
+            # Модели приходят как list[dict]: {'id', 'context'}
+            model_ids = [m['id'] for m in models]
+            default_model = self.config.get('Ollama', 'DefaultModel', fallback=model_ids[0] if model_ids else 'qwen3.5:4b')
+            if default_model not in model_ids and model_ids:
+                default_model = model_ids[0]
+
+            def _model_label(entry):
+                mid = entry.get('id')
+                ctx = entry.get('context')
+                if ctx:
+                    return f"{mid}  ({int(ctx)} ctx)"
+                return mid
+
+            model_choices = [(_model_label(m), m['id']) for m in models]
             model_answers = inquirer.prompt([
                 inquirer.List('model',
                              message="Выберите модель по умолчанию",
-                             choices=models,
+                             choices=model_choices,
                              default=default_model),
             ])
             if not model_answers:
@@ -210,19 +310,45 @@ class ConfigWizard:
 
         self.config.set('Ollama', 'DefaultModel', chosen_model)
 
+        # Контекст выбранной модели (если провайдер его сообщил)
+        model_ctx = None
+        if backend == BACKEND_OPENAI and models:
+            for m in models:
+                if m.get('id') == chosen_model and m.get('context'):
+                    model_ctx = int(m['context'])
+                    break
+
         # 3. Контекст по умолчанию
         console.print(f"\n[bold]3. Размер контекста по умолчанию[/bold]")
         current_ctx = self.config.getint('Ollama', 'DefaultContext', fallback=8192)
 
-        ctx_options = [
-            ("8192    — минимальный", 8192),
-            ("16384   — компактный", 16384),
-            ("32768   — стандартный", 32768),
-            ("65536   — расширенный", 65536),
-            ("131072  — большой", 131072),
-            ("262144  — максимальный", 262144),
-            ("Свой вариант", "custom"),
-        ]
+        if model_ctx:
+            # Провайдер сообщил максимальный контекст — предлагаем
+            # рекомендуемый (максимальный) или меньше.
+            console.print(f"[cyan]Провайдер сообщает максимальный контекст «{chosen_model}»: {model_ctx} токенов.[/cyan]")
+            ladder = self._context_ladder(model_ctx, current_ctx)
+            ctx_options = []
+            for i, size in enumerate(ladder):
+                if i == 0 and size == model_ctx:
+                    desc = "максимальный (рекомендуемый провайдером)"
+                elif size == current_ctx:
+                    desc = "текущий"
+                elif size < model_ctx:
+                    desc = "уменьшенный"
+                else:
+                    desc = "провайдерский"
+                ctx_options.append((f"{size:>6} — {desc}", size))
+            ctx_options.append(("Свой вариант", "custom"))
+        else:
+            ctx_options = [
+                ("8192    — минимальный", 8192),
+                ("16384   — компактный", 16384),
+                ("32768   — стандартный", 32768),
+                ("65536   — расширенный", 65536),
+                ("131072  — большой", 131072),
+                ("262144  — максимальный", 262144),
+                ("Свой вариант", "custom"),
+            ]
 
         default_ctx_val = current_ctx
         if not any(v == current_ctx for _, v in ctx_options):

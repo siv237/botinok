@@ -18,7 +18,7 @@ baseurl = http://192.168.237.131:8080
 
 При `backend = openai` все запросы идут на `{baseurl}/v1/chat/completions`, а SSE-стрим конвертируется в формат Ollama `/api/chat` на лету. Если в `[Ollama]` указан `ApiKey`, во все запросы добавляется заголовок `Authorization: Bearer <ключ>`. → `concepts/function_calling.md`, `entities/config_system.md`
 
-Бэкенд выбирается мастером настроек (`--wizard`): шаг 0 — тип сервера, для OpenAI дополнительно прописывается `ApiKey` и забирается список моделей из `/v1/models`. → `config_system.md`
+Бэкенд выбирается мастером настроек (`--wizard`): шаг 0 — тип сервера, для OpenAI дополнительно прописывается `ApiKey` и забирается список моделей из `/v1/models`. Мастер извлекает максимальный контекст модели из полей провайдера (`context_length`, `context_window`, `max_model_len`, вложено в `meta`/`meta.llama`); если провайдер контекст не отдаёт, пробуется эндпоинт llama.cpp `/props`. В шаге выбора модели контекст отображается, а в шаге контекста предлагается рекомендуемый (максимальный) или меньше. → `config_system.md`, `config_priority.md`
 
 ## Ключевые компоненты
 - `is_openai_backend(sm)` — признак по конфигу (`openai`, `openai-compatible`).
