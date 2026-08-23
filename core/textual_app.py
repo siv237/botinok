@@ -20,7 +20,10 @@ import threading
 from datetime import datetime
 
 SPOILER_PREVIEW = 80
-SCROLL_THRESHOLD = 30  # пикселей отступа от конца, чтобы считать что пользователь внизу
+# Для прилипания «вниз» требуется буквальная позиция в самом низу (допуск 1px),
+# иначе любой прокрут вверх колесом будет неправильно считаться «я всё ещё внизу»
+# и автопрокрутка вернёт к выводу, мешая чтению.
+SCROLL_BOTTOM_EPS = 1
 
 
 class BotinokTextualApp(App):
@@ -77,6 +80,7 @@ class BotinokTextualApp(App):
         self.is_streaming = False
         self._stop_requested = False
         self._user_scrolled_away = False
+        self._last_scroll_y: Optional[float] = None
         self._queued_inputs: List[str] = []
         self._confirmation_event: Optional[threading.Event] = None
         self._confirmation_result: bool = False
@@ -86,21 +90,35 @@ class BotinokTextualApp(App):
         self._last_open_spoiler: Optional[Collapsible] = None
 
     def _spoiler_title(self, label: str, text: str) -> str:
-        preview = text[:SPOILER_PREVIEW].replace("\n", " ")
-        if len(text) > SPOILER_PREVIEW:
-            preview += "..."
         ts = datetime.now().strftime("%H:%M:%S")
+        max_preview = SPOILER_PREVIEW
+        try:
+            # Ограничиваем превью по ширине чата, чтобы заголовок не переносился.
+            chat_width = self.chat.size.width if self.chat else 0
+            if chat_width:
+                max_preview = max(20, chat_width - len(label) - len(ts) - 14)
+        except Exception:
+            pass
+        preview = text[:max_preview].replace("\n", " ")
+        if len(text) > max_preview:
+            preview += "..."
         return f"{label}: {preview}  {ts}"
 
-    def _mount_spoiler(self, title: str, *content_widgets):
+    def _mount_spoiler(self, title: str, *content_widgets, collapsed: bool = False, before=None):
         if self._last_open_spoiler:
             try:
                 self._last_open_spoiler.collapsed = True
             except Exception:
                 pass
-        c = Collapsible(*content_widgets, title=title, collapsed=False, collapsed_symbol="", expanded_symbol="")
+        c = Collapsible(*content_widgets, title=title, collapsed=collapsed, collapsed_symbol="", expanded_symbol="")
         self._last_open_spoiler = c
-        self.chat.mount(c)
+        if before is not None:
+            try:
+                self.chat.mount(c, before=before)
+            except Exception:
+                self.chat.mount(c)
+        else:
+            self.chat.mount(c)
         self._auto_scroll_chat(animate=False)
         self._keep_focus()
 
@@ -112,16 +130,29 @@ class BotinokTextualApp(App):
 
     def _is_at_bottom(self) -> bool:
         try:
-            return self.chat.scroll_y >= (self.chat.max_scroll_y - SCROLL_THRESHOLD)
+            return self.chat.scroll_y >= (self.chat.max_scroll_y - SCROLL_BOTTOM_EPS)
         except Exception:
             return True
 
-    def _auto_scroll_chat(self, animate: bool = False) -> None:
-        if self._is_at_bottom():
-            self._user_scrolled_away = False
-            self.chat.scroll_end(animate=animate)
-        else:
+    def _event_inside_chat(self, event) -> bool:
+        node = getattr(event, "target", None)
+        while node is not None:
+            if node is self.chat:
+                return True
+            node = getattr(node, "parent", None)
+        return False
+
+    def on_mouse_scroll(self, event) -> None:
+        """Любое колесо мыши над чатом — отключаем прилипание к низу."""
+        if self._event_inside_chat(event):
             self._user_scrolled_away = True
+
+    def _auto_scroll_chat(self, animate: bool = False) -> None:
+        # Если пользователь листает сам — никогда не трогаем прокрутку.
+        if self._user_scrolled_away:
+            return
+        if self._is_at_bottom():
+            self.chat.scroll_end(animate=animate)
 
     def _add_static(self, content, markup=True):
         s = Static(content, markup=markup)
@@ -187,12 +218,20 @@ class BotinokTextualApp(App):
                 self.stats_data["no_chunks"] = new_val
                 self._stats_dirty = True
         if self.chat:
-            if self._is_at_bottom():
-                if self._user_scrolled_away:
-                    self._user_scrolled_away = False
-                self.chat.scroll_end(animate=False)
-            else:
+            # Отслеживаем изменение позиции: если scroll_y уменьшился — это
+            # намеренный скролл вверх (колесо/клавиши), сразу отключаем прилипание.
+            cur_y = self.chat.scroll_y or 0
+            if self._last_scroll_y is not None and cur_y < self._last_scroll_y - 0.5:
                 self._user_scrolled_away = True
+            self._last_scroll_y = cur_y
+
+            if self._user_scrolled_away:
+                # Пользователь листает сам: не прилипаем, пока он явно не
+                # докрутит до самого низа (тогда прилипание вернётся).
+                if self._is_at_bottom():
+                    self._user_scrolled_away = False
+            else:
+                self.chat.scroll_end(animate=False)
         if self._stats_dirty or self._tools_dirty or self._footer_dirty:
             self.update_stats_display()
 
@@ -345,9 +384,9 @@ class BotinokTextualApp(App):
             self._add_static(f"[bold blue]User:[/bold blue] {content}")
             self._add_static("")
         elif role == "assistant":
-            if thinking:
-                self._mount_spoiler(self._spoiler_title("Thinking", thinking), Static(thinking))
             self._add_static("[bold green]Assistant:[/bold green]")
+            if thinking:
+                self._mount_spoiler(self._spoiler_title("Thinking", thinking), Static(thinking), collapsed=True)
             if content:
                 self._add_static(RichMarkdown(content))
                 self._add_static("")
@@ -376,6 +415,7 @@ class BotinokTextualApp(App):
 
     def start_assistant_turn(self) -> None:
         self._flush_tool_spoilers()
+        self._last_chunk_time = 0.0
         self._add_static("[bold green]Assistant:[/bold green]")
         self.stream_static = Static("", markup=True)
         self.chat.mount(self.stream_static)
@@ -437,22 +477,25 @@ class BotinokTextualApp(App):
 
     def finalize_assistant_turn(self, content: str, thinking: str = "",
                                 tool_calls: Optional[list] = None) -> None:
+        final_content = content or self._stream_content
+
+        # Рассуждение схлопывается в одну строку НА СВОЁМ МЕСТЕ: оно стримилось
+        # первым и должно остаться над ответом (хронология не нарушается).
         final_thinking = thinking or self._stream_thinking
         if final_thinking:
             title = self._spoiler_title("Thinking", final_thinking)
-            self._mount_spoiler(title, Static(final_thinking))
+            self._mount_spoiler(title, Static(final_thinking), collapsed=True,
+                                before=self.stream_static)
 
-        self._last_tool_content = ""
-
-        final_content = content or self._stream_content
-
-        # Конвертируем stream_static на месте в Markdown, без удаления
+        # Ответ конвертируем на месте в Markdown — он идёт ниже рассуждения.
         if self.stream_static and final_content:
             try:
                 self.stream_static.update(RichMarkdown(final_content))
             except Exception:
                 self.stream_static.update(self._rich_escape(final_content))
             self.stream_static = None
+
+        self._last_tool_content = ""
 
         if tool_calls:
             for tc in tool_calls:
@@ -508,6 +551,7 @@ class BotinokTextualApp(App):
     def flush_tool_buffer(self) -> None:
         self._flush_tool_spoilers()
         self.is_streaming = False
+        self._last_chunk_time = 0.0
         if self._queued_inputs:
             text = "\n\n".join(self._queued_inputs)
             self._queued_inputs = []

@@ -85,3 +85,15 @@ Wizard: контекст по умолчанию, `--wizard` без `--rich-mode
 ## [2026-08-23] ingest | Wizard: поддержка OpenAI-совместимых бэкендов
 `core/openai_compat.py` добавлен помощник `_api_headers(sm)` — заголовок `Authorization: Bearer <ApiKey>` для стриминговых и нестриминговых запросов. `core/config_wizard.py` переработан: шаг 0 — выбор бэкенда (Ollama / OpenAI-совместимый); для OpenAI проверка связи через `/v1/models`, запрос списка моделей, настройка `ApiKey`; выбор модели по имени для обоих бэкендов; `Backend` пишется в `[Ollama]`.
 Обновлены `entities/config_system.md`, `entities/openai_compat.md`.
+
+## [2026-08-23] ingest | Textual: хронологический порядок и схлопывание рассуждения
+`core/textual_app.py`: спойлер thinking при финализации хода монтируется свёрнутым (`collapsed=True`) на своём месте через `mount(before=stream_static)` — рассуждение остаётся над ответом; `_spoiler_title` режет превью по ширине чата (`chat.size.width`), чтобы заголовок был одной строкой; `_mount_spoiler` получил параметры `collapsed` и `before`; порядок в `_render_history_entry` приведён к хронологическому (thinking перед ответом). Обновлён `entities/textual_ui.md`.
+
+## [2026-08-23] ingest | Textual: скролл без прилипания
+`core/textual_app.py`: `on_mouse_scroll_up` над чатом (`_event_inside_chat`) сразу ставит `_user_scrolled_away=True`; `_tick_stats` не вызывает `scroll_end` при установленном флаге и сбрасывает его только когда пользователь сам вернулся в нижнюю зону (`SCROLL_THRESHOLD=30`). Ранее тик каждые 0.1 c принудительно возвращал вниз, из-за чего нельзя было прокрутить вверх мышью во время стрима. Обновлён `entities/textual_ui.md`.
+
+## [2026-08-23] ingest | Textual: прилипание больше не мешает скроллу мышью
+`core/textual_app.py`: прежняя «зона внизу» была слишком широкой — `SCROLL_THRESHOLD=30` px заставлял `_is_at_bottom()` возвращать True даже после прокрутки вверх (а для слегка переполненного содержимого — вообще всегда), так что тик и `_auto_scroll_chat` возвращали к выводу. Заменено на `SCROLL_BOTTOM_EPS=1` (буквальный низ); `_tick_stats` при сброшенном флаге просто держит `scroll_end` (не теряет следование за стримом), а при установленном — не трогает; `_auto_scroll_chat` (зовётся при каждом монтировании спойлера) теперь уважает `_user_scrolled_away`, а хендлеры колеса схлопнуты в `on_mouse_scroll`. Сброс флага — только когда пользователь сам докрутил до низа. Обновлён `entities/textual_ui.md`.
+
+## [2026-08-23] ingest | Textual: детекция скролла вверх по позиции и сброс No chunks
+`core/textual_app.py`: дефолтный хендлер колеса на чате делает `event.stop()`, поэтому App-хендлер не срабатывал — прилипание не отключалось. Добавлен опрос в `_tick_stats`: `_last_scroll_y` сравнивается с `scroll_y`, уменьшение позиции помечает `_user_scrolled_away=True` (работает от любого источника: колесо, клавиши, тачпад). Плюс сброс `_last_chunk_time=0.0` в `start_assistant_turn` и `flush_tool_buffer` — счётчик No chunks больше не растёт бесконечно между ходами. Обновлён `entities/textual_ui.md`.
