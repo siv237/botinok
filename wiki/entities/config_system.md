@@ -18,13 +18,13 @@ status: stable
 Выбранный путь сохраняется в `config_path`, источник — в `config_source` («personal» / «local» / «system»).
 
 ## Секции (см. `sources/config_cfg.md`)
-- `[Ollama]` — бэкенд, baseurl, model, context, таймауты, сэмплинг.
+- `[Ollama]` — бэкенд (`Backend`: `ollama`/`openai`), baseurl, model, context, таймауты, сэмплинг, `ApiKey` (Bearer-токен для OpenAI-совместимых API).
 - `[Storage]` — `SessionsDir`, `StepsSubDir`.
 - `[Tools]` — lynx (useragent, лимиты, таймауты).
 - `[UI]` — showvram, showtps.
 
 ## Работа
-- `--wizard` (`core/config_wizard.py`, класс `ConfigWizard`) — интерактивный мастер (Ollama через nginx/SSL, контекст по умолчанию). → `concepts/config_priority.md`
+- `--wizard` (`core/config_wizard.py`, класс `ConfigWizard`) — интерактивный мастер: выбор бэкенда (Ollama / OpenAI-совместимый), проверка подключения, список моделей, контекст по умолчанию, `ApiKey`. → `concepts/config_priority.md`, `entities/openai_compat.md`
 - `save_config()` — запись выбранного пути; обработка ошибок сохранения.
 - Fallback-дефолты, если файл не найден.
 

@@ -27,6 +27,16 @@ def _api_url(sm, path='/v1/chat/completions'):
     return f"{base}{path}"
 
 
+def _api_headers(sm, extra=None):
+    headers = {'Content-Type': 'application/json'}
+    api_key = sm.config.get('Ollama', 'ApiKey', fallback='').strip()
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
+    if extra:
+        headers.update(extra)
+    return headers
+
+
 def _parse_tool_args(raw):
     try:
         parsed = json.loads(raw)
@@ -210,6 +220,7 @@ def chat_stream_request(sm, ollama_payload, timeout=300, verify_ssl=True):
     resp = requests.post(
         _api_url(sm),
         json=_to_openai_payload(ollama_payload),
+        headers=_api_headers(sm),
         stream=True,
         timeout=timeout,
         verify=verify_ssl,
@@ -222,7 +233,7 @@ def chat_once(sm, ollama_payload, timeout=300, verify_ssl=True):
     pl = _to_openai_payload(ollama_payload)
     pl['stream'] = False
     pl.pop('stream_options', None)
-    res = requests.post(_api_url(sm), json=pl, timeout=timeout, verify=verify_ssl)
+    res = requests.post(_api_url(sm), json=pl, headers=_api_headers(sm), timeout=timeout, verify=verify_ssl)
     res.raise_for_status()
     data = res.json()
     choice = (data.get('choices') or [{}])[0]
