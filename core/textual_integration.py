@@ -24,6 +24,7 @@ from typing import Optional, List, Dict, Callable
 
 from core.session_manager import SessionManager
 from core.tool_manager import ToolManager
+from core.openai_compat import is_openai_backend, chat_stream_request, chat_once
 from core.textual_app import BotinokTextualApp
 
 MODELS_NO_TOOLS = set()
@@ -291,15 +292,24 @@ def _ollama_summarize_and_reset_context(
                 "num_predict": 450,
             },
         }
-        res = requests.post(
-            chat_url,
-            json=payload,
-            timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300),
-            verify=verify_ssl,
-        )
-        if res.status_code == 200:
-            data = res.json()
+        if is_openai_backend(sm):
+            data = chat_once(
+                sm,
+                payload,
+                timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300),
+                verify_ssl=verify_ssl,
+            )
             summary_text = data.get("message", {}).get("content") or summary_text
+        else:
+            res = requests.post(
+                chat_url,
+                json=payload,
+                timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300),
+                verify=verify_ssl,
+            )
+            if res.status_code == 200:
+                data = res.json()
+                summary_text = data.get("message", {}).get("content") or summary_text
     except Exception:
         pass
 
@@ -551,10 +561,18 @@ def ask_ollama_textual(
             _update_stats(status="Generating...")
 
             try:
-                response = requests.post(
-                    current_ollama_chat_url, json=payload, stream=True,
-                    timeout=current_timeout, verify=current_verify_ssl,
-                )
+                if is_openai_backend(sm):
+                    response = chat_stream_request(
+                        sm,
+                        payload,
+                        timeout=current_timeout,
+                        verify_ssl=current_verify_ssl,
+                    )
+                else:
+                    response = requests.post(
+                        current_ollama_chat_url, json=payload, stream=True,
+                        timeout=current_timeout, verify=current_verify_ssl,
+                    )
             except Exception as e:
                 _write_log(f"[red]Connection Error: {e}[/red]")
                 _update_stats(status="Connection Error")

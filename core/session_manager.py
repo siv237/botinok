@@ -269,6 +269,12 @@ class SessionManager:
     def get_ollama_status(self, base_url=None):
         if base_url is None:
             base_url = self.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+        # Для OpenAI-совместимого бэкенда статус Ollama недоступен
+        try:
+            if self.config.get('Ollama', 'Backend', fallback='ollama').strip().lower() == 'openai':
+                return None
+        except Exception:
+            pass
         verify_ssl = self.config.getboolean('Ollama', 'VerifySSL', fallback=True)
         try:
             response = requests.get(f"{base_url}/api/ps", timeout=5, verify=verify_ssl)

@@ -21,6 +21,7 @@ from rich.progress import Progress, BarColumn, TextColumn
 from core.session_manager import SessionManager
 from core.tool_manager import ToolManager
 from core.image_ascii import image_to_fullcolor
+from core.openai_compat import is_openai_backend, chat_stream_request, chat_once
 from core.textual_history_viewer import view_history
 from core.textual_integration import ask_ollama_textual
 
@@ -529,15 +530,24 @@ def _ollama_summarize_and_reset_context(
                 "num_predict": 450,
             },
         }
-        res = requests.post(
-            chat_url,
-            json=payload,
-            timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300),
-            verify=verify_ssl,
-        )
-        if res.status_code == 200:
-            data = res.json()
+        if is_openai_backend(sm):
+            data = chat_once(
+                sm,
+                payload,
+                timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300),
+                verify_ssl=verify_ssl,
+            )
             summary_text = data.get("message", {}).get("content") or summary_text
+        else:
+            res = requests.post(
+                chat_url,
+                json=payload,
+                timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300),
+                verify=verify_ssl,
+            )
+            if res.status_code == 200:
+                data = res.json()
+                summary_text = data.get("message", {}).get("content") or summary_text
     except Exception:
         pass
 
@@ -934,6 +944,7 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
         
         OLLAMA_CHAT_URL = f"{sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')}/api/chat"
         verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
+        use_openai_backend = is_openai_backend(sm)
         
         try:
             # Цикл для обработки потенциальных вызовов инструментов
@@ -999,7 +1010,15 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                 response_queue = queue.Queue()
                 def make_request():
                     try:
-                        res = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300), verify=verify_ssl)
+                        if use_openai_backend:
+                            res = chat_stream_request(
+                                sm,
+                                payload,
+                                timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300),
+                                verify_ssl=verify_ssl,
+                            )
+                        else:
+                            res = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300), verify=verify_ssl)
                         response_queue.put(("success", res))
                     except Exception as e:
                         response_queue.put(("error", str(e)))
@@ -1844,7 +1863,8 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
     ollama_base_url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
     OLLAMA_CHAT_URL = f"{ollama_base_url}/api/chat"
     verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
-    
+    use_openai_backend = is_openai_backend(sm)
+
     try:
         while True:
             if model in MODELS_NO_TOOLS:
@@ -1856,7 +1876,15 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
             if model in MODELS_NO_TOOLS and payload.get("tools") is not None:
                 payload.pop("tools", None)
 
-            response = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300), verify=verify_ssl)
+            if use_openai_backend:
+                response = chat_stream_request(
+                    sm,
+                    payload,
+                    timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300),
+                    verify_ssl=verify_ssl,
+                )
+            else:
+                response = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=sm.config.getint('Ollama', 'RequestTimeout', fallback=300), verify=verify_ssl)
             
             if response.status_code != 200:
                 error_msg = ""
