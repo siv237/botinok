@@ -351,6 +351,10 @@ class ToolManager:
                 desc["broken"] = True
                 desc["error_type"] = error_info["error_type"]
                 desc["error_message"] = error_info["error"]
+            # Не отдаем инструменты без валидной схемы (например алиасы) —
+            # OpenAI-совместимые бэкенды отвергают их с ошибкой парсинга tools.
+            if not (isinstance(desc, dict) and desc.get("type") == "function" and isinstance(desc.get("function"), dict)):
+                continue
             result[name] = desc
         return result
     

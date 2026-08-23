@@ -1911,6 +1911,10 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
                     payload.pop("tools", None)
                     continue
 
+                if os.environ.get("BOTINOK_DEBUG"):
+                    import traceback as _tb
+                    print(f"[stealth] HTTP {response.status_code}: {str(error_msg)[:800]}", file=sys.stderr)
+                    _tb.print_stack()
                 return messages
 
             full_response = ""
@@ -2004,6 +2008,9 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
         return messages
             
     except Exception:
+        if os.environ.get("BOTINOK_DEBUG"):
+            import traceback as _tb
+            _tb.print_exc()
         return messages
 
 def _choose_or_resume_session(sm: SessionManager, stealth_mode: bool, default_suffix: str) -> tuple[str | None, str]:
@@ -2331,7 +2338,9 @@ def main():
         return
 
     # Обработка Textual режима (по умолчанию)
-    if not args.rich_mode:
+    # Stealth/pipe-режим (аргумент --stealth или данные в stdin) обслуживается
+    # классическим циклом ниже — Textual его не должен перехватывать.
+    if not args.rich_mode and not args.stealth and sys.stdin.isatty():
         if args.dangerous:
             os.environ["BOTINOK_DANGEROUS"] = "1"
 
