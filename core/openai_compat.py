@@ -76,9 +76,18 @@ def to_openai_messages(messages):
 
 
 def _to_openai_payload(ollama_payload):
+    msgs = to_openai_messages(ollama_payload.get('messages', []))
+    # Многие шаблоны чата (Qwen и др.) допускают только один system-блок
+    # в начале. Склеиваем все системные сообщения в одно.
+    system_parts = [m['content'] for m in msgs
+                    if m.get('role') == 'system' and m.get('content')]
+    if len(system_parts) > 1:
+        merged = "\n\n".join(system_parts)
+        msgs = ([{'role': 'system', 'content': merged}] +
+                [m for m in msgs if m.get('role') != 'system'])
     pl = {
         'model': ollama_payload.get('model'),
-        'messages': to_openai_messages(ollama_payload.get('messages', [])),
+        'messages': msgs,
         'stream': bool(ollama_payload.get('stream')),
     }
     tools = ollama_payload.get('tools')
