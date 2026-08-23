@@ -416,7 +416,6 @@ class BotinokTextualApp(App):
     def start_assistant_turn(self) -> None:
         self._flush_tool_spoilers()
         self._last_chunk_time = 0.0
-        self._add_static("[bold green]Assistant:[/bold green]")
         self.stream_static = Static("", markup=True)
         self.chat.mount(self.stream_static)
         self._stream_content = ""
@@ -488,11 +487,17 @@ class BotinokTextualApp(App):
                                 before=self.stream_static)
 
         # Ответ конвертируем на месте в Markdown — он идёт ниже рассуждения.
-        if self.stream_static and final_content:
-            try:
-                self.stream_static.update(RichMarkdown(final_content))
-            except Exception:
-                self.stream_static.update(self._rich_escape(final_content))
+        # Рассуждение КАК УЖЕ убрано из stream_static (см. спойлер выше), поэтому
+        # static всегда финализируем: есть ответ — Markdown, нет — очищаем, чтобы
+        # сырой многострочный текст мышления не оставался мусором в общем потоке.
+        if self.stream_static:
+            if final_content:
+                try:
+                    self.stream_static.update(RichMarkdown(final_content))
+                except Exception:
+                    self.stream_static.update(self._rich_escape(final_content))
+            else:
+                self.stream_static.update("")
             self.stream_static = None
 
         self._last_tool_content = ""
@@ -501,9 +506,6 @@ class BotinokTextualApp(App):
             for tc in tool_calls:
                 name = tc.get("function", {}).get("name", "unknown")
                 self._tool_items.append(f"🔧 {name}")
-
-        if not tool_calls and final_content:
-            self._add_static("")
 
     def _flush_tool_spoilers(self) -> None:
         if self._tool_items:
