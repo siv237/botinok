@@ -316,6 +316,17 @@ def _estimate_messages_tokens(msgs: list) -> int:
         return 0
     return sum(_estimate_message_tokens(m) for m in msgs)
 
+def _has_audio_message(messages) -> bool:
+    """Есть ли в истории аудио-сообщение (медиа, которое надо слать как input_audio).
+
+    Аудио в Ollama доставляется только через OpenAI/pv1 (input_audio), поэтому
+    ход с аудио надо перенаправлять на /v1 даже при backend=ollama."""
+    return any(
+        isinstance(m, dict) and m.get("media_kind") == "audio" and m.get("audios")
+        for m in messages
+    )
+
+
 def _prepare_messages_for_ollama(sm: SessionManager, session_path: str, messages: list, num_ctx: int, reserve_tokens: int = 1200):
     """Trim message history to fit a conservative token budget.
 
@@ -944,7 +955,6 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
         
         OLLAMA_CHAT_URL = f"{sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')}/api/chat"
         verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
-        use_openai_backend = is_openai_backend(sm)
         
         try:
             # Цикл для обработки потенциальных вызовов инструментов
@@ -1000,6 +1010,9 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
 
                 prepared = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=num_ctx)
                 payload["messages"] = prepared
+                # Аудио доставляется только через /v1 (input_audio) — перенаправляем ход
+                # с аудио на openai-путь даже при backend=ollama.
+                use_openai_backend = is_openai_backend(sm) or _has_audio_message(messages)
                 if vis is not None:
                     vis.session_ctx_est = _estimate_messages_tokens(prepared)
 
@@ -1757,13 +1770,24 @@ def ask_ollama_stream(model, messages, session_path, step_num, num_ctx=8192, vis
                     
                     sm.log_tool_call(session_path, func_name, func_args, result, status="completed")
                     
-                    # Special handling for vision tool - add message with images for multimodal models
+                    # Special handling for vision/audio tools - add multimodal content for omni models
                     if func_name == "vision" and isinstance(result, dict) and result.get("image_data"):
                         vision_prompt = result.get("prompt", "Опиши что ты видишь на этом изображении")
                         messages.append({
                             "role": "user",
                             "content": vision_prompt,
                             "images": [result["image_data"]]
+                        })
+                    elif func_name == "audio" and isinstance(result, dict) and result.get("audio_data"):
+                        # Правильный нативный транспорт Ollama для аудио — поле `audios`
+                        # (множественное, base64 WAV), а не images[]/audio.
+                        audio_prompt = result.get("prompt", "Опиши, что ты слышишь в этом аудио")
+                        messages.append({
+                            "role": "user",
+                            "content": audio_prompt,
+                            "audios": [result["audio_data"]],
+                            "media_kind": "audio",
+                            "mime_type": result.get("mime_type", "audio/wav"),
                         })
                     else:
                         messages.append({
@@ -1863,7 +1887,6 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
     ollama_base_url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
     OLLAMA_CHAT_URL = f"{ollama_base_url}/api/chat"
     verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
-    use_openai_backend = is_openai_backend(sm)
 
     try:
         while True:
@@ -1875,6 +1898,10 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
             # If we discovered this model can't do tools, ensure payload doesn't include them.
             if model in MODELS_NO_TOOLS and payload.get("tools") is not None:
                 payload.pop("tools", None)
+
+            # Аудио доставляется только через /v1 (input_audio) — перенаправляем ход
+            # с аудио на openai-путь даже при backend=ollama.
+            use_openai_backend = is_openai_backend(sm) or _has_audio_message(messages)
 
             if use_openai_backend:
                 response = chat_stream_request(
@@ -1986,13 +2013,22 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
                 
                 sm.log_tool_call(session_path, func_name, func_args, result, status="completed")
                 
-                # Special handling for vision tool - add message with images for multimodal models
+                # Special handling for vision/audio tools - add multimodal content for omni models
                 if func_name == "vision" and isinstance(result, dict) and result.get("image_data"):
                     vision_prompt = result.get("prompt", "Опиши что ты видишь на этом изображении")
                     messages.append({
                         "role": "user",
                         "content": vision_prompt,
                         "images": [result["image_data"]]
+                    })
+                elif func_name == "audio" and isinstance(result, dict) and result.get("audio_data"):
+                    audio_prompt = result.get("prompt", "Опиши, что ты слышишь в этом аудио")
+                    messages.append({
+                        "role": "user",
+                        "content": audio_prompt,
+                        "audios": [result["audio_data"]],
+                        "media_kind": "audio",
+                        "mime_type": result.get("mime_type", "audio/wav"),
                     })
                 else:
                     messages.append({

@@ -54,6 +54,17 @@ def _trim_tail(text: str, max_chars: int) -> str:
     return text[-max_chars:]
 
 
+def _has_audio_message(messages) -> bool:
+    """Есть ли в истории аудио-сообщение (media, которое надо слать как input_audio).
+
+    Аудио в Ollama доставляется только через OpenAI/pv1 (input_audio), поэтому ход
+    с аудио перенаправляется на /v1 даже при backend=ollama."""
+    return any(
+        isinstance(m, dict) and m.get("media_kind") == "audio" and m.get("audios")
+        for m in messages
+    )
+
+
 def _tool_stream_has_payload(text: str) -> bool:
     if not text:
         return False
@@ -561,7 +572,9 @@ def ask_ollama_textual(
             _update_stats(status="Generating...")
 
             try:
-                if is_openai_backend(sm):
+                # Аудио доставляется только через /v1 (input_audio) — перенаправляем ход
+                # с аудио на openai-путь даже при backend=ollama.
+                if is_openai_backend(sm) or _has_audio_message(prepared):
                     response = chat_stream_request(
                         sm,
                         payload,
@@ -1062,6 +1075,15 @@ def ask_ollama_textual(
                         "role": "user",
                         "content": vision_prompt,
                         "images": [tool_result["image_data"]]
+                    })
+                elif tool_name == "audio" and isinstance(tool_result, dict) and tool_result.get("audio_data"):
+                    audio_prompt = tool_result.get("prompt", "Опиши, что ты слышишь в этом аудио")
+                    messages.append({
+                        "role": "user",
+                        "content": audio_prompt,
+                        "audios": [tool_result["audio_data"]],
+                        "media_kind": "audio",
+                        "mime_type": tool_result.get("mime_type", "audio/wav"),
                     })
                 else:
                     tool_message = {

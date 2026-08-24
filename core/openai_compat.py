@@ -60,7 +60,34 @@ def to_openai_messages(messages):
             content = ' '.join(
                 p.get('text', '') for p in content if isinstance(p, dict)
             )
-        msg['content'] = content or ''
+        # Мультимодальный контент: аудио (input_audio) или изображения (image_url).
+        # Нативный Ollama-транспорт для аудио — поле `audios` (base64 WAV, см. PR #15243);
+        # здесь по маркеру media_kind распознаём его и переводим в OpenAI-формат.
+        images = m.get('images') or []
+        audios = m.get('audios') or []
+        if m.get('media_kind') == 'audio' and audios:
+            msg['content'] = [
+                {'type': 'text', 'text': content or ''},
+                {
+                    'type': 'input_audio',
+                    'input_audio': {
+                        'data': audios[0],
+                        'format': 'wav',
+                    },
+                },
+            ]
+        elif images:
+            parts = [{'type': 'text', 'text': content or ''}]
+            for img in images:
+                parts.append({
+                    'type': 'image_url',
+                    'image_url': {
+                        'url': f"data:{m.get('mime_type', 'image/jpeg')};base64,{img}"
+                    },
+                })
+            msg['content'] = parts
+        else:
+            msg['content'] = content or ''
         if role == 'assistant' and m.get('tool_calls'):
             tcs = []
             for tc in m['tool_calls']:

@@ -75,6 +75,7 @@ wiki/
 - `session` — сессии, контекст, память
 - `llm` — механизмы LLM (function calling, streaming)
 - `tool` — конкретные инструменты
+- `audio` — аудио-мультимодальность (omni-модели)
 - `tui` — интерфейсы (Rich, Textual)
 - `safety` — dangerous mode, ограничения
 - `integration` — бэкенды (Ollama, OpenAI-compat)
