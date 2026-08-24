@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [tui]
-updated: 2026-08-23
-sources: 2
+updated: 2026-08-24
+sources: 3
 status: stable
 ---
 
@@ -25,6 +25,8 @@ status: stable
 - **Независимый ввод** сообщений, очередь сообщений, остановка по ESC.
 - Корректное отображение **VRAM на всех этапах**. → `concepts/streaming_tui.md`
 - Визуальный паритет со старым Rich Live интерфейсом (заголовок окна, оформление).
+
+- **Экранирование markup при рендере истории/ввода**: `_render_history_entry`, `append_user_message`, `on_input_submitted` и спойлеры thinking теперь прогоняют вставляемый контент через `_rich_escape` (`[`→`\[`, вырез управления). Раньше сырой текст из `context.json` (напр. вывод `shell_exec` с `xterm-256color`) попадал внутрь `[dim]...[/dim]` без экранирования и ронял рендер `MarkupError: Expected markup value` при старте.
 
 ## Взаимодействие
 Из `botinok.py` поток идёт через `ask_ollama_textual` (TUI-режим) либо `ask_ollama_stream` (Rich). Переключение — флаг `--rich-mode`. → `botinok_cli.md`, `comparisons/rich_vs_textual.md`

@@ -43,6 +43,7 @@ class ToolManager:
             "skills": ("tools.skills", "skills"),
             "curl": ("tools.curl", "curl"),
             "vision": ("tools.vision", "execute"),
+            "audio": ("tools.audio", "execute"),
             "session_memory": ("tools.session_memory", "session_memory_tool"),
         }
         
@@ -225,6 +226,23 @@ class ToolManager:
                             "image_path": {"type": "string", "description": "Путь к локальному файлу изображения (jpg, png, gif, webp)"},
                             "url": {"type": "string", "description": "URL изображения (альтернатива image_path)"},
                             "prompt": {"type": "string", "description": "Вопрос к модели про изображение (по умолчанию: 'Опиши что ты видишь')"},
+                            "timeout_sec": {"type": "integer", "description": "Таймаут скачивания URL в секундах (по умолчанию 30)"}
+                        },
+                        "required": []
+                    }
+                }
+            },
+            "audio": {
+                "type": "function",
+                "function": {
+                    "name": "audio",
+                    "description": "Анализ аудио мультимодальной (omni) моделью. Конвертирует аудиофайл в base64 для передачи в LLM (Qwen3-Omni, Qwen3.5-Omni/27B и др.). Для работы нужна модель с поддержкой аудио.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "audio_path": {"type": "string", "description": "Путь к локальному аудиофайлу (wav, mp3, ogg, flac, m4a, webm)"},
+                            "url": {"type": "string", "description": "URL аудио (альтернатива audio_path)"},
+                            "prompt": {"type": "string", "description": "Вопрос к модели про аудио (по умолчанию: 'Опиши, что ты слышишь')"},
                             "timeout_sec": {"type": "integer", "description": "Таймаут скачивания URL в секундах (по умолчанию 30)"}
                         },
                         "required": []

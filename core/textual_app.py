@@ -381,12 +381,12 @@ class BotinokTextualApp(App):
                 ts_str = str(timestamp)[:8]
         if role == "user":
             self._add_static(f"[dim]━━━ {ts_str} ━━━[/dim]")
-            self._add_static(f"[bold blue]User:[/bold blue] {content}")
+            self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(str(content))}")
             self._add_static("")
         elif role == "assistant":
             self._add_static("[bold green]Assistant:[/bold green]")
             if thinking:
-                self._mount_spoiler(self._spoiler_title("Thinking", thinking), Static(thinking), collapsed=True)
+                self._mount_spoiler(self._spoiler_title("Thinking", thinking), Static(self._rich_escape(thinking)), collapsed=True)
             if content:
                 self._add_static(RichMarkdown(content))
                 self._add_static("")
@@ -398,18 +398,19 @@ class BotinokTextualApp(App):
                         args = json.loads(func.get("arguments", "{}")) if isinstance(func.get("arguments"), str) else func.get("arguments", {})
                     except Exception:
                         args = {}
-                    title = self._spoiler_title(name, json.dumps(args, ensure_ascii=False))
-                    self._mount_spoiler(title, Static(f"🔧 {name}({json.dumps(args, ensure_ascii=False)})"))
+                    args_json = json.dumps(args, ensure_ascii=False)
+                    title = self._spoiler_title(name, args_json)
+                    self._mount_spoiler(title, Static(f"🔧 {self._rich_escape(name)}({self._rich_escape(args_json)})"))
         elif role == "tool":
             title = self._spoiler_title("Tool result", str(content)[:200])
-            self._mount_spoiler(title, Static(f"[dim]{str(content)[:1000]}[/dim]"))
+            self._mount_spoiler(title, Static(f"[dim]{self._rich_escape(str(content)[:1000])}[/dim]"))
         elif role == "system":
             pass
 
     def append_user_message(self, content: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         self._add_static(f"[dim]━━━ {ts} ━━━[/dim]")
-        self._add_static(f"[bold blue]User:[/bold blue] {content}")
+        self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(str(content))}")
         self._add_static("")
         self.chat.scroll_end(animate=False)
 
@@ -483,7 +484,7 @@ class BotinokTextualApp(App):
         final_thinking = thinking or self._stream_thinking
         if final_thinking:
             title = self._spoiler_title("Thinking", final_thinking)
-            self._mount_spoiler(title, Static(final_thinking), collapsed=True,
+            self._mount_spoiler(title, Static(self._rich_escape(final_thinking)), collapsed=True,
                                 before=self.stream_static)
 
         # Ответ конвертируем на месте в Markdown — он идёт ниже рассуждения.
@@ -612,12 +613,12 @@ class BotinokTextualApp(App):
         elif self.is_streaming:
             self._queued_inputs.append(user_input)
             self._update_queue_placeholder()
-            self._add_static(f"[dim]⏸ +{len(self._queued_inputs)}: {user_input}[/dim]")
+            self._add_static(f"[dim]⏸ +{len(self._queued_inputs)}: {self._rich_escape(user_input)}[/dim]")
             self.chat.scroll_end(animate=False)
         elif self.on_submit:
             self._start_time = time.time()
             self._add_static(f"[dim]━━━ {datetime.now().strftime('%H:%M:%S')} ━━━[/dim]")
-            self._add_static(f"[bold blue]User:[/bold blue] {user_input}")
+            self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(user_input)}")
             self._add_static("")
             self.on_submit(user_input)
         self.update_stats_display()

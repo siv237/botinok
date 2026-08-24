@@ -19,7 +19,7 @@ botinok.py                        # CLI / главный цикл агента, 
 │   ├── config_wizard.py          # мастер настройки
 │   ├── textual_app.py / textual_integration.py / textual_history_viewer.py  # Textual TUI
 │   └── image_ascii.py            # ASCII-арт из картинок
-├── tools/*.py                    # 14 инструментов (function calling)
+├── tools/*.py                    # 14 инструментов (+ алиас, function calling)
 ├── prompts/*.txt                 # системные промпты (копируются в сессию)
 ├── config.cfg                    # конфигурация по умолчанию
 ├── install.sh                    # установщик
@@ -36,9 +36,9 @@ botinok.py                        # CLI / главный цикл агента, 
 - **UI** — переход с Rich Live на Textual TUI (плавный стриминг, спойлеры, FPS). → `entities/textual_ui.md`, `comparisons/rich_vs_textual.md`
 - **Промпты** — вынесены в `prompts/`, копируются в сессию, редактируемы под задачу. → `sources/prompts_readme.md`
 - **Опыт и навыки** — база «позитивного/негативного» опыта и система skills. → `concepts/experience_learning.md`, `concepts/skills_system.md`
-- **Мультимодальность** — инструмент `vision` с авто-конвертацией/ресaйзом изображений. → `concepts/vision_multimodal.md`
+- **Мультимодальность** — инструмент `vision` (изображения, авто-конвертация/ресaйз) и `audio` (аудио, требует omni-модель). → `concepts/vision_multimodal.md`, `concepts/audio_multimodal.md`
 
-## Инструменты (13)
+## Инструменты (14)
 
 | Шаблон | Инструменты |
 |--------|-------------|
@@ -46,7 +46,7 @@ botinok.py                        # CLI / главный цикл агента, 
 | Система | `file_system`, `shell_exec`, `journal` |
 | Разработка | `code_editor`, `github`, `skills` |
 | Память/опыт | `experience`, `session_memory` |
-| Мультимодальность | `vision` |
+| Мультимодальность | `vision`, `audio` |
 
 Подробно: каталог `entities/tools/` и `index.md`.
 

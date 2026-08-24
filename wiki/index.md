@@ -33,6 +33,7 @@
 | github | [entities/tools/github.md](entities/tools/github.md) | Работа с GitHub API |
 | experience | [entities/tools/experience.md](entities/tools/experience.md) | База «позитивного/негативного» опыта |
 | vision | [entities/tools/vision.md](entities/tools/vision.md) | Анализ изображений мультимодальной моделью |
+| audio | [entities/tools/audio.md](entities/tools/audio.md) | Анализ аудио мультимодальной (omni) моделью |
 | skills | [entities/tools/skills.md](entities/tools/skills.md) | Менеджер AI-навыков (личные/проектные, ClawHub) |
 | session_memory | [entities/tools/session-memory.md](entities/tools/session-memory.md) | Объектный доступ к истории сессии |
 
@@ -47,6 +48,7 @@
 - [concepts/skills_system.md](concepts/skills_system.md) — система навыков (personal/project, ClawHub)
 - [concepts/experience_learning.md](concepts/experience_learning.md) — обучение на опыте (positive/negative)
 - [concepts/vision_multimodal.md](concepts/vision_multimodal.md) — мультимодальность: конвертация/ресaйз изображений
+- [concepts/audio_multimodal.md](concepts/audio_multimodal.md) — мультимодальность: аудио через images[]/input_audio (требует omni-модель)
 - [concepts/stealth_pipe_mode.md](concepts/stealth_pipe_mode.md) — тихий режим и работа из конвейера (stdin)
 - [concepts/proofreader.md](concepts/proofreader.md) — режим корректора (Исполнитель → Корректор)
 - [concepts/config_priority.md](concepts/config_priority.md) — приоритет конфигов и wizard

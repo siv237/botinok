@@ -17,7 +17,7 @@
 | `core/openai_compat.py` | Адаптер OpenAI-совместимых бэкендов | `entities/openai_compat.md` |
 | `core/config_wizard.py` | Интерактивный мастер настройки (--wizard) | `concepts/config_priority.md` |
 | `core/image_ascii.py` | ASCII-генерация изображений для консоли | `concepts/vision_multimodal.md` |
-| `tools/*.py` | 13 инструментов (+ алиас `web_extractor`) (см. `entities/tools/`) | `entities/tools/*` |
+| `tools/*.py` | 14 инструментов (+ алиас `web_extractor`) (см. `entities/tools/`) | `entities/tools/*` |
 | `prompts/*.txt` | Системные промпты (копируются в сессию) | `sources/prompts_readme.md` |
 | `prompts/README.md` | Документация по системе промптов | `sources/prompts_readme.md` |
 | `config.cfg` | Конфигурация по умолчанию (Ollama, Storage, Tools, UI) | `sources/config_cfg.md`, `entities/config_system.md` |
