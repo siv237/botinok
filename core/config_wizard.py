@@ -69,8 +69,10 @@ class ConfigWizard:
         meta = m.get('meta') or {}
         meta_keys = ('context_length', 'context_window', 'max_model_len', 'n_ctx')
         llama = meta.get('llama') if isinstance(meta, dict) else None
+        details = m.get('details') if isinstance(m.get('details'), dict) else None
         for target in (m, meta if isinstance(meta, dict) else None,
-                       llama if isinstance(llama, dict) else None):
+                       llama if isinstance(llama, dict) else None,
+                       details):
             if not isinstance(target, dict):
                 continue
             for key in top_keys if target is m else meta_keys:
@@ -181,7 +183,7 @@ class ConfigWizard:
             url = Prompt.ask("Введите URL Ollama (например, http://localhost:11434)", default=url)
 
         self.config.set('Ollama', 'BaseUrl', url)
-        return [m['name'] for m in models]
+        return [{'id': m['name'], 'context': self._model_context(m)} for m in models]
 
     def _configure_openai(self):
         """Настройка подключения к OpenAI-совместимому API.
