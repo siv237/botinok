@@ -221,7 +221,7 @@ def _perform_update():
 
 # Получаем версию при запуске
 _COMMIT_DATE, _COMMIT_HASH = _get_version_info()
-_BOTINOK_VERSION = f"0.2 | {_COMMIT_DATE} | {_COMMIT_HASH}"
+_BOTINOK_VERSION = f"0.3 | {_COMMIT_DATE} | {_COMMIT_HASH}"
 
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
 OLLAMA_PS_URL = "http://localhost:11434/api/ps"

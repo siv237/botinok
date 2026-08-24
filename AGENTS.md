@@ -85,7 +85,7 @@ wiki/
 - Язык проекта: Python 3, интерфейс консольный (Rich + Textual TUI), бэкенд — [Ollama](wiki/entities/ollama_backend.md) (по умолчанию) и OpenAI-совместимые API (`wiki/entities/openai_compat.md`).
 - Основная точка входа: `botinok.py` (`wiki/entities/botinok_cli.md`).
 - Оркестрация инструментов: `core/tool_manager.py`; сессий: `core/session_manager.py`.
-- Версия: 0.2; репозиторий: `github.com/siv237/botinok`.
+- Версия: 0.3; репозиторий: `github.com/siv237/botinok`.
 
 ## История изменений схемы
 - **2026-08-23** — создана схема и базовая структура вики.
