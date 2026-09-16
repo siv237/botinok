@@ -112,3 +112,24 @@ Live-тестами на `dgk00srv930r` выяснено: аудио доста�
 
 ## [2026-08-23] ingest | Мастер OpenAI: получение провайдерского контекста моделей
 `core/config_wizard.py`: `check_openai` теперь возвращает `list[dict] {'id','context'}` — максимальный контекст извлекается из полей провайдера (`context_length`, `context_window`, `max_model_len`, вложено в `meta`/`meta.llama`), для llama.cpp пробуется `/props`. Добавлены `_model_context`, `_context_ladder`, `_server_context`. В шаге выбора модели контекст отображается в списке; в шаге контекста для OpenAI предлагается рекомендуемый (максимальный) контекст провайдера или меньше, вместо фиксированной лесенки. Обновлены `entities/openai_compat.md`, `concepts/config_priority.md`.
+
+## [2026-09-16] ingest | Встроенный терминал: PTY-сессии, свернуть/вернуть
+`tools/shell_exec.py` переписан на «shell как отдельная сессия»: действия
+`run/status/read/search/send/send_key/wait/kill/list`, вывод читается порциями,
+сессия не держит агент. Новые модули: `core/shell_session.py` (`ShellSession`,
+`ShellSessionRegistry`, `TextualAppRegistry`) и `core/shell_screen.py`
+(`ShellScreen` — модальное окно терминала с кнопками «Свернуть»/«Закрыть»,
+Ctrl+Q — свернуть, Ctrl+C — SIGINT). Свёрнутые сессии показываются в панели
+`#shells` основного TUI (`BotinokTextualApp.open_shell_session`,
+`minimize_shell_session`, кнопки `shell_restore_<id>`); одновременно открыто не
+более одного окна. По ходу закрыты дефекты из ревью: эскалация SIGINT→SIGKILL в
+`kill()`, возврат дефолтного `timeout_sec=120`, обработка сбоя `Popen` без утечки
+PTY-дескрипторов, ограничение буферов вывода (`_clean_str` deque, raw 4 МиБ),
+уборка мёртвых сессий + `atexit`, ограничение `search` по совпадениям/контексту,
+устранение busy-wait в `_drain`. Защита от `RecursionError`: непрозрачный фон
+`ShellScreen` и отказ от накопления модальных окон. Тесты:
+`tests/test_shell_session.py` (12), `tests/test_shell_exec_tool.py` (10),
+`tests/test_shell_screen.py`, новый `tests/test_shell_minimize.py`.
+Созданы `entities/shell_session.md`, `entities/shell_screen.md`,
+`concepts/embedded_terminal.md`; обновлены `entities/tools/shell-exec.md`,
+`entities/textual_ui.md`, index/overview/raw.
