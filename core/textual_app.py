@@ -4,7 +4,7 @@ Textual приложение для Botinok — стриминг в Static, сп
 
 from textual.app import App, ComposeResult
 from textual.screen import ModalScreen
-from textual.widgets import RichLog, Input, Static, Collapsible, OptionList
+from textual.widgets import RichLog, Input, Static, Collapsible, OptionList, Button
 from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal
 from rich.markdown import Markdown as RichMarkdown
@@ -88,7 +88,7 @@ class ConfirmationScreen(ModalScreen):
             self._reason_mode = True
             if self._body is not None:
                 self._body.update(
-                    self._body.renderable
+                    getattr(self._body, "content", "")
                     + "\n[bold cyan]Причина отказа (Enter — отправить, esc — просто отменить):[/bold cyan]")
             reason_input = Input(placeholder="причина отказа...", id="reason_input")
             self.mount(reason_input)
@@ -129,6 +129,10 @@ class BotinokTextualApp(App):
     #content_title { height: 1; color: green; padding: 0 1; }
     #chat { height: 1fr; border: solid green; padding: 0 1; overflow-y: auto; }
     #right { width: 1fr; }
+    #shells { height: auto; max-height: 50%; display: none; border: solid cyan; padding: 0; }
+    #shells.has-items { display: block; }
+    #shells_title { height: 1; color: cyan; padding: 0 1; }
+    #shells Button { width: 1fr; height: 3; margin: 0; }
     #stats { height: 1fr; }
     #tools { height: 1fr; }
     #footer { height: 3; }
@@ -180,6 +184,10 @@ class BotinokTextualApp(App):
         self._tools_dirty = True
         self._footer_dirty = True
         self._last_open_spoiler: Optional[Collapsible] = None
+        # Свёрнутые окна терминала: session_id -> окно «висит» на панели.
+        self.minimized_shells: set = set()
+        self.shells_display: Optional[Vertical] = None
+        self._shells_sig: Optional[str] = None
 
     def _spoiler_title(self, label: str, text: str) -> str:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -263,6 +271,8 @@ class BotinokTextualApp(App):
                 self.chat = Vertical(id="chat")
                 yield self.chat
             with Vertical(id="right"):
+                self.shells_display = Vertical(id="shells")
+                yield self.shells_display
                 self.stats_display = Static("", id="stats")
                 yield self.stats_display
                 self.tools_display = Static("", id="tools")
@@ -326,6 +336,123 @@ class BotinokTextualApp(App):
                 self.chat.scroll_end(animate=False)
         if self._stats_dirty or self._tools_dirty or self._footer_dirty:
             self.update_stats_display()
+        self._update_shells_panel()
+
+    # ------------------------------------------------ встроенный терминал
+
+    def _shell_sessions_minimized(self) -> list:
+        """Живые PTY-сессии, окна которых свёрнуты (для панели на основном экране)."""
+        try:
+            from core.shell_session import ShellSessionRegistry
+            reg = ShellSessionRegistry.instance()
+        except Exception:
+            return []
+        sessions = []
+        for sid in list(self.minimized_shells):
+            s = reg.get(sid)
+            if s is None:
+                self.minimized_shells.discard(sid)
+                continue
+            sessions.append(s)
+        return sessions
+
+    def _update_shells_panel(self) -> None:
+        """Перерисовать панель свёрнутых терминалов (только при изменениях)."""
+        if self.shells_display is None:
+            return
+        sessions = self._shell_sessions_minimized()
+        sig = "|".join(
+            f"{s.session_id}:{s.is_running()}:{s.name}" for s in sessions
+        )
+        if sig == self._shells_sig:
+            return
+        self._shells_sig = sig
+        try:
+            self.shells_display.remove_children()
+        except Exception:
+            pass
+        if not sessions:
+            try:
+                self.shells_display.remove_class("has-items")
+            except Exception:
+                pass
+            return
+        try:
+            self.shells_display.add_class("has-items")
+            self.shells_display.mount(
+                Static("[bold cyan]Терминалы (свёрнуты)[/bold cyan]", id="shells_title"))
+            for s in sessions:
+                state = "▶ выполняется" if s.is_running() else "■ завершён"
+                label = f"{s.name[:26]}  ({state})"
+                self.shells_display.mount(
+                    Button(label, id=f"shell_restore_{s.session_id}", variant="primary"))
+        except Exception:
+            pass
+
+    def minimize_shell_session(self, session) -> None:
+        """Колбэк ShellScreen: окно свёрнуто, сессия остаётся живой."""
+        sid = getattr(session, "session_id", "")
+        if not sid:
+            return
+        self.minimized_shells.add(sid)
+        self._shells_sig = None
+        self._update_shells_panel()
+
+    def forget_shell_session(self, session_id: str) -> None:
+        """Колбэк ShellScreen: окно закрыто и сессия завершена."""
+        self.minimized_shells.discard(session_id)
+        self._shells_sig = None
+        self._update_shells_panel()
+
+    def _minimize_open_shell_screens(self, except_session_id: str = "") -> None:
+        """Свернуть все открытые окна терминала, кроме указанной сессии.
+
+        Держим на экране только одно окно за раз: остальные уходят в панель,
+        а не наслаиваются друг на друга (защита от RecursionError при рендере).
+        """
+        try:
+            screens = list(self.screen_stack)
+        except Exception:
+            return
+        for scr in screens:
+            if type(scr).__name__ != "ShellScreen":
+                continue
+            sid = getattr(getattr(scr, "session", None), "session_id", "")
+            if sid and sid == except_session_id:
+                continue
+            try:
+                scr._minimize()
+            except Exception:
+                pass
+
+    def open_shell_session(self, session) -> None:
+        """Показать окно терминала для сессии (свернув уже открытые окна)."""
+        from core.shell_screen import ShellScreen
+        sid = getattr(session, "session_id", "")
+        self._minimize_open_shell_screens(except_session_id=sid)
+        if sid:
+            self.minimized_shells.discard(sid)
+            self._shells_sig = None
+            self._update_shells_panel()
+        self.push_screen(ShellScreen(session=session))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = getattr(event.button, "id", "") or ""
+        if not bid.startswith("shell_restore_"):
+            return
+        event.stop()
+        sid = bid[len("shell_restore_"):]
+        try:
+            from core.shell_session import ShellSessionRegistry
+            session = ShellSessionRegistry.instance().get(sid)
+        except Exception:
+            session = None
+        if session is None:
+            self.minimized_shells.discard(sid)
+            self._shells_sig = None
+            self._update_shells_panel()
+            return
+        self.open_shell_session(session)
 
     def _render_header(self):
         danger_tag = " | DANGEROUS MODE: ON" if self.dangerous_mode else ""

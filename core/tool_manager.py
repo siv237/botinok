@@ -142,8 +142,8 @@ class ToolManager:
                 "type": "function",
                 "function": {
                     "name": "shell_exec",
-                    "description": "Выполнение shell команд (dangerous mode)",
-                    "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "cwd": {"type": "string"}, "timeout_sec": {"type": "integer"}}, "required": ["command"]}
+                    "description": "Выполнение shell команд в отдельной PTY-сессии (dangerous mode). Сессия не держит агента: читай вывод через action=read/search, шлите ввод через action=send/send_key",
+                    "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "Команда (для action=run)"}, "cwd": {"type": "string"}, "timeout_sec": {"type": "integer"}, "action": {"type": "string", "enum": ["run", "status", "read", "search", "send", "send_key", "wait", "kill", "list"], "description": "Действие над сессией (по умолчанию run)"}, "session_id": {"type": "string", "description": "ID сессии (из ответа action=run)"}, "input": {"type": "string", "description": "Текст ввода для action=send"}, "key": {"type": "string", "description": "Клавиша для action=send_key: enter, down, up, y, n, ctrl-c, ..."}, "pattern": {"type": "string", "description": "Строка/regex для action=search"}, "regex": {"type": "boolean"}, "context": {"type": "integer", "description": "Строк контекста вокруг match для action=search"}, "tail_lines": {"type": "integer", "description": "Сколько строк хвоста вывода вернуть"}, "wait_timeout": {"type": "number", "description": "Таймаут ожидания для action=wait"}, "interactive": {"type": "boolean", "description": "true — открыть встроенный экран терминала"}}, "required": []}
                 }
             },
             "experience": {

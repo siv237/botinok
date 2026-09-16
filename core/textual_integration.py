@@ -366,6 +366,15 @@ def ask_ollama_textual(
     app = BotinokTextualApp(session_path=session_path)
     app.set_model_info(model, dangerous=dangerous_mode)
 
+    # Регистрируем приложение глобально: инструменты (shell_exec) вызываются из
+    # рабочего потока, где ContextVar active_app не наследуется. Без этой
+    # регистрации встроенный экран терминала никогда бы не открылся.
+    try:
+        from core.shell_session import TextualAppRegistry
+        TextualAppRegistry.set_app(app)
+    except Exception:
+        pass
+
     stream_active = threading.Event()
     stream_active.clear()
 

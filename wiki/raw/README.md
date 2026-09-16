@@ -14,6 +14,8 @@
 | `core/textual_app.py` | Textual TUI-приложение | `entities/textual_ui.md` |
 | `core/textual_integration.py` | Поток вызова модели через Textual UI | `entities/textual_ui.md` |
 | `core/textual_history_viewer.py` | Просмотр истории сессии в TUI | `entities/textual_ui.md` |
+| `core/shell_session.py` | PTY-сессия команды (не держит агента), реестры сессий и Textual-приложения | `entities/shell_session.md` |
+| `core/shell_screen.py` | Встроенный терминал в TUI (окно, кнопки «Свернуть/Закрыть») | `entities/shell_screen.md` |
 | `core/openai_compat.py` | Адаптер OpenAI-совместимых бэкендов | `entities/openai_compat.md` |
 | `core/config_wizard.py` | Интерактивный мастер настройки (--wizard) | `concepts/config_priority.md` |
 | `core/image_ascii.py` | ASCII-генерация изображений для консоли | `concepts/vision_multimodal.md` |

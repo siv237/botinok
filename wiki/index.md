@@ -16,6 +16,8 @@
 - [entities/tool_manager.md](entities/tool_manager.md) — `core/tool_manager.py`, реестр и загрузка инструментов
 - [entities/botinok_cli.md](entities/botinok_cli.md) — `botinok.py` / `botinok`, CLI, флаги, режимы
 - [entities/textual_ui.md](entities/textual_ui.md) — Textual TUI (`textual_app.py`, `textual_integration.py`, `textual_history_viewer.py`)
+- [entities/shell_session.md](entities/shell_session.md) — `core/shell_session.py`: PTY-сессия команды и реестры
+- [entities/shell_screen.md](entities/shell_screen.md) — `core/shell_screen.py`: встроенный терминал в TUI (свернуть/закрыть)
 - [entities/session_directory.md](entities/session_directory.md) — структура директории сессии
 - [entities/config_system.md](entities/config_system.md) — система конфигов (config.cfg, BOTINOK_CONFIG)
 
@@ -24,7 +26,7 @@
 |-----------|----------|------------------|
 | file_system | [entities/tools/file-system.md](entities/tools/file-system.md) | FS: навигация, поиск, grep, инспекция; мутации — dangerous |
 | code_editor | [entities/tools/code-editor.md](entities/tools/code-editor.md) | Редактирование файлов (read/write/replace/apply), dangerous |
-| shell_exec | [entities/tools/shell-exec.md](entities/tools/shell-exec.md) | Выполнение shell-команд, dangerous, подтверждение |
+| shell_exec | [entities/tools/shell-exec.md](entities/tools/shell-exec.md) | PTY-сессия команд (run/read/search/send/wait/kill), dangerous, встроенный терминал |
 | web_search | [entities/tools/web-search.md](entities/tools/web-search.md) | Поиск DuckDuckGo через lynx |
 | open_url | [entities/tools/open-url.md](entities/tools/open-url.md) | Извлечение текста страницы через lynx -dump |
 | web_extract | [entities/tools/web-extract.md](entities/tools/web-extract.md) | Структурированное извлечение (links, images, tables) через httpx+selectolax |
@@ -45,6 +47,7 @@
 - [concepts/function_calling.md](concepts/function_calling.md) — механика tool-calls в потоке агента
 - [concepts/dangerous_mode.md](concepts/dangerous_mode.md) — безопасность: dangerous mode и подтверждения
 - [concepts/streaming_tui.md](concepts/streaming_tui.md) — стриминг, TTFT/TPS, VRAM, плавность UI
+- [concepts/embedded_terminal.md](concepts/embedded_terminal.md) — встроенный терминал: PTY-сессии, свернуть/вернуть, общий доступ человека и агента
 - [concepts/skills_system.md](concepts/skills_system.md) — система навыков (personal/project, ClawHub)
 - [concepts/experience_learning.md](concepts/experience_learning.md) — обучение на опыте (positive/negative)
 - [concepts/vision_multimodal.md](concepts/vision_multimodal.md) — мультимодальность: конвертация/ресaйз изображений

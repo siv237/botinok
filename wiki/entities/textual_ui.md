@@ -1,18 +1,19 @@
 ---
 type: entity
 tags: [tui]
-updated: 2026-08-24
-sources: 3
+updated: 2026-09-16
+sources: 4
 status: stable
 ---
 
 # Textual UI
 
-Текстовый интерфейс пользователя на базе библиотеки [Textual](https://textual.textualize.io/). Состоит из трёх модулей в `core/`:
+Текстовый интерфейс пользователя на базе библиотеки [Textual](https://textual.textualize.io/). Состоит из модулей в `core/`:
 
 - `textual_app.py` — класс `BotinokTextualApp` (главное приложение TUI).
 - `textual_integration.py` — функция `ask_ollama_textual(...)`: поток вызова модели через TUI (стрим, tool-calls, markdown-рендеринг, спойлеры).
 - `textual_history_viewer.py` — класс `HistoryViewerApp` + `view_history(session_path)` — просмотр истории сессии.
+- `shell_screen.py` — класс `ShellScreen` (встроенный терминал). → `entities/shell_screen.md`
 
 ## Возможности
 - **Плавный стриминг**: UI ускорен до 10/30 FPS; `stream_static` конвертируется «на месте», спойлеры закрываются по очереди (не мигает).
@@ -27,6 +28,14 @@ status: stable
 - Визуальный паритет со старым Rich Live интерфейсом (заголовок окна, оформление).
 
 - **Экранирование markup при рендере истории/ввода**: `_render_history_entry`, `append_user_message`, `on_input_submitted` и спойлеры thinking теперь прогоняют вставляемый контент через `_rich_escape` (`[`→`\[`, вырез управления). Раньше сырой текст из `context.json` (напр. вывод `shell_exec` с `xterm-256color`) попадал внутрь `[dim]...[/dim]` без экранирования и ронял рендер `MarkupError: Expected markup value` при старте.
+
+## Встроенный терминал
+`BotinokTextualApp` умеет показывать PTY-сессии `shell_exec` прямо в TUI:
+- `open_shell_session(session)` открывает `ShellScreen`; одновременно открыто не более одного окна — остальные автоматически сворачиваются.
+- Панель `#shells` в правой колонке перечисляет свёрнутые терминалы (кнопки `shell_restore_<session_id>`, метка «выполняется/завершён»), обновляется из `_tick_stats`.
+- `minimize_shell_session` / `forget_shell_session` — колбэки экрана.
+
+Подробно: `entities/shell_screen.md`, `entities/shell_session.md`, `concepts/embedded_terminal.md`.
 
 ## Взаимодействие
 Из `botinok.py` поток идёт через `ask_ollama_textual` (TUI-режим) либо `ask_ollama_stream` (Rich). Переключение — флаг `--rich-mode`. → `botinok_cli.md`, `comparisons/rich_vs_textual.md`
