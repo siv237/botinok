@@ -53,6 +53,31 @@ class SessionManager:
                     f"Or remove it: sudo rm -rf {parent}"
                 ) from e
 
+    @staticmethod
+    def _session_marker_mtime(session_path: str) -> float:
+        """«Честное» время последней активности сессии.
+
+        mtime САМОГО КАТАЛОГА использовать нельзя: оно меняется при создании
+        любого файла внутри (например .index/session_memory.idx, который пишет
+        инструмент session_memory — в т.ч. для ЧУЖИХ сессий), но НЕ меняется
+        при дозаписи в уже существующие файлы (context.json, tools.log,
+        session_raw.log). Из-за этого свежесозданная пустая сессия могла
+        оказаться «новее» реально активной и перехватить «Продолжить последнюю».
+
+        Поэтому берём mtime самого значимого файла: context.json обновляется
+        на каждом сообщении (update_context). Фоллбэки — response.md, tools.log,
+        session_raw.log, и только потом mtime каталога.
+        """
+        for fname in ("context.json", "response.md", "tools.log", "session_raw.log"):
+            try:
+                return os.path.getmtime(os.path.join(session_path, fname))
+            except OSError:
+                continue
+        try:
+            return os.path.getmtime(session_path)
+        except OSError:
+            return 0
+
     def list_sessions(self):
         """Возвращает список существующих сессий в base_path (новые сверху)."""
         try:
@@ -62,11 +87,11 @@ class SessionManager:
             for name in os.listdir(self.base_path):
                 p = os.path.join(self.base_path, name)
                 if os.path.isdir(p):
-                    try:
-                        mtime = os.path.getmtime(p)
-                    except Exception:
-                        mtime = 0
-                    items.append({"name": name, "path": p, "mtime": mtime})
+                    items.append({
+                        "name": name,
+                        "path": p,
+                        "mtime": self._session_marker_mtime(p),
+                    })
             items.sort(key=lambda x: x.get("mtime", 0), reverse=True)
             return items
         except Exception:

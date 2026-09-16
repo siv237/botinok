@@ -3,7 +3,9 @@ Textual приложение для Botinok — стриминг в Static, сп
 """
 
 from textual.app import App, ComposeResult
-from textual.widgets import RichLog, Input, Static, Collapsible
+from textual.screen import ModalScreen
+from textual.widgets import RichLog, Input, Static, Collapsible, OptionList
+from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal
 from rich.markdown import Markdown as RichMarkdown
 from rich.panel import Panel as RichPanel
@@ -24,6 +26,96 @@ SPOILER_PREVIEW = 80
 # иначе любой прокрут вверх колесом будет неправильно считаться «я всё ещё внизу»
 # и автопрокрутка вернёт к выводу, мешая чтению.
 SCROLL_BOTTOM_EPS = 1
+
+
+class ConfirmationScreen(ModalScreen):
+    """Модальный экран согласия на опасное действие.
+
+    Заменяет ручной ввод 'y': пользователь выбирает действие из списка
+    (OptionList) или нажимает горячие клавиши y/n/esc.
+    """
+
+    BINDINGS = []  # обрабатываем клавиши вручную через on_key
+
+    def __init__(self, tool_name: str, args_display: str, warn_text: str = "",
+                 on_resolve: Optional[Callable] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.tool_name = tool_name
+        self.args_display = args_display
+        self.warn_text = warn_text
+        self.on_resolve = on_resolve
+        self._reason_mode = False
+        self._body: Optional[Static] = None
+        self._options: Optional[OptionList] = None
+
+    def _esc(self, text: str) -> str:
+        return str(text or "").replace("[", r"\[")
+
+    def compose(self) -> ComposeResult:
+        warn = f"{self._esc(self.warn_text)}\n" if self.warn_text else ""
+        self._body = Static(
+            f"[bold red]⚠️  ПОДТВЕРДИТЕ ОПАСНОЕ ДЕЙСТВИЕ[/bold red]\n"
+            f"[bold yellow]Инструмент:[/bold yellow] {self._esc(self.tool_name)}\n"
+            f"[bold yellow]Аргументы:[/bold yellow] {self._esc(self.args_display)}\n"
+            f"{warn}"
+            f"[dim]y — да · n/esc — нет · ↑↓ — выбор · Enter — подтвердить[/dim]",
+            id="confirm_body")
+        yield self._body
+        self._options = OptionList(
+            Option("✅ Да, выполнить", id="yes"),
+            Option("❌ Нет, отменить", id="no"),
+            Option("✏️  Отменить с причиной", id="no_reason"),
+            id="confirm_options")
+        yield self._options
+
+    def on_mount(self) -> None:
+        if self._options:
+            self._options.focus()
+
+    def _resolve(self, choice: str, reason: str = "") -> None:
+        confirmed = (choice == "yes")
+        final_reason = reason if (choice == "no_reason" and reason) else ""
+        try:
+            if self.on_resolve:
+                self.on_resolve(confirmed, final_reason)
+        finally:
+            self.app.pop_screen()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        opt_id = getattr(event.option, "id", "") or ""
+        if opt_id == "no_reason":
+            # Переходим в режим ввода причины: показываем мини-инпут.
+            self._reason_mode = True
+            if self._body is not None:
+                self._body.update(
+                    self._body.renderable
+                    + "\n[bold cyan]Причина отказа (Enter — отправить, esc — просто отменить):[/bold cyan]")
+            reason_input = Input(placeholder="причина отказа...", id="reason_input")
+            self.mount(reason_input)
+            reason_input.focus()
+        else:
+            self._resolve(opt_id)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if not self._reason_mode:
+            return
+        reason = event.value.strip()
+        self._resolve("no_reason", reason or "Отменено пользователем без объяснения причин.")
+
+    def on_key(self, event) -> None:
+        if self._reason_mode:
+            # В режиме ввода причины esc отменяет без причины, Enter обрабатывается on_input_submitted.
+            if event.key == "escape":
+                self._resolve("no")
+                event.stop()
+            return
+        k = event.key.lower()
+        if k in ("y", "д"):
+            self._resolve("yes")
+            event.stop()
+        elif k in ("n", "escape"):
+            self._resolve("no")
+            event.stop()
 
 
 class BotinokTextualApp(App):
@@ -576,16 +668,14 @@ class BotinokTextualApp(App):
     def show_confirmation_prompt(self, tool_name: str, args_display: str, warn_text: str) -> None:
         self._confirmation_event = threading.Event()
         self._confirmation_result = False
-        msg = (
-            f"\n[bold red]⚠️  ПОДТВЕРДИТЕ ОПАСНОЕ ДЕЙСТВИЕ[/bold red]\n"
-            f"[bold yellow]Инструмент:[/bold yellow] {tool_name}\n"
-            f"[bold yellow]Аргументы:[/bold yellow] {args_display}\n"
-            f"{warn_text}\n"
-            f"[bold cyan]Введите 'y' для подтверждения или 'n' для отмены:[/bold cyan]"
-        )
-        self._add_static(msg)
-        input_widget = self.query_one("#input", Input)
-        input_widget.placeholder = "подтвердите действие (y/n)..."
+        self._confirmation_reason = ""
+        # Модальный экран выбора: да / нет / отменить с причиной.
+        # Экранируем аргументы здесь — Options сами по себе markup не парсят,
+        # а Static парсит, поэтому escape нужен для тела.
+        self.push_screen(ConfirmationScreen(
+            tool_name, args_display, warn_text,
+            on_resolve=self._apply_confirmation,
+        ))
 
     def wait_for_confirmation(self, timeout: float = 300) -> bool:
         if self._confirmation_event:
@@ -596,17 +686,22 @@ class BotinokTextualApp(App):
     def _restore_input_placeholder(self) -> None:
         self._update_queue_placeholder()
 
+    def _apply_confirmation(self, confirmed: bool, reason: str = "") -> None:
+        """Колбэк модального экрана — вызывается из UI-потока."""
+        self._confirmation_result = confirmed
+        self._confirmation_reason = reason
+        self._restore_input_placeholder()
+        self.update_stats_display()
+        if self._confirmation_event:
+            self._confirmation_event.set()
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         user_input = event.value
         event.input.value = ""
         self.current_prompt = user_input
         self._footer_dirty = True
-        if self._confirmation_event and self._confirmation_event.is_set() is False:
-            self._confirmation_result = user_input.strip().lower() in ("y", "yes", "д", "да")
-            self._confirmation_event.set()
-            self._restore_input_placeholder()
-            self.update_stats_display()
-            return
+        # Подтверждения опасных действий теперь идут через модальный экран
+        # ConfirmationScreen — ручной ввод 'y' больше не перехватывается.
         if user_input.startswith("/"):
             if self.on_slash_command:
                 self.on_slash_command(user_input)

@@ -1024,7 +1024,8 @@ def ask_ollama_textual(
                     app._confirmation_event.wait(timeout=300)
                     confirmed = app._confirmation_result
                     if not confirmed:
-                        result = f"ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Причина: пользователь отклонил выполнение."
+                        reason = getattr(app, "_confirmation_reason", "") or "пользователь отклонил выполнение."
+                        result = f"ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Причина: {reason}"
                         artifact_path = ""
                         compact_msg = _compact_tool_message(tool_name, tool_args, result, "")
                         messages.append({
