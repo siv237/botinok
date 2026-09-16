@@ -314,7 +314,11 @@ class SessionIndex:
         parser = SessionParser(self.session_path)
         self.turns = parser.parse_turns()
         self._build_word_index()
-        self._save_index()
+        # Сохраняем индекс только для реальных сессий: создание .index в
+        # пустой/чужой сессии искажало mtime каталога и ломало сортировку
+        # list_sessions() (см. SessionManager._session_marker_mtime).
+        if self.turns:
+            self._save_index()
         self._loaded = True
         return self.turns
     
