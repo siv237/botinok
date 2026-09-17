@@ -33,11 +33,11 @@ status: stable
 - **Экранирование markup при рендере истории/ввода**: `_render_history_entry`, `append_user_message`, `on_input_submitted` и спойлеры thinking теперь прогоняют вставляемый контент через `_rich_escape` (`[`→`\[`, вырез управления). Раньше сырой текст из `context.json` (напр. вывод `shell_exec` с `xterm-256color`) попадал внутрь `[dim]...[/dim]` без экранирования и ронял рендер `MarkupError: Expected markup value` при старте.
 
 ## Панели (нативные виджеты)
-Правая колонка и подвал собраны на нативных виджетах Textual (без Rich-renderables):
+Правая колонка и левый верх собраны на нативных виджетах Textual (без Rich-renderables):
 - `#header` — `Static` с `content-align: center middle` и CSS-классами `dangerous`/`proofreader`.
 - `#stats` («Performance») — контейнер с `border: round yellow` и `border-title`; внутри `Static` со строками статистики и `ProgressBar` (`#ctx_bar`, цвет по заполнению через классы `low/mid/high`).
-- `#tools` («Tools Activity») — список карточек-`Collapsible`: в заголовке время + имя инструмента + статус; все карточки по умолчанию свёрнуты, по клику раскрываются и показывают дерево деталей (запрос, результат, размер). Карточки обновляются инкрементально (без пересоздания), состояние раскрытия сохраняется между обновлениями (`_tools_expanded`, `_tool_widgets`). Апдейт тела идёт строго через `Collapsible.Contents` (не `query_one(Static)` — заголовок `CollapsibleTitle` тоже `Static`).
-- `#footer` («Diagnostic Log») — `Static` с `border: round cyan` и `border-title`.
+- `#tools` («Tools Activity») — список карточек-`Collapsible`: в заголовке время + имя инструмента + статус; все карточки по умолчанию свёрнуты, по клику раскрываются и показывают дерево деталей (запрос, результат, размер). Карточки обновляются инкрементально (без пересоздания), состояние раскрытия сохраняется (`_tools_expanded`, `_tool_widgets`); тело обновляется через `Collapsible.Contents` (заголовок `CollapsibleTitle` тоже `Static`).
+- `#diag` — кликабельный `Collapsible` в левой колонке наверху (вместо строки `Response (Lines: …)`): свёрнут в одну строку `Prompt: <последний вопрос>` с обрезкой по ширине (`cell_truncate`, `…`; пересчёт при `on_resize`). В раскрытом виде — список вопросов сессии карточками: `#diag_list` (`Vertical`) внутри `VerticalScroll` (`max-height: 14`), каждая карточка — `Collapsible` с заголовком `дата · сколько назад` + обрезка вопроса, по клику показывает полный текст. Вопросы подгружаются из истории (`context.json`) и добавляются при отправке; относительное время обновляется раз в 30 с. Блок `Performance` не перекрывает.
 - Финальный ответ и история — виджет `Markdown` (Textual), стрим — `Static`.
 `rich.text.Text` остаётся только как renderable для ANSI-вывода (логотип-баннер, лог терминала); сам пакет `rich` — транзитивная зависимость Textual. → `concepts/terminal_unicode_width.md`
 
