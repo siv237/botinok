@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4] - 2026-09-17
+
+### Удалён старый Rich Live интерфейс
+- Полностью удалён до-Textual движок: `BotVisualizer`, `create_layout`, `ask_ollama_stream` и флаг `--rich-mode`
+- Интерактивный режим — только Textual TUI (`ask_ollama_textual`)
+- Stealth/pipe-режим (`--stealth`, данные из stdin) и корректор (`--proofread`) работают через headless-цикл `ask_ollama_stealth`
+- Убраны связанные мёртвые хелперы и константы (`_trim_tail`, `_tool_stream_has_payload`, `_is_within`, `_ollama_summarize_and_reset_context` в `botinok.py`, `REPEAT_LINE_*`, `HARD_CTX_PCT`, `MAX_TOOL_ROUNDS_PER_TURN` и др.)
+- Удалён старый readchar-ввод (однострочный и многострочный `---`-режим)
+- **Логотип/баннер версии перенесён в Textual**: показывается в начале новой сессии, ASCII-арт автомасштабируется под ширину поля вывода (`core/image_ascii.image_to_fullcolor`)
+- **CLI-промпт перенесён в Textual**: `-p/--prompt` и позиционный аргумент автоматически отправляются как первый запрос
+- **`--debug`** теперь включает `BOTINOK_DEBUG` и в Textual-режиме
+- **`--proofread` работает в Textual**: после хода исполнителя подключается корректор (до 3 раундов правок), замечания показываются в чате
+- **Выбор сессии перенесён на Textual** (`core/session_picker.py`): как раньше, двухшагово — меню из 3 пунктов («продолжить последнюю / выбрать другую / новая»), а список сессий с живым фильтром открывается только в «Выбрать другую»; Esc — отмена/назад
+- **Мастер настройки (`--wizard`) перенесён на Textual** (`core/textual_prompts.py`): без inquirer/rich.prompt
+- **Полностью убраны прямые зависимости от Rich API и inquirer/readchar**: вывод CLI/wizard — plain (`core/cli_io.py`); из `requirements.txt` удалены `rich`, `inquirer`, `readchar` (Rich остаётся транзитивной зависимостью Textual)
+- Удалён устаревший `SCROLLBACK_FEATURE.md` (описывал нереализованную фичу Rich-эпохи)
+- **Правая колонка переведена на нативные виджеты Textual**: `Performance` (`Static` + `ProgressBar`), шапка/подвал (`Static` с CSS `border-title`), финальный ответ и история — виджет `Markdown`. Панель `Tools Activity` — список карточек-`Collapsible` «время + инструмент + статус», все изначально свёрнуты; по клику карточка раскрывается и показывает детали (запрос, результат, размер). Rich-renderables (`Panel`/`Table`/`Progress`/`Group`/`Markdown`/`DataTable`) из кода убраны; `rich.text` остаётся только для ANSI-рендера (логотип в баннере, лог встроенного терминала) и как транзитивная зависимость Textual.
+- **Исправлены «сдвиги панелей» на строках с необычными символами**: причина — расхождение ширины ячейки для эмодзи с variation selector (VS16): Rich/Textual считают их за 2, а часть терминалов (glibc, баг locale/32322) — за 1, из-за чего строка «уезжает» и границы соседних панелей смещаются (Textual #5980, Ghostty #8027). Добавлена нормализация ширины (`core/text_width.py`: снятие VS15/VS16/ZWJ, раскрытие табов) в единой точке вставки текста в чат и обрезка по ширине ячейки.
+
 ## [0.3] - 2026-08-24
 
 ### Новый интерфейс: Textual TUI

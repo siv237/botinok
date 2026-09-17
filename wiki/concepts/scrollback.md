@@ -1,9 +1,9 @@
 ---
 type: concept
 tags: [tui, session]
-updated: 2026-08-23
+updated: 2026-09-17
 sources: 1
-status: draft
+status: superseded
 ---
 
 # Бесконечная прокрутка (Scrollback)
@@ -24,10 +24,10 @@ status: draft
 | `Home`/`End` | начало / конец сессии |
 
 ## Технические детали
-- Новый класс `core/scrollback_buffer.py` (интеграция в `BotVisualizer` через `self.scrollback`), фоновый поток `readchar` для чтения клавиш без блокировки UI.
+- (Историческая запись) предполагался новый класс `core/scrollback_buffer.py` с интеграцией в `BotVisualizer` через `self.scrollback` и фоновым потоком `readchar`. `BotVisualizer` и Rich-движок удалены в 0.4, поэтому запись окончательно устарела.
 
 ## ⚠️ Противоречие
-Файл `core/scrollback_buffer.py` **не найден** в git. Не подтверждено, что фича реализована в коде (возможная альтернатива — Textual `textual_history_viewer.py`). Статус — `draft` до проверки по коду; при подтверждении в `textual_history_viewer.py` обновить страницу и `sources/scrollback_feature.md`.
+Файл `core/scrollback_buffer.py` **не найден** в git, фича не реализована. Актуальная прокрутка истории обеспечивается Textual (`textual_history_viewer.py`). Запись чисто историческая (Rich-эпоха).
 
 ## Связи
-Интерфейс — `entities/textual_ui.md`; структура истории — `entities/session_directory.md`; `readchar` как зависимость — `sources/requirements.md`.
+Интерфейс — `entities/textual_ui.md`; структура истории — `entities/session_directory.md`.

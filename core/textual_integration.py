@@ -2,7 +2,7 @@
 Интеграция Textual App с стримингом Ollama.
 
 Полная замена Rich Live на Textual App с:
-- Tool-calls loop (как в ask_ollama_stream)
+- Tool-calls loop
 - VRAM background prep
 - Context overflow handling
 - Proper UI callbacks (add_tool_activity, append_assistant_chunk, etc.)
@@ -34,6 +34,7 @@ STREAM_TOOL_TEXT_MAX_CHARS = 12000  # не используется, остав�
 HARD_CTX_PCT = 0.90
 MAX_TOOL_ROUNDS_PER_TURN = 80
 MAX_AUTO_RECOVERIES_PER_TURN = 2
+MAX_PROOFREAD_ROUNDS = 3
 MISSING_FINAL_AUTO_CONTINUE_MAX = 2
 REPEAT_LINE_WINDOW = 40
 REPEAT_LINE_MIN_OCCURRENCES = 6
@@ -43,15 +44,6 @@ _TOOL_STREAM_TAG_RE = re.compile(
     r"(?:<\|[^\n\r]*?\|>|</?[^>\n\r]+?>)",
     re.IGNORECASE,
 )
-
-
-def _trim_tail(text: str, max_chars: int) -> str:
-    if not text or max_chars <= 0:
-        return "" if not text else str(text)
-    text = str(text)
-    if len(text) <= max_chars:
-        return text
-    return text[-max_chars:]
 
 
 def _has_audio_message(messages) -> bool:
@@ -349,6 +341,10 @@ def ask_ollama_textual(
     session_path: str,
     num_ctx: int = 8192,
     dangerous_mode: bool = False,
+    version: str = "",
+    initial_prompt: str = "",
+    proofread: bool = False,
+    proofreader_fn=None,
 ) -> List[Dict]:
     sm = SessionManager()
     tm = ToolManager()
@@ -363,7 +359,8 @@ def ask_ollama_textual(
         if identity_content:
             messages.insert(0, {"role": "system", "content": identity_content})
 
-    app = BotinokTextualApp(session_path=session_path)
+    app = BotinokTextualApp(session_path=session_path, version=version,
+                            initial_prompt=initial_prompt)
     app.set_model_info(model, dangerous=dangerous_mode)
 
     # Регистрируем приложение глобально: инструменты (shell_exec) вызываются из
@@ -511,6 +508,7 @@ def ask_ollama_textual(
 
         tool_rounds = 0
         auto_recoveries = 0
+        proof_rounds = 0
         stopped_by_user = False
         turn_prompt = user_text
         http_retries = 0
@@ -966,6 +964,49 @@ def ask_ollama_textual(
                 sm.update_context(session_path, "assistant", full_response, thinking=full_thinking)
                 messages.append({"role": "assistant", "content": full_response})
                 _finalize_turn(full_response, full_thinking)
+
+                # --- РЕЖИМ КОРРЕКТОРА (--proofread) ---
+                if proofread and proofreader_fn and proof_rounds < MAX_PROOFREAD_ROUNDS:
+                    proof_rounds += 1
+                    _update_stats(status="Proofreader is thinking...")
+                    _call_from_thread(app._add_static,
+                                      "[bold magenta]>>> ПРОВЕРКА КОРРЕКТОРОМ...[/bold magenta]")
+                    feedback, verdict_path = "", ""
+                    try:
+                        feedback, verdict_path = proofreader_fn(
+                            current_model, session_path, current_ctx, messages)
+                    except Exception as e:
+                        feedback = f"Ошибка корректора: {e}"
+                        verdict_path = ""
+                    _call_from_thread(app._add_static,
+                                      "[bold magenta]ЗАКЛЮЧЕНИЕ КОРРЕКТОРА:[/bold magenta]")
+                    try:
+                        _call_from_thread(app._add_static, app._rich_escape(feedback or ""))
+                    except Exception:
+                        pass
+                    fb_low = (feedback or "").lower()
+                    exit_keywords = ["замечаний нет", "все верно", "исправлено",
+                                     "проверка завершена", "принято",
+                                     "замечаний не обнаружено", "все в порядке"]
+                    if any(kw in fb_low for kw in exit_keywords):
+                        _call_from_thread(app._add_static,
+                                          "[bold green]Корректор одобрил работу.[/bold green]")
+                        break
+                    turn_prompt = (
+                        "КОРРЕКТОР ОБНАРУЖИЛ ОШИБКИ/НЕДОЧЕТЫ.\n"
+                        + (f"Полный текст замечаний сохранен в файле: {verdict_path}\n\n"
+                           if verdict_path else "")
+                        + f"Краткое резюме:\n{(feedback or '')[:2000]}\n\n"
+                        "Исправь свою работу в соответствии с этими замечаниями."
+                        + (" Обязательно прочитай файл вердикта, если резюме обрезано."
+                           if verdict_path else "")
+                    )
+                    messages.append({"role": "user", "content": turn_prompt})
+                    sm.update_context(session_path, "user", turn_prompt)
+                    full_response = ""
+                    full_thinking = ""
+                    continue
+
                 break
 
             _update_stats(status="Tool-mode parsing...")

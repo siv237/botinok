@@ -133,3 +133,63 @@ PTY-дескрипторов, ограничение буферов вывода
 Созданы `entities/shell_session.md`, `entities/shell_screen.md`,
 `concepts/embedded_terminal.md`; обновлены `entities/tools/shell-exec.md`,
 `entities/textual_ui.md`, index/overview/raw.
+
+## [2026-09-17] ingest | Удалён старый Rich Live движок (0.4)
+Завершена миграция на Textual: из `botinok.py` удалены `BotVisualizer`,
+`create_layout`, `ask_ollama_stream` (~1240 строк), флаг `--rich-mode` и старый
+readchar-ввод (однострочный и многострочный `---`). Вместе с ними убраны мёртвые
+хелперы/константы (`_trim_tail`, `_tool_stream_has_payload`,
+`_estimate_messages_tokens`, `_session_project_dir`, `_resolve_code_editor_target_path`,
+`_is_within`, `_code_editor_args_for_display`, `_ollama_summarize_and_reset_context`,
+`_detect_repetition`, `REPEAT_LINE_*`, `HARD_CTX_PCT`, `MAX_TOOL_ROUNDS_PER_TURN`,
+`MAX_AUTO_RECOVERIES_PER_TURN`, `MISSING_FINAL_AUTO_CONTINUE_MAX`) и лишние импорты.
+Интерактив — только `ask_ollama_textual`; stealth/pipe и корректор — headless
+`ask_ollama_stealth` (`run_proofreader_turn` без `vis`). Тесты зелёные
+(session 12, exec 10, screen, minimize). Обновлены `entities/botinok_cli.md`,
+`entities/textual_ui.md`, `comparisons/rich_vs_textual.md` (superseded),
+`concepts/proofreader.md`, `concepts/config_priority.md`, `concepts/streaming_tui.md`,
+`concepts/scrollback.md` и `sources/scrollback_feature.md` (superseded),
+CHANGELOG (0.4), README, `prompts/README.md`; удалён устаревший план миграции.
+Логотип/баннер версии перенесён в Textual: `BotinokTextualApp._mount_banner`
+показывает ASCII-арт `assets/logo.png` (автоскейл под ширину `#chat`) и строку
+версии в начале новой сессии (пустая история); версия прокидывается через
+`ask_ollama_textual(version=_BOTINOK_VERSION)`. Обновлён `entities/textual_ui.md`.
+Версия поднята до 0.4. Перенесены забытые возможности CLI: стартовый промпт
+(`-p/--prompt`, позиционный) автоотправляется в Textual (`initial_prompt` →
+`_submit_initial_prompt`), `--debug` выставляет `BOTINOK_DEBUG` и в Textual-ветке,
+`--proofread` работает в TUI через `proofreader_fn=run_proofreader_turn`
+(до `MAX_PROOFREAD_ROUNDS=3`, замечания в чате). Обновлены CHANGELOG,
+`entities/botinok_cli.md`, `concepts/proofreader.md`.
+Завершено выпиливание Rich/inquirer/readchar (0.4): выбор сессии — Textual
+`core/session_picker.py`, мастер — `core/textual_prompts.py`, CLI/wizard-вывод —
+plain `core/cli_io.py`. Из `botinok.py`/`config_wizard.py` убраны прямые импорты
+Rich (`Console`/`Markdown`/`Confirm`/`Panel`), из `requirements.txt` — `rich`,
+`inquirer`, `readchar` (Rich — транзитивно через Textual, используется только как
+renderable внутри Textual-модулей). Удалён `SCROLLBACK_FEATURE.md` (нереализованная
+фича Rich-эпохи). Обновлены `sources/requirements.md`, `entities/botinok_cli.md`,
+`entities/textual_ui.md`, `concepts/config_priority.md`, raw-манифест.
+Проверка: `core/textual_prompts`/`session_picker` (select/text/filter) — OK;
+`botinok`/`config_wizard` без Rich-импортов; прежние тесты зелёные.
+Правка UX выбора сессии: восстановлено двухшаговое меню (3 пункта → список
+сессий с фильтром только в «Выбрать другую»), стрелки переключают фокус
+фильтр↔список; проверены результаты latest/new/path/cancel.
+Панели переведены на нативные виджеты Textual (0.4): `Performance` = `Static` +
+`ProgressBar`, `Tools Activity` = `DataTable`, шапка/подвал = `Static` с
+`border-title`, финальный ответ/история = виджет `Markdown`; Rich-renderables
+(`Panel`/`Table`/`Progress`/`Group`/`Markdown`) из кода убраны, `rich.text`
+оставлен только для ANSI (баннер, лог терминала), сам `rich` — транзитивная
+зависимость Textual. Разобран и исправлен «сдвиг панелей» на необычных символах:
+расхождение ширины эмодзи с VS16 (Textual #5980, Ghostty #8027, glibc
+locale/32322), решение — `core/text_width.py` (нормализация в `_add_static`/
+`_rich_escape`, обрезка по ячейкам). Создана
+`concepts/terminal_unicode_width.md`; обновлены `entities/textual_ui.md`,
+CHANGELOG, index, raw-манифест.
+Панель `Tools Activity` переделана по UX: убрана таблица/`DataTable`, теперь список
+карточек-`Collapsible` «время + инструмент + статус», по клику раскрываются детали
+(запрос/результат/размер). Обновление инкрементальное (карточка обновляется, а не
+пересоздаётся), состояние раскрытия сохраняется; `append_tool_result` кладёт превью
+результата в карточку. Шапка сжата до 1 строки.
+Фикс: карточки инструментов «летели развёрнутыми» — причина в том, что
+`CollapsibleTitle` является подклассом `Static`, и апдейт `query_one(Static)`
+перезаписывал заголовок телом; тело теперь обновляется строго через
+`Collapsible.Contents`; все новые карточки гарантированно свёрнуты.

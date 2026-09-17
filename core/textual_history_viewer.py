@@ -6,7 +6,6 @@ Textual History Viewer - просмотр истории с прокруткой
 
 from textual.app import App, ComposeResult
 from textual.widgets import RichLog, Header, Footer
-from rich.text import Text
 import json
 import os
 from datetime import datetime

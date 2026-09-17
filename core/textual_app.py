@@ -4,14 +4,13 @@ Textual приложение для Botinok — стриминг в Static, сп
 
 from textual.app import App, ComposeResult
 from textual.screen import ModalScreen
-from textual.widgets import RichLog, Input, Static, Collapsible, OptionList, Button
+from textual.widgets import (Input, Static, Collapsible, OptionList, Button,
+                             Markdown, ProgressBar)
 from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal
-from rich.markdown import Markdown as RichMarkdown
-from rich.panel import Panel as RichPanel
-from rich.table import Table
-from rich.progress import Progress, BarColumn, TextColumn
-from rich.console import Group
+# rich.text.Text используется только как renderable для ANSI-вывода (логотип,
+# лог терминала) — Rich является внутренним движком Textual. Панели/таблицы/
+# прогресс/разметка переведены на нативные виджеты Textual.
 from rich.text import Text
 from typing import Optional, Callable, List
 import json
@@ -20,6 +19,7 @@ import re
 import time
 import threading
 from datetime import datetime
+from core.text_width import normalize_cells, cell_truncate
 
 SPOILER_PREVIEW = 80
 # Для прилипания «вниз» требуется буквальная позиция в самом низу (допуск 1px),
@@ -123,7 +123,10 @@ class BotinokTextualApp(App):
 
     CSS = """
     Screen { layout: vertical; }
-    #header { height: 3; min-height: 3; max-height: 3; padding: 0; margin: 0; }
+    #header { height: 1; min-height: 1; max-height: 1; padding: 0; margin: 0;
+              content-align: center middle; background: #0055aa; color: white; text-style: bold; }
+    #header.dangerous { background: red; color: white; }
+    #header.proofreader { background: yellow; color: black; }
     #main { height: 1fr; }
     #content { width: 2fr; height: 1fr; padding: 0; }
     #content_title { height: 1; color: green; padding: 0 1; }
@@ -133,24 +136,39 @@ class BotinokTextualApp(App):
     #shells.has-items { display: block; }
     #shells_title { height: 1; color: cyan; padding: 0 1; }
     #shells Button { width: 1fr; height: 3; margin: 0; }
-    #stats { height: 1fr; }
-    #tools { height: 1fr; }
-    #footer { height: 3; }
+    #stats { height: 1fr; border: round yellow; border-title-color: yellow;
+             border-title-style: bold; padding: 0 1; }
+    #stats_rows { height: 1fr; }
+    #ctx_bar { height: 1; }
+    #ctx_bar.low .bar--bar { color: green; }
+    #ctx_bar.mid .bar--bar { color: yellow; }
+    #ctx_bar.high .bar--bar { color: red; }
+    #tools { height: 1fr; border: round cyan; border-title-color: cyan;
+             border-title-style: bold; }
+    #tools_list { height: 1fr; overflow-y: auto; }
+    #tools_list Collapsible { width: 1fr; height: auto; background: transparent;
+                              border: none; padding: 0; }
+    #tools_list CollapsibleTitle { padding: 0; width: 1fr; color: $text; }
+    #footer { height: 3; border: round cyan; border-title-color: cyan; padding: 0 1; }
     Input { height: 3; }
     Collapsible { width: 1fr; height: auto; background: transparent; border: none; padding: 0; }
     CollapsibleTitle { color: $text-muted; padding: 0 1; width: 1fr; }
     """
 
     def __init__(self, session_path: str = "", on_submit: Optional[Callable] = None,
-                 on_slash_command: Optional[Callable] = None, **kwargs):
+                 on_slash_command: Optional[Callable] = None, version: str = "",
+                 initial_prompt: str = "", **kwargs):
         super().__init__(**kwargs)
         self.session_path = session_path
+        self.version = version
+        self.initial_prompt = initial_prompt
         self.on_submit = on_submit
         self.on_slash_command = on_slash_command
         self.chat: Optional[Vertical] = None
         self.stream_static: Optional[Static] = None
-        self.stats_display: Optional[Static] = None
-        self.tools_display: Optional[Static] = None
+        self.stats_rows: Optional[Static] = None
+        self.ctx_bar: Optional[ProgressBar] = None
+        self.tools_list: Optional[Vertical] = None
         self.header_display: Optional[Static] = None
         self.footer_display: Optional[Static] = None
         self.content_container: Optional[Vertical] = None
@@ -167,6 +185,10 @@ class BotinokTextualApp(App):
             "last_req_ctx": 0, "last_req_ctx_max": 8192,
         }
         self.active_tools: List[dict] = []
+        self._tools_expanded: set = set()  # ключи раскрытых узлов Tools Activity
+        self._tool_id_to_key: dict = {}
+        self._tool_widgets: dict = {}
+        self._tools_placeholder: Optional[Static] = None
         self._start_time = time.time()
         self._last_chunk_time = 0.0
         self._stream_content = ""
@@ -255,6 +277,10 @@ class BotinokTextualApp(App):
             self.chat.scroll_end(animate=animate)
 
     def _add_static(self, content, markup=True):
+        # Единая точка вставки в чат: нормализуем ширину для строк, чтобы
+        # вариационные селекторы/ZWJ/табы не сдвигали границы панелей.
+        if isinstance(content, str):
+            content = normalize_cells(content)
         s = Static(content, markup=markup)
         self.chat.mount(s)
         self._keep_focus()
@@ -273,16 +299,27 @@ class BotinokTextualApp(App):
             with Vertical(id="right"):
                 self.shells_display = Vertical(id="shells")
                 yield self.shells_display
-                self.stats_display = Static("", id="stats")
-                yield self.stats_display
-                self.tools_display = Static("", id="tools")
-                yield self.tools_display
+                with Vertical(id="stats"):
+                    self.stats_rows = Static("", id="stats_rows")
+                    yield self.stats_rows
+                    self.ctx_bar = ProgressBar(total=100, show_eta=False, id="ctx_bar")
+                    yield self.ctx_bar
+                with Vertical(id="tools"):
+                    self.tools_list = Vertical(id="tools_list")
+                    yield self.tools_list
         self.footer_display = Static("", id="footer")
         yield self.footer_display
         yield Input(placeholder="Введите ваш вопрос (exit = выход)...", id="input")
 
     def on_mount(self) -> None:
         self.load_history()
+        # Заголовки панелей и колонки таблицы инструментов — нативные средства Textual.
+        try:
+            self.query_one("#stats").border_title = "Performance"
+            self.query_one("#tools").border_title = "Tools Activity"
+            self.footer_display.border_title = "Diagnostic Log"
+        except Exception:
+            pass
         try:
             self.set_focus(self.query_one("#input", Input))
         except Exception:
@@ -295,6 +332,19 @@ class BotinokTextualApp(App):
         self._tools_dirty = True
         self._footer_dirty = True
         self.update_stats_display()
+        # Стартовый промпт из CLI (--prompt / позиционный аргумент): отправляем
+        # автоматически, когда приложение готово.
+        if self.initial_prompt:
+            self.call_after_refresh(self._submit_initial_prompt)
+
+    def _submit_initial_prompt(self) -> None:
+        prompt = (self.initial_prompt or "").strip()
+        self.initial_prompt = ""
+        if not prompt or not self.on_submit:
+            return
+        self.current_prompt = prompt
+        self._footer_dirty = True
+        self._submit_text(prompt)
 
     def set_model_info(self, model: str, dangerous: bool = False, proofreader: bool = False):
         self.model_name = model
@@ -454,36 +504,35 @@ class BotinokTextualApp(App):
             return
         self.open_shell_session(session)
 
-    def _render_header(self):
+    def _render_header_text(self) -> str:
         danger_tag = " | DANGEROUS MODE: ON" if self.dangerous_mode else ""
         agent_type = "PROOFREADER AGENT" if self.is_proofreader else "BOTINOK AGENT"
-        BLUE_BG = "#0055aa"
-        if self.dangerous_mode:
-            header_style = "bold white on red"
-            panel_style = "red"
-        elif self.is_proofreader:
-            header_style = "bold black on yellow"
-            panel_style = "yellow"
-        else:
-            header_style = f"bold white on {BLUE_BG}"
-            panel_style = BLUE_BG
-        vram = self.stats_data.get("vram", "...")
+        vram = normalize_cells(self.stats_data.get("vram", "..."))
         ctx = self.stats_data.get("session_ctx_max", 8192)
-        return RichPanel(
-            Text(f"{agent_type}{danger_tag} | Model: {self.model_name} | Context: {ctx} | {vram}",
-                 justify="center", style=header_style),
-            style=panel_style,
-        )
+        model = normalize_cells(self.model_name)
+        return f"{agent_type}{danger_tag} | Model: {model} | Context: {ctx} | {vram}"
 
-    def _render_footer(self) -> RichPanel:
-        return RichPanel(
-            Text(f"Prompt: {self.current_prompt}", overflow="ellipsis", style="dim"),
-            title="[bold cyan]Diagnostic Log[/bold cyan]", border_style="cyan",
-        )
+    def _update_header(self) -> None:
+        if not self.header_display:
+            return
+        self.header_display.update(self._render_header_text())
+        # Цвет шапки — CSS-классы (см. CSS).
+        try:
+            self.header_display.set_class(self.dangerous_mode, "dangerous")
+            self.header_display.set_class(self.is_proofreader, "proofreader")
+        except Exception:
+            pass
 
-    def _render_stats(self) -> RichPanel:
+    def _update_footer(self) -> None:
+        if not self.footer_display:
+            return
+        prompt = normalize_cells(self.current_prompt)
+        self.footer_display.update(f"[dim]Prompt: {cell_truncate(prompt, 400)}[/dim]")
+
+    def _update_stats_panel(self) -> None:
+        if not self.stats_rows:
+            return
         s = self.stats_data
-        table = Table(show_header=False, box=None, padding=(0, 1))
         active_statuses = [
             "Generating...", "Waiting for tool call...", "Calling Tools...",
             "Resuming generation...", "Checking Memory...", "Unloading Models...",
@@ -492,68 +541,180 @@ class BotinokTextualApp(App):
         activity = ""
         if s["status"] in active_statuses or "Tool:" in s["status"]:
             sp = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-            activity = f"[bold magenta]{sp[int(time.time()*5)%len(sp)]}[/bold magenta]"
-        table.add_row("[cyan]Status:[/cyan]", f"[bold]{s['status']}[/bold] {activity}")
-        table.add_row("[cyan]Elapsed:[/cyan]", f"{s['elapsed']:.1f}s")
-        table.add_row("[cyan]No chunks:[/cyan]", f"{s['no_chunks']:.1f}s")
-        table.add_row("[cyan]TTFT:[/cyan]", f"[bold yellow]{s['ttft']}[/bold yellow]")
-        table.add_row("[cyan]Thinking:[/cyan]", f"[bold yellow]{s['thinking_tokens']}[/bold yellow]")
-        table.add_row("[cyan]Response:[/cyan]", f"[bold green]{s['response_tokens']}[/bold green]")
-        table.add_row("[cyan]Stream Tool:[/cyan]", f"[bold magenta]{s['stream_tool_tokens']}[/bold magenta]")
-        table.add_row("[cyan]Final Tool:[/cyan]", f"[bold magenta]{s['final_tool_tokens']}[/bold magenta]")
-        table.add_row("[cyan]TPS:[/cyan]", f"[bold green]{s['tps']:.2f}[/bold green]")
-        table.add_row("[cyan]VRAM:[/cyan]", f"[bold yellow]{s['vram']}[/bold yellow]")
-        table.add_row("", "")
+            activity = f" [bold magenta]{sp[int(time.time()*5) % len(sp)]}[/bold magenta]"
+
+        L = 14  # ширина колонки подписей (моноширинный шрифт)
+        def row(label: str, value: str) -> str:
+            return f"[cyan]{label:<{L}}[/cyan]{value}"
+        lines = [
+            row("Status:", f"[bold]{s['status']}[/bold]{activity}"),
+            row("Elapsed:", f"{s['elapsed']:.1f}s"),
+            row("No chunks:", f"{s['no_chunks']:.1f}s"),
+            row("TTFT:", f"[bold yellow]{s['ttft']}[/bold yellow]"),
+            row("Thinking:", f"[bold yellow]{s['thinking_tokens']}[/bold yellow]"),
+            row("Response:", f"[bold green]{s['response_tokens']}[/bold green]"),
+            row("Stream Tool:", f"[bold magenta]{s['stream_tool_tokens']}[/bold magenta]"),
+            row("Final Tool:", f"[bold magenta]{s['final_tool_tokens']}[/bold magenta]"),
+            row("TPS:", f"[bold green]{s['tps']:.2f}[/bold green]"),
+            row("VRAM:", f"[bold yellow]{normalize_cells(s['vram'])}[/bold yellow]"),
+            "",
+        ]
         ctx_max = s.get("session_ctx_max", 8192)
         ctx_used = s.get("session_ctx", 0)
         ctx_pct = (ctx_used / ctx_max * 100) if ctx_max else 0
         cs = "green" if ctx_pct < 70 else "yellow" if ctx_pct < 90 else "red"
-        table.add_row("[cyan]SessionCtx:[/cyan]", f"[{cs}]{ctx_used}/{ctx_max} ({ctx_pct:.1f}%)[/{cs}]")
+        lines.append(row("SessionCtx:", f"[{cs}]{ctx_used}/{ctx_max} ({ctx_pct:.1f}%)[/{cs}]"))
         lr_ctx = s.get("last_req_ctx", 0)
         lr_pct = (lr_ctx / ctx_max * 100) if ctx_max else 0
         lr_cs = "green" if lr_pct < 70 else "yellow" if lr_pct < 90 else "red"
-        table.add_row("[cyan]LastReqCtx:[/cyan]", f"[{lr_cs}]{lr_ctx}/{ctx_max} ({lr_pct:.1f}%)[/{lr_cs}]")
-        table.add_row("", "")
-        table.add_row("[bold cyan]Context Window Fill:[/bold cyan]", "")
-        progress = Progress(BarColumn(bar_width=None, complete_style=cs, finished_style=cs),
-                            TextColumn("{task.percentage:>5.1f}%"), expand=True)
-        progress.add_task("ctx", total=100.0, completed=float(ctx_pct))
-        return RichPanel(Group(table, progress), title="[bold yellow]Performance[/bold yellow]",
-                         border_style="yellow", expand=True)
+        lines.append(row("LastReqCtx:", f"[{lr_cs}]{lr_ctx}/{ctx_max} ({lr_pct:.1f}%)[/{lr_cs}]"))
+        lines.append("")
+        lines.append("[bold cyan]Context Window Fill:[/bold cyan]")
+        self.stats_rows.update("\n".join(lines))
+        if self.ctx_bar:
+            try:
+                self.ctx_bar.progress = float(ctx_pct)
+                self.ctx_bar.set_class(ctx_pct < 70, "low")
+                self.ctx_bar.set_class(70 <= ctx_pct < 90, "mid")
+                self.ctx_bar.set_class(ctx_pct >= 90, "high")
+            except Exception:
+                pass
 
-    def _render_tools(self) -> RichPanel:
+    @staticmethod
+    def _tool_key(t: dict) -> str:
+        return f"{t.get('start_time', 0)}:{t.get('name', '')}"
+
+    @staticmethod
+    def _tool_id(key: str) -> str:
+        return "tool_" + re.sub(r"[^0-9a-zA-Z_-]", "_", key)
+
+    def _tool_details(self, t: dict) -> str:
+        ss = "yellow" if t["status"] == "running" else "green" if t["status"] == "completed" else "red"
+        sz = f"{t['size_kb']:.2f} KB" if t.get("size_kb", 0) > 0 else "..."
+        started = ""
+        try:
+            started = datetime.fromtimestamp(float(t.get("start_time", 0))).strftime("%H:%M:%S")
+        except Exception:
+            started = "--:--:--"
+        lines = [
+            f"[bold cyan]Инструмент:[/bold cyan] {normalize_cells(t.get('name', ''))}",
+            f"[bold cyan]Время:[/bold cyan] {started}  [bold cyan]Статус:[/bold cyan] [{ss}]{t['status']}[/{ss}]  [bold cyan]Размер:[/bold cyan] {sz}",
+        ]
+        query = normalize_cells(t.get("query", ""))
+        if query:
+            lines += ["", "[bold cyan]Запрос:[/bold cyan]", query]
+        result = normalize_cells(t.get("result", ""))
+        if result:
+            lines += ["", "[bold cyan]Результат:[/bold cyan]", result]
+        return "\n".join(lines)
+
+    def _tools_signature(self) -> str:
+        return "|".join(
+            f"{self._tool_key(t)}:{t['status']}:{round(t.get('size_kb', 0), 3)}:{len(t.get('result', ''))}"
+            for t in self.active_tools
+        )
+
+    def _update_tools_panel(self) -> None:
+        if not self.tools_list:
+            return
         if not self.active_tools:
-            return RichPanel(Text("No active tools", style="dim"),
-                             title="[bold cyan]Tools Activity[/bold cyan]", border_style="cyan")
-        table = Table(show_header=True, header_style="bold yellow", box=None, padding=(0, 1), expand=True)
-        table.add_column("Tool", style="cyan")
-        table.add_column("Query", style="white", overflow="ellipsis")
-        table.add_column("Status", style="yellow")
-        table.add_column("Size", style="green")
-        for t in reversed(self.active_tools):
+            if self._tools_placeholder is None:
+                self._tools_placeholder = Static("[dim]No active tools[/dim]")
+                try:
+                    self.tools_list.mount(self._tools_placeholder)
+                except Exception:
+                    self._tools_placeholder = None
+            return
+        if self._tools_placeholder is not None:
+            try:
+                self._tools_placeholder.remove()
+            except Exception:
+                pass
+            self._tools_placeholder = None
+
+        current = {self._tool_key(t): t for t in self.active_tools}
+        # Удаляем карточки завершённых/ушедших инструментов.
+        for key in list(self._tool_widgets):
+            if key not in current:
+                w = self._tool_widgets.pop(key)
+                self._tool_id_to_key.pop(self._tool_id(key), None)
+                try:
+                    w.remove()
+                except Exception:
+                    pass
+        # Создаём новые и обновляем существующие карточки (без пересоздания —
+        # иначе шторм remove/mount и зависание обработки сообщений).
+        for t in self.active_tools:  # старые -> новые; новые вставляем наверх
+            key = self._tool_key(t)
+            tid = self._tool_id(key)
+            self._tool_id_to_key[tid] = key
+            started = ""
+            try:
+                started = datetime.fromtimestamp(float(t.get("start_time", 0))).strftime("%H:%M:%S")
+            except Exception:
+                started = "--:--:--"
             ss = "yellow" if t["status"] == "running" else "green" if t["status"] == "completed" else "red"
-            sz = f"{t['size_kb']:.2f} KB" if t['size_kb'] > 0 else "..."
-            q = t['query'][:20] + "..." if len(t['query']) > 20 else t['query']
-            table.add_row(t["name"], q, f"[{ss}]{t['status']}[/{ss}]", sz)
-        return RichPanel(table, title="[bold cyan]Tools Activity[/bold cyan]", border_style="cyan")
+            title = (f"[dim]{started}[/dim]  [cyan]{normalize_cells(t.get('name', ''))}[/cyan]  "
+                     f"[{ss}]{t['status']}[/{ss}]")
+            body = self._tool_details(t)
+            widget = self._tool_widgets.get(key)
+            if widget is None:
+                # Новые инструменты ВСЕГДА свёрнуты.
+                self._tools_expanded.discard(key)
+                widget = Collapsible(Static(body), title=title,
+                                     collapsed=True, id=tid)
+                self._tool_widgets[key] = widget
+                try:
+                    self.tools_list.mount(widget, before=0)
+                    widget.collapsed = True
+                except Exception:
+                    self._tool_widgets.pop(key, None)
+                    continue
+            else:
+                try:
+                    widget.title = title
+                except Exception:
+                    pass
+                try:
+                    # ВАЖНО: CollapsibleTitle — тоже Static, поэтому ищем тело
+                    # строго внутри Contents, иначе апдейт перезапишет заголовок.
+                    cont = widget.query_one(Collapsible.Contents)
+                    cont.query_one(Static).update(body)
+                except Exception:
+                    pass
+
+    def on_collapsible_toggled(self, event: Collapsible.Toggled) -> None:
+        # Запоминаем, какие узлы инструментов раскрыты, чтобы не схлопывать их
+        # при перерисовке панели (обновления статуса/размера).
+        try:
+            cid = event.collapsible.id or ""
+            key = self._tool_id_to_key.get(cid)
+            if key is None:
+                return
+            if event.collapsible.collapsed:
+                self._tools_expanded.discard(key)
+            else:
+                self._tools_expanded.add(key)
+        except Exception:
+            pass
 
     def update_stats_display(self) -> None:
         if self.header_display:
-            self.header_display.update(self._render_header())
+            self._update_header()
         if self.content_title and self.content_container and self.chat and self._stats_dirty:
             try:
                 h = self.content_container.size.height if self.content_container else 20
                 self.content_title.update(f"Response (Lines: ~{h})")
             except Exception:
                 self.content_title.update("Response")
-        if self.stats_display and self._stats_dirty:
-            self.stats_display.update(self._render_stats())
+        if self._stats_dirty:
+            self._update_stats_panel()
             self._stats_dirty = False
-        if self.tools_display and self._tools_dirty:
-            self.tools_display.update(self._render_tools())
+        if self._tools_dirty:
+            self._update_tools_panel()
             self._tools_dirty = False
         if self.footer_display and self._footer_dirty:
-            self.footer_display.update(self._render_footer())
+            self._update_footer()
             self._footer_dirty = False
 
     _GGUF_TAG_RE = re.compile(r"(?:<\|[^\n\r]*?\|>|</?[^>\n\r]+?>)", re.IGNORECASE)
@@ -562,28 +723,59 @@ class BotinokTextualApp(App):
                     "curl", "skills", "experience", "journal", "session_memory"}
 
     def _rich_escape(self, text: str) -> str:
-        text = text.replace("[", r"\[")
-        # ASCII control chars кроме \n \r \t
-        if isinstance(text, str):
-            text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
-            # C1 control chars (0x80-0x9F) — мусор от GGUF моделей
-            text = re.sub(r'[\x80-\x9f]', '', text)
-        return text
+        # Нормализуем ширину (табы, VS15/VS16, ZWJ, контролы), чтобы строки с
+        # эмодзи/спецсимволами не «уезжали» на 1..N ячеек и не сдвигали панели.
+        text = normalize_cells(text)
+        return text.replace("[", r"\[")
 
     def load_history(self) -> None:
-        if not self.session_path:
-            return
-        context_path = os.path.join(self.session_path, "context.json")
-        if not os.path.exists(context_path):
-            return
-        try:
-            with open(context_path, "r", encoding="utf-8", errors="ignore") as f:
-                context = json.load(f)
-            for entry in context.get("history", []):
+        history = []
+        context_path = os.path.join(self.session_path, "context.json") if self.session_path else ""
+        if context_path and os.path.exists(context_path):
+            try:
+                with open(context_path, "r", encoding="utf-8", errors="ignore") as f:
+                    context = json.load(f)
+                history = context.get("history", []) or []
+            except Exception as e:
+                self._add_static(f"[red]Ошибка загрузки истории: {e}[/red]")
+        if history:
+            for entry in history:
                 self._render_history_entry(entry)
             self.chat.scroll_end()
-        except Exception as e:
-            self._add_static(f"[red]Ошибка загрузки истории: {e}[/red]")
+        else:
+            # Новая сессия: показываем баннер с логотипом (после раскладки,
+            # чтобы знать ширину поля вывода и автомасштабировать арт).
+            self.call_after_refresh(self._mount_banner)
+
+    def _mount_banner(self) -> None:
+        """Логотип + версия в начале новой сессии, с автоскейлом под ширину чата."""
+        if self.chat is None:
+            return
+        art = None
+        try:
+            from core.image_ascii import image_to_fullcolor
+            logo_path = os.path.join(os.path.dirname(__file__), "..", "assets", "logo.png")
+            if os.path.exists(logo_path):
+                # Ширина поля вывода в символах; каждый пиксель арта = 2 символа.
+                field_width = 0
+                try:
+                    field_width = self.chat.size.width or self.size.width or 0
+                except Exception:
+                    field_width = 0
+                logo_width = max(16, min(80, (field_width - 6) // 2)) if field_width else 40
+                text, _ = image_to_fullcolor(logo_path, logo_width)
+                art = Text.from_ansi(text)
+        except Exception:
+            art = None
+        try:
+            if art is not None:
+                self.chat.mount(Static(art, markup=False))
+            ver = f"BOTINOK AGENT — Version {self.version}" if self.version else "BOTINOK AGENT"
+            self.chat.mount(Static(f"[bold yellow]{ver}[/bold yellow]"))
+            self.chat.mount(Static(""))
+            self.chat.scroll_end(animate=False)
+        except Exception:
+            pass
 
     def _render_history_entry(self, entry: dict) -> None:
         role = entry.get("role", "")
@@ -607,7 +799,10 @@ class BotinokTextualApp(App):
             if thinking:
                 self._mount_spoiler(self._spoiler_title("Thinking", thinking), Static(self._rich_escape(thinking)), collapsed=True)
             if content:
-                self._add_static(RichMarkdown(content))
+                try:
+                    self.chat.mount(Markdown(normalize_cells(str(content))))
+                except Exception:
+                    self._add_static(self._rich_escape(str(content)))
                 self._add_static("")
             if tool_calls:
                 for tc in tool_calls:
@@ -712,9 +907,15 @@ class BotinokTextualApp(App):
         # сырой многострочный текст мышления не оставался мусором в общем потоке.
         if self.stream_static:
             if final_content:
+                mounted_md = False
                 try:
-                    self.stream_static.update(RichMarkdown(final_content))
+                    md = Markdown(normalize_cells(str(final_content)))
+                    self.chat.mount(md, before=self.stream_static)
+                    self.stream_static.remove()
+                    mounted_md = True
                 except Exception:
+                    mounted_md = False
+                if not mounted_md:
                     self.stream_static.update(self._rich_escape(final_content))
             else:
                 self.stream_static.update("")
@@ -736,6 +937,14 @@ class BotinokTextualApp(App):
 
     def append_tool_result(self, tool_name: str, result: str) -> None:
         self._tool_items.append(f"  └ ✔ {tool_name}")
+        # Сохраняем превью результата в карточку инструмента (раскрывается по клику).
+        preview = normalize_cells(str(result))[:4000]
+        for t in reversed(self.active_tools):
+            if t["name"] == tool_name:
+                t["result"] = preview
+                break
+        self._tools_dirty = True
+        self.update_stats_display()
 
     def update_stats(self, status: str, elapsed: float, no_chunks: float, ttft,
                      thinking_tokens: int, response_tokens: int, stream_tool_tokens: int,
@@ -785,7 +994,7 @@ class BotinokTextualApp(App):
 
     def append_log(self, text: str) -> None:
         if self.chat:
-            self._add_static(text)
+            self._add_static(self._rich_escape(text))
             self.chat.scroll_end(animate=False)
 
     def clear_log(self) -> None:
@@ -838,9 +1047,15 @@ class BotinokTextualApp(App):
             self._add_static(f"[dim]⏸ +{len(self._queued_inputs)}: {self._rich_escape(user_input)}[/dim]")
             self.chat.scroll_end(animate=False)
         elif self.on_submit:
-            self._start_time = time.time()
-            self._add_static(f"[dim]━━━ {datetime.now().strftime('%H:%M:%S')} ━━━[/dim]")
-            self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(user_input)}")
-            self._add_static("")
-            self.on_submit(user_input)
+            self._submit_text(user_input)
         self.update_stats_display()
+
+    def _submit_text(self, user_input: str) -> None:
+        """Отправить реплику пользователя в агент (общий путь для ввода и CLI-промпта)."""
+        if not self.on_submit:
+            return
+        self._start_time = time.time()
+        self._add_static(f"[dim]━━━ {datetime.now().strftime('%H:%M:%S')} ━━━[/dim]")
+        self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(user_input)}")
+        self._add_static("")
+        self.on_submit(user_input)

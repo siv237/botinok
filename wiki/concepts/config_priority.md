@@ -18,11 +18,10 @@ status: stable
 Выбранный путь/источник доступны в `SessionManager` (`config_path`, `config_source`). → `entities/session_manager.md`
 
 ## Мастер настройки (--wizard)
-`core/config_wizard.py` (класс `ConfigWizard`) — интерактивный мастер быстрой настройки базового URL Ollama, моделей и **контекста по умолчанию**. Для OpenAI-совместимого бэкенда мастер получает максимальный контекст модели от провайдера и предлагает его (рекомендуемый) или меньшие значения вместо фиксированной лесенки.
+`core/config_wizard.py` (класс `ConfigWizard`) — интерактивный мастер быстрой настройки базового URL Ollama, моделей и **контекста по умолчанию**. Для OpenAI-совместимого бэкенда мастер получает максимальный контекст модели от провайдера и предлагает его (рекомендуемый) или меньшие значения вместо фиксированной лесенки. Диалоги — Textual (`core/textual_prompts.py`: `textual_select` / `textual_prompt` / `textual_confirm`), вывод — plain (`core/cli_io.py`).
 - Работает даже когда Ollama за nginx (`basedir` через прокси).
-- `--wizard` без обязательного rich-режима.
-- Оптимизация работы по SSL с Ollama (`verify_ssl`).
-- `--rich-mode` опционален (Textual по умолчанию). → `entities/textual_ui.md`
+- `--wizard` запускается отдельно, без интерактивного UI.
+- Оптимизация работы по SSL с Ollama (`verify_ssl`). → `entities/textual_ui.md`
 
 ## Связи
 Содержимое файла — `sources/config_cfg.md`; настройки Ollama — `entities/ollama_backend.md`.

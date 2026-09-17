@@ -100,7 +100,7 @@
 ### auto_continue.txt
 **Когда используется:** После очистки контекста для продолжения работы.
 
-**Вызывается в:** `ask_ollama_stream()` - при max_tool_rounds, repetition_detected, hard_ctx_threshold
+**Вызывается в:** `ask_ollama_textual()` - при max_tool_rounds, repetition_detected, hard_ctx_threshold
 
 **Переменные:**
 - `{{LAST_USER_PROMPT}}` - последний запрос пользователя
@@ -114,7 +114,7 @@
 ### auto_continue_final.txt
 **Когда используется:** Когда модель сгенерировала thinking но не дала финальный ответ (missing_final_response).
 
-**Вызывается в:** `ask_ollama_stream()`
+**Вызывается в:** `ask_ollama_textual()`
 
 **Переменные:**
 - `{{LAST_USER_PROMPT}}` - последний запрос пользователя

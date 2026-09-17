@@ -1,12 +1,9 @@
 import requests
 import os
-import inquirer
-from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
-from core.session_manager import SessionManager
 
-console = Console()
+from core.session_manager import SessionManager
+from core.cli_io import out
+from core.textual_prompts import textual_confirm, textual_prompt, textual_select
 
 BACKEND_OLLAMA = "ollama"
 BACKEND_OPENAI = "openai"
@@ -166,21 +163,28 @@ class ConfigWizard:
     def _configure_ollama(self):
         """Настройка подключения к Ollama. Возвращает список имён моделей или None."""
         current_url = self.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
-        console.print(f"\n[bold]1. Проверка Ollama API[/bold]")
+        out("\n1. Проверка Ollama API")
 
         url = current_url
         models = []
         while True:
             success, models = self.check_ollama(url)
             if success:
-                console.print(f"[green]✓ Подключение к Ollama установлено: {url}[/green]")
-                console.print("[yellow]⚠ SSL верификация отключена (небезопасно для продакшена)[/yellow]")
-                if Confirm.ask("Использовать этот адрес сервера?", default=True):
+                out(f"✓ Подключение к Ollama установлено: {url}")
+                out("⚠ SSL верификация отключена (небезопасно для продакшена)")
+                use = textual_confirm("Использовать этот адрес сервера?", default=True)
+                if use is None:
+                    return None
+                if use:
                     break
             else:
-                console.print(f"[red]✗ Не удалось подключиться к Ollama по адресу: {url}[/red]")
+                out(f"✗ Не удалось подключиться к Ollama по адресу: {url}")
 
-            url = Prompt.ask("Введите URL Ollama (например, http://localhost:11434)", default=url)
+            new_url = textual_prompt(
+                "Введите URL Ollama (например, http://localhost:11434)", default=url)
+            if new_url is None:
+                return None
+            url = new_url
 
         self.config.set('Ollama', 'BaseUrl', url)
         return [{'id': m['name'], 'context': self._model_context(m)} for m in models]
@@ -193,21 +197,34 @@ class ConfigWizard:
         принимается только если список удалось получить. Возвращает список
         моделей вида list[dict]: {'id', 'context'}.
         """
-        console.print(f"\n[bold]1. Настройка OpenAI-совместимого API[/bold]")
+        out("\n1. Настройка OpenAI-совместимого API")
 
         current_url = self.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
         current_key = self.config.get('Ollama', 'ApiKey', fallback='')
 
         # 1. Сначала адрес.
-        url = Prompt.ask("Введите BaseUrl (например, http://localhost:8080)", default=current_url).strip().rstrip('/')
+        url = textual_prompt("Введите BaseUrl (например, http://localhost:8080)",
+                             default=current_url)
+        if url is None:
+            return None
+        url = url.strip().rstrip('/')
         if not url:
             url = current_url
 
         # 2. Потом API-ключ (пустая строка = пропустить).
-        if current_key and not Confirm.ask("Изменить API-ключ (Bearer токен)?", default=False):
+        if current_key:
+            change_key = textual_confirm("Изменить API-ключ (Bearer токен)?", default=False)
+            if change_key is None:
+                return None
+        else:
+            change_key = True
+        if not change_key:
             api_key = current_key
         else:
-            api_key = Prompt.ask("API-ключ (рекомендуется; пусто — пропустить)", default="").strip()
+            api_key = textual_prompt("API-ключ (рекомендуется; пусто — пропустить)", default="")
+            if api_key is None:
+                return None
+            api_key = api_key.strip()
         if api_key:
             self.config.set('Ollama', 'ApiKey', api_key)
         elif self.config.has_option('Ollama', 'ApiKey'):
@@ -218,14 +235,21 @@ class ConfigWizard:
         while True:
             success, models = self.check_openai(url, api_key)
             if success:
-                console.print(f"[green]✓ Подключение установлено{hint}: {url}[/green]")
-                console.print(f"[green]  Найдено моделей: {len(models)}[/green]")
-                if Confirm.ask("Использовать этот адрес сервера?", default=True):
+                out(f"✓ Подключение установлено{hint}: {url}")
+                out(f"  Найдено моделей: {len(models)}")
+                use = textual_confirm("Использовать этот адрес сервера?", default=True)
+                if use is None:
+                    return None
+                if use:
                     break
             else:
-                console.print(f"[red]✗ Не удалось получить список моделей{hint}: {url}[/red]")
+                out(f"✗ Не удалось получить список моделей{hint}: {url}")
 
-            url = Prompt.ask("Введите BaseUrl (например, http://localhost:8080)", default=url).strip().rstrip('/')
+            new_url = textual_prompt("Введите BaseUrl (например, http://localhost:8080)",
+                                     default=url)
+            if new_url is None:
+                return None
+            url = new_url.strip().rstrip('/')
             if not url:
                 url = current_url
 
@@ -233,33 +257,28 @@ class ConfigWizard:
         return models
 
     def run(self):
-        console.print(Panel("[bold cyan]Мастер настройки BOTINOK AGENT[/bold cyan]", border_style="cyan"))
+        out("Мастер настройки BOTINOK AGENT")
 
-        if not Confirm.ask("Хотите запустить мастер настройки сейчас?", default=True):
-            console.print("[yellow]Настройка пропущена.[/yellow]")
+        start = textual_confirm("Хотите запустить мастер настройки сейчас?", default=True)
+        if not start:
+            out("Настройка пропущена.")
             return
 
         if not self.config.has_section('Ollama'):
             self.config.add_section('Ollama')
 
         # 0. Выбор бэкенда
-        console.print(f"\n[bold]0. Выбор бэкенда[/bold]")
+        out("\n0. Выбор бэкенда")
         backend_options = [
             (f"Ollama — локальный сервер ({self.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')})", BACKEND_OLLAMA),
             ("OpenAI-совместимый API (llama-server, vLLM, OpenAI и др.)", BACKEND_OPENAI),
         ]
         backend_default = self.current_backend(self.config)
-        backend_answers = inquirer.prompt([
-            inquirer.List('backend',
-                         message="Выберите бэкенд (тип сервера)",
-                         choices=backend_options,
-                         default=backend_default),
-        ])
-        if not backend_answers:
-            console.print("[yellow]Настройка прервана.[/yellow]")
+        backend = textual_select("Выберите бэкенд (тип сервера)", backend_options, backend_default)
+        if backend is None:
+            out("Настройка прервана.")
             return
 
-        backend = backend_answers['backend']
         self.config.set('Ollama', 'Backend', backend)
 
         if backend == BACKEND_OPENAI:
@@ -268,21 +287,25 @@ class ConfigWizard:
             models = self._configure_ollama()
 
         if models is None:
+            out("Настройка прервана.")
             return
 
         # 2. Выбор модели по умолчанию
-        console.print(f"\n[bold]2. Выбор модели по умолчанию[/bold]")
+        out("\n2. Выбор модели по умолчанию")
         if not models:
             if backend == BACKEND_OPENAI:
-                console.print("[red]Не удалось получить список моделей с OpenAI-совместимого API.[/red]")
-                console.print("Вы можете указать имя модели вручную.")
-                chosen_model = Prompt.ask(
+                out("Не удалось получить список моделей с OpenAI-совместимого API.")
+                out("Вы можете указать имя модели вручную.")
+                chosen_model = textual_prompt(
                     "Введите имя модели",
-                    default=self.config.get('Ollama', 'DefaultModel', fallback='')
-                ) or self.config.get('Ollama', 'DefaultModel', fallback='qwen3.5:4b')
+                    default=self.config.get('Ollama', 'DefaultModel', fallback=''))
+                if chosen_model is None:
+                    out("Настройка прервана.")
+                    return
+                chosen_model = chosen_model or self.config.get('Ollama', 'DefaultModel', fallback='qwen3.5:4b')
             else:
-                console.print("[red]На сервере Ollama не найдено ни одной модели![/red]")
-                console.print("Пожалуйста, скачайте модель командой 'ollama pull qwen3.5:4b' и запустите мастер снова.")
+                out("На сервере Ollama не найдено ни одной модели!")
+                out("Пожалуйста, скачайте модель командой 'ollama pull qwen3.5:4b' и запустите мастер снова.")
                 return
         else:
             # Модели приходят как list[dict]: {'id', 'context'}
@@ -299,16 +322,11 @@ class ConfigWizard:
                 return mid
 
             model_choices = [(_model_label(m), m['id']) for m in models]
-            model_answers = inquirer.prompt([
-                inquirer.List('model',
-                             message="Выберите модель по умолчанию",
-                             choices=model_choices,
-                             default=default_model),
-            ])
-            if not model_answers:
-                console.print("[yellow]Настройка прервана.[/yellow]")
+            chosen_model = textual_select("Выберите модель по умолчанию",
+                                          model_choices, default_model)
+            if chosen_model is None:
+                out("Настройка прервана.")
                 return
-            chosen_model = model_answers['model']
 
         self.config.set('Ollama', 'DefaultModel', chosen_model)
 
@@ -321,13 +339,13 @@ class ConfigWizard:
                     break
 
         # 3. Контекст по умолчанию
-        console.print(f"\n[bold]3. Размер контекста по умолчанию[/bold]")
+        out("\n3. Размер контекста по умолчанию")
         current_ctx = self.config.getint('Ollama', 'DefaultContext', fallback=8192)
 
         if model_ctx:
             # Провайдер сообщил максимальный контекст — предлагаем
             # рекомендуемый (максимальный) или меньше.
-            console.print(f"[cyan]Провайдер сообщает максимальный контекст «{chosen_model}»: {model_ctx} токенов.[/cyan]")
+            out(f"Провайдер сообщает максимальный контекст «{chosen_model}»: {model_ctx} токенов.")
             ladder = self._context_ladder(model_ctx, current_ctx)
             ctx_options = []
             for i, size in enumerate(ladder):
@@ -356,26 +374,23 @@ class ConfigWizard:
         if not any(v == current_ctx for _, v in ctx_options):
             default_ctx_val = "custom"
 
-        ctx_questions = [
-            inquirer.List('ctx',
-                         message="Выберите размер контекста (влияет на потребление памяти и длину диалога)",
-                         choices=ctx_options,
-                         default=default_ctx_val,
-                         ),
-        ]
-
-        ctx_answers = inquirer.prompt(ctx_questions)
-        if not ctx_answers:
-            console.print("[yellow]Настройка прервана.[/yellow]")
+        chosen_ctx = textual_select(
+            "Выберите размер контекста (влияет на потребление памяти и длину диалога)",
+            ctx_options, default_ctx_val)
+        if chosen_ctx is None:
+            out("Настройка прервана.")
             return
 
-        chosen_ctx = ctx_answers['ctx']
         if chosen_ctx == "custom":
-            chosen_ctx = Prompt.ask("Введите размер контекста (в токенах, кратно 1024)", default=str(current_ctx))
+            custom_ctx = textual_prompt(
+                "Введите размер контекста (в токенах, кратно 1024)", default=str(current_ctx))
+            if custom_ctx is None:
+                out("Настройка прервана.")
+                return
             try:
-                chosen_ctx = int(chosen_ctx)
+                chosen_ctx = int(custom_ctx)
             except ValueError:
-                console.print(f"[red]Некорректное значение, используется {current_ctx}[/red]")
+                out(f"Некорректное значение, используется {current_ctx}")
                 chosen_ctx = current_ctx
 
         self.config.set('Ollama', 'DefaultContext', str(chosen_ctx))
@@ -386,28 +401,34 @@ class ConfigWizard:
             # Пробуем сохранить локально
             local_config_dir = os.path.expanduser("~/.config/botinok")
             local_config_path = os.path.join(local_config_dir, "config.cfg")
-            
-            console.print(f"\n[red]✗ Нет прав для сохранения в: {self.sm.config_path}[/red]")
-            if Confirm.ask(f"Сохранить конфигурацию локально в {local_config_path}?", default=True):
+
+            out(f"\n✗ Нет прав для сохранения в: {self.sm.config_path}")
+            save_local = textual_confirm(
+                f"Сохранить конфигурацию локально в {local_config_path}?", default=True)
+            if not save_local:
+                out("Сохранение отменено.")
+            else:
                 try:
                     os.makedirs(local_config_dir, exist_ok=True)
                     self.sm.config_path = local_config_path
                     success = self.sm.save_config()
                 except Exception as e:
-                    console.print(f"[red]✗ Не удалось создать локальную директорию: {e}[/red]")
+                    out(f"✗ Не удалось создать локальную директорию: {e}")
                     # Последняя попытка - текущая директория
                     self.sm.config_path = "config.cfg"
-                    console.print(f"[yellow]Пробуем сохранить в текущей директории: {self.sm.config_path}[/yellow]")
+                    out(f"Пробуем сохранить в текущей директории: {self.sm.config_path}")
                     success = self.sm.save_config()
-        
+
         if success:
-            console.print(Panel(f"[bold green]Настройка успешно завершена![/bold green]\nКонфигурация сохранена в: {self.sm.config_path}", border_style="green"))
+            out(f"Настройка успешно завершена!\nКонфигурация сохранена в: {self.sm.config_path}")
         else:
-            console.print(Panel(f"[bold red]Ошибка сохранения конфигурации[/bold red]\nПопробуйте запустить с правами администратора или проверьте права доступа.", border_style="red"))
+            out("Ошибка сохранения конфигурации\nПопробуйте запустить с правами администратора или проверьте права доступа.")
+
 
 def main():
     wizard = ConfigWizard()
     wizard.run()
+
 
 if __name__ == "__main__":
     main()
