@@ -47,6 +47,7 @@
 - [concepts/function_calling.md](concepts/function_calling.md) — механика tool-calls в потоке агента
 - [concepts/dangerous_mode.md](concepts/dangerous_mode.md) — безопасность: dangerous mode и подтверждения
 - [concepts/streaming_tui.md](concepts/streaming_tui.md) — стриминг, TTFT/TPS, VRAM, плавность UI
+- [concepts/terminal_unicode_width.md](concepts/terminal_unicode_width.md) — ширина Unicode в терминале: почему «плывут» панели и как лечим
 - [concepts/embedded_terminal.md](concepts/embedded_terminal.md) — встроенный терминал: PTY-сессии, свернуть/вернуть, общий доступ человека и агента
 - [concepts/skills_system.md](concepts/skills_system.md) — система навыков (personal/project, ClawHub)
 - [concepts/experience_learning.md](concepts/experience_learning.md) — обучение на опыте (positive/negative)

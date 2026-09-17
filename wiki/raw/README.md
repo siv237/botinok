@@ -16,6 +16,10 @@
 | `core/textual_history_viewer.py` | Просмотр истории сессии в TUI | `entities/textual_ui.md` |
 | `core/shell_session.py` | PTY-сессия команды (не держит агента), реестры сессий и Textual-приложения | `entities/shell_session.md` |
 | `core/shell_screen.py` | Встроенный терминал в TUI (окно, кнопки «Свернуть/Закрыть») | `entities/shell_screen.md` |
+| `core/textual_prompts.py` | Textual-диалоги для CLI (select/prompt/confirm) | `entities/textual_ui.md` |
+| `core/session_picker.py` | Textual-экран выбора/возобновления сессии | `entities/botinok_cli.md` |
+| `core/cli_io.py` | Plain-вывод CLI без Rich (`out`, `term_width`) | `sources/requirements.md` |
+| `core/text_width.py` | Нормализация ширины Unicode/эмодзи и обрезка по ячейкам | `concepts/terminal_unicode_width.md` |
 | `core/openai_compat.py` | Адаптер OpenAI-совместимых бэкендов | `entities/openai_compat.md` |
 | `core/config_wizard.py` | Интерактивный мастер настройки (--wizard) | `concepts/config_priority.md` |
 | `core/image_ascii.py` | ASCII-генерация изображений для консоли | `concepts/vision_multimodal.md` |
