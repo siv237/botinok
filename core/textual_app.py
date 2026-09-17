@@ -3,9 +3,11 @@ Textual приложение для Botinok — стриминг в Static, сп
 """
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (Input, Static, Collapsible, OptionList, Button,
-                             Markdown, ProgressBar)
+                             Markdown, ProgressBar, TextArea)
 from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal, VerticalScroll
 # rich.text.Text используется только как renderable для ANSI-вывода (логотип,
@@ -118,6 +120,73 @@ class ConfirmationScreen(ModalScreen):
             event.stop()
 
 
+class Composer(TextArea):
+    """Многострочный композер ввода.
+
+    Enter — отправка, Shift+Enter / Ctrl+J — новая строка, Esc — очистить,
+    Alt+↑/↓ — история. Вставка из буфера (bracketed paste) вставляет текст
+    целиком и НЕ отправляет; дополнительно есть защита от «всплеска» ввода
+    на терминалах без bracketed paste (Enter внутри вставки становится
+    переводом строки, а не отправкой).
+    """
+
+    BINDINGS = [
+        Binding("alt+up", "history_prev", "Предыдущий вопрос", show=False),
+        Binding("alt+down", "history_next", "Следующий вопрос", show=False),
+    ]
+
+    class Submitted(Message):
+        """Пользователь отправил ввод (Enter)."""
+
+        def __init__(self, value: str) -> None:
+            self.value = value
+            super().__init__()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._paste_until = 0.0
+        self._prev_len = 0
+        self._last_change = 0.0
+
+    async def _on_key(self, event) -> None:
+        key = getattr(event, "key", "") or ""
+        if key == "enter":
+            event.stop()
+            event.prevent_default()
+            if time.time() < self._paste_until:
+                # Похоже на вставку из буфера — не отправляем.
+                self.insert("\n")
+            else:
+                self.action_submit()
+            return
+        if key in ("shift+enter", "ctrl+j"):
+            event.stop()
+            event.prevent_default()
+            self.insert("\n")
+            return
+        if key == "escape":
+            event.stop()
+            event.prevent_default()
+            self.text = ""
+            return
+        await super()._on_key(event)
+
+    def action_submit(self) -> None:
+        text = (self.text or "").strip()
+        if text:
+            self.post_message(self.Submitted(text))
+
+    def action_history_prev(self) -> None:
+        app = self.app
+        if hasattr(app, "_composer_history"):
+            app._composer_history(self, -1)
+
+    def action_history_next(self) -> None:
+        app = self.app
+        if hasattr(app, "_composer_history"):
+            app._composer_history(self, +1)
+
+
 class BotinokTextualApp(App):
     """Textual приложение для Botinok."""
 
@@ -157,6 +226,7 @@ class BotinokTextualApp(App):
     #tools_list CollapsibleTitle { padding: 0; width: 1fr; color: $text; }
     #footer { height: 3; border: round cyan; border-title-color: cyan; padding: 0 1; }
     Input { height: 3; }
+    #input { height: 3; min-height: 3; max-height: 10; }
     Collapsible { width: 1fr; height: auto; background: transparent; border: none; padding: 0; }
     CollapsibleTitle { color: $text-muted; padding: 0 1; width: 1fr; }
     """
@@ -210,6 +280,9 @@ class BotinokTextualApp(App):
         self._user_scrolled_away = False
         self._last_scroll_y: Optional[float] = None
         self._queued_inputs: List[str] = []
+        self.input_widget: Optional[Composer] = None
+        self._prompt_history: List[str] = []
+        self._history_idx = 0
         self._confirmation_event: Optional[threading.Event] = None
         self._confirmation_result: bool = False
         self._stats_dirty = True
@@ -256,7 +329,7 @@ class BotinokTextualApp(App):
 
     def _keep_focus(self) -> None:
         try:
-            self.set_focus(self.query_one("#input", Input))
+            self.set_focus(self.query_one("#input", Composer))
         except Exception:
             pass
 
@@ -319,7 +392,11 @@ class BotinokTextualApp(App):
                 with Vertical(id="tools"):
                     self.tools_list = Vertical(id="tools_list")
                     yield self.tools_list
-        yield Input(placeholder="Введите ваш вопрос (exit = выход)...", id="input")
+        self.input_widget = Composer(
+            id="input",
+            placeholder="Введите ваш вопрос (Enter — отправить, Shift+Enter — новая строка)...",
+        )
+        yield self.input_widget
 
     def on_mount(self) -> None:
         self.load_history()
@@ -330,7 +407,7 @@ class BotinokTextualApp(App):
         except Exception:
             pass
         try:
-            self.set_focus(self.query_one("#input", Input))
+            self.set_focus(self.query_one("#input", Composer))
         except Exception:
             pass
         if hasattr(self, '_vram_prep_fn') and self._vram_prep_fn:
@@ -949,13 +1026,76 @@ class BotinokTextualApp(App):
     def _update_queue_placeholder(self) -> None:
         try:
             q = len(self._queued_inputs)
-            inp = self.query_one("#input", Input)
+            inp = self.input_widget or self.query_one("#input", Composer)
             if q:
                 inp.placeholder = f"[{q} queued] Введите ваш вопрос..."
             else:
-                inp.placeholder = "Введите ваш вопрос (exit = выход)..."
+                inp.placeholder = "Введите ваш вопрос (Enter — отправить, Shift+Enter — новая строка)..."
         except Exception:
             pass
+
+    def _autosize_composer(self) -> None:
+        """Подогнать высоту композера под число строк (1..8) + рамка."""
+        c = self.input_widget
+        if c is None:
+            return
+        try:
+            lines = max(1, c.wrapped_document.height)
+        except Exception:
+            lines = 1
+        try:
+            c.styles.height = min(8, lines) + 2
+        except Exception:
+            pass
+
+    def _composer_history(self, composer, direction: int) -> None:
+        if not self._prompt_history:
+            return
+        self._history_idx = max(0, min(len(self._prompt_history), self._history_idx + direction))
+        if self._history_idx >= len(self._prompt_history):
+            composer.text = ""
+        else:
+            composer.text = self._prompt_history[self._history_idx]
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if self.input_widget is None or event.text_area is not self.input_widget:
+            return
+        # Детект «всплеска» ввода (вставка из буфера): защищает от Enter-ов
+        # внутри вставки на терминалах без bracketed paste.
+        now = time.time()
+        c = self.input_widget
+        new_len = len(c.text or "")
+        delta = new_len - c._prev_len
+        # Вставка: либо большой кусок за раз, либо «строчки» символов с
+        # минимальным интервалом (терминалы без bracketed paste).
+        if delta > 1 or (c._last_change > 0 and (now - c._last_change) < 0.03):
+            c._paste_until = now + 0.25
+        c._prev_len = new_len
+        c._last_change = now
+        self.call_after_refresh(self._autosize_composer)
+
+    def on_composer_submitted(self, event: "Composer.Submitted") -> None:
+        user_input = (event.value or "").strip()
+        if not user_input:
+            return
+        if self.input_widget is not None:
+            self.input_widget.text = ""
+            self._autosize_composer()
+        self._prompt_history.append(user_input)
+        self._history_idx = len(self._prompt_history)
+        self.current_prompt = user_input
+        self._footer_dirty = True
+        if user_input.startswith("/"):
+            if self.on_slash_command:
+                self.on_slash_command(user_input)
+        elif self.is_streaming:
+            self._queued_inputs.append(user_input)
+            self._update_queue_placeholder()
+            self._add_static(f"[dim]⏸ +{len(self._queued_inputs)}: {self._rich_escape(user_input)}[/dim]")
+            self.chat.scroll_end(animate=False)
+        elif self.on_submit:
+            self._submit_text(user_input)
+        self.update_stats_display()
 
     def request_stop(self) -> None:
         self._stop_requested = True
@@ -1137,25 +1277,6 @@ class BotinokTextualApp(App):
         self.update_stats_display()
         if self._confirmation_event:
             self._confirmation_event.set()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        user_input = event.value
-        event.input.value = ""
-        self.current_prompt = user_input
-        self._footer_dirty = True
-        # Подтверждения опасных действий теперь идут через модальный экран
-        # ConfirmationScreen — ручной ввод 'y' больше не перехватывается.
-        if user_input.startswith("/"):
-            if self.on_slash_command:
-                self.on_slash_command(user_input)
-        elif self.is_streaming:
-            self._queued_inputs.append(user_input)
-            self._update_queue_placeholder()
-            self._add_static(f"[dim]⏸ +{len(self._queued_inputs)}: {self._rich_escape(user_input)}[/dim]")
-            self.chat.scroll_end(animate=False)
-        elif self.on_submit:
-            self._submit_text(user_input)
-        self.update_stats_display()
 
     def _submit_text(self, user_input: str) -> None:
         """Отправить реплику пользователя в агент (общий путь для ввода и CLI-промпта)."""
