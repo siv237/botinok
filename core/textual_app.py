@@ -7,7 +7,7 @@ from textual.screen import ModalScreen
 from textual.widgets import (Input, Static, Collapsible, OptionList, Button,
                              Markdown, ProgressBar)
 from textual.widgets.option_list import Option
-from textual.containers import Vertical, Horizontal
+from textual.containers import Vertical, Horizontal, VerticalScroll
 # rich.text.Text используется только как renderable для ANSI-вывода (логотип,
 # лог терминала) — Rich является внутренним движком Textual. Панели/таблицы/
 # прогресс/разметка переведены на нативные виджеты Textual.
@@ -129,7 +129,13 @@ class BotinokTextualApp(App):
     #header.proofreader { background: yellow; color: black; }
     #main { height: 1fr; }
     #content { width: 2fr; height: 1fr; padding: 0; }
-    #content_title { height: 1; color: green; padding: 0 1; }
+    #diag { height: auto; width: 1fr; background: transparent; border: none; padding: 0; }
+    #diag CollapsibleTitle { width: 1fr; padding: 0; color: cyan; }
+    #diag_scroll { max-height: 14; }
+    #diag_list { height: auto; }
+    #diag_list Collapsible { width: 1fr; height: auto; background: transparent;
+                             border: none; padding: 0; }
+    #diag_list CollapsibleTitle { padding: 0; width: 1fr; }
     #chat { height: 1fr; border: solid green; padding: 0 1; overflow-y: auto; }
     #right { width: 1fr; }
     #shells { height: auto; max-height: 50%; display: none; border: solid cyan; padding: 0; }
@@ -170,9 +176,13 @@ class BotinokTextualApp(App):
         self.ctx_bar: Optional[ProgressBar] = None
         self.tools_list: Optional[Vertical] = None
         self.header_display: Optional[Static] = None
-        self.footer_display: Optional[Static] = None
-        self.content_container: Optional[Vertical] = None
-        self.content_title: Optional[Static] = None
+        self.diag: Optional[Collapsible] = None
+        self.diag_list: Optional[Vertical] = None
+        self.diag_scroll: Optional[VerticalScroll] = None
+        self.diag_entries: List[dict] = []
+        self._diag_widgets: dict = {}
+        self._diag_id_to_key: dict = {}
+        self._diag_last_refresh = 0.0
         self.model_name = ""
         self.dangerous_mode = False
         self.is_proofreader = False
@@ -292,8 +302,10 @@ class BotinokTextualApp(App):
         with Horizontal(id="main"):
             self.content_container = Vertical(id="content")
             with self.content_container:
-                self.content_title = Static("Response", id="content_title")
-                yield self.content_title
+                self.diag_list = Vertical(id="diag_list")
+                self.diag_scroll = VerticalScroll(self.diag_list, id="diag_scroll")
+                self.diag = Collapsible(self.diag_scroll, title="Prompt:", collapsed=True, id="diag")
+                yield self.diag
                 self.chat = Vertical(id="chat")
                 yield self.chat
             with Vertical(id="right"):
@@ -307,8 +319,6 @@ class BotinokTextualApp(App):
                 with Vertical(id="tools"):
                     self.tools_list = Vertical(id="tools_list")
                     yield self.tools_list
-        self.footer_display = Static("", id="footer")
-        yield self.footer_display
         yield Input(placeholder="Введите ваш вопрос (exit = выход)...", id="input")
 
     def on_mount(self) -> None:
@@ -317,7 +327,6 @@ class BotinokTextualApp(App):
         try:
             self.query_one("#stats").border_title = "Performance"
             self.query_one("#tools").border_title = "Tools Activity"
-            self.footer_display.border_title = "Diagnostic Log"
         except Exception:
             pass
         try:
@@ -336,6 +345,11 @@ class BotinokTextualApp(App):
         # автоматически, когда приложение готово.
         if self.initial_prompt:
             self.call_after_refresh(self._submit_initial_prompt)
+
+    def on_resize(self, event) -> None:
+        # Пересчитать обрезку заголовка Prompt при изменении размеров окна.
+        self._footer_dirty = True
+        self.update_stats_display()
 
     def _submit_initial_prompt(self) -> None:
         prompt = (self.initial_prompt or "").strip()
@@ -360,6 +374,9 @@ class BotinokTextualApp(App):
 
     def _tick_stats(self) -> None:
         now = time.time()
+        # Раз в 30 секунд обновляем относительное время у вопросов в Diagnostic Log.
+        if now - self._diag_last_refresh > 30:
+            self._footer_dirty = True
         active = ("Generating...", "Connecting...", "Processing tool calls...", "Checking Memory...")
         if self.stats_data["status"] in active:
             self.stats_data["elapsed"] = now - self._start_time
@@ -523,11 +540,97 @@ class BotinokTextualApp(App):
         except Exception:
             pass
 
-    def _update_footer(self) -> None:
-        if not self.footer_display:
+    @staticmethod
+    def _rel_time(ts: float) -> str:
+        try:
+            diff = max(0.0, time.time() - float(ts))
+        except Exception:
+            return ""
+        if diff < 60:
+            return f"{int(diff)} сек назад"
+        if diff < 3600:
+            return f"{int(diff / 60)} мин назад"
+        if diff < 86400:
+            return f"{int(diff / 3600)} ч назад"
+        return f"{int(diff / 86400)} дн назад"
+
+    @staticmethod
+    def _diag_id(key: str) -> str:
+        return "d_" + re.sub(r"[^0-9a-zA-Z_-]", "_", key)
+
+    def _record_diag(self, text: str, ts: Optional[float] = None) -> None:
+        text = normalize_cells(str(text)).strip()
+        if not text:
             return
-        prompt = normalize_cells(self.current_prompt)
-        self.footer_display.update(f"[dim]Prompt: {cell_truncate(prompt, 400)}[/dim]")
+        if ts is None:
+            ts = time.time()
+        # Не плодим дубликаты при повторном рендере одного и того же запроса.
+        if self.diag_entries:
+            last = self.diag_entries[-1]
+            if last["text"] == text and abs(ts - last["ts"]) < 3:
+                return
+        key = f"{ts:.3f}:{len(self.diag_entries)}"
+        self.diag_entries.append({"ts": ts, "text": text, "key": key})
+        self._footer_dirty = True
+
+    def _diag_card_title(self, entry: dict) -> str:
+        text = entry["text"]
+        # Дата + «сколько назад» + сам вопрос, обрезанный по ширине окна.
+        width = 0
+        try:
+            width = self.diag.size.width if self.diag else 0
+        except Exception:
+            width = 0
+        head = ""
+        try:
+            head = datetime.fromtimestamp(entry["ts"]).strftime("%d.%m %H:%M")
+        except Exception:
+            head = "--.-- --:--"
+        rel = self._rel_time(entry["ts"])
+        prefix = f"{head} · {rel}  "
+        budget = max(8, (width - len(prefix) - 6)) if width else 40
+        return f"[dim]{prefix}[/dim][cyan]{cell_truncate(text, budget)}[/cyan]"
+
+    def _update_diag(self) -> None:
+        if self.diag is None:
+            return
+        # Заголовок свёрнутого блока — последний вопрос (обрезанный).
+        if self.diag_entries:
+            latest = self.diag_entries[-1]
+            width = 0
+            try:
+                width = self.diag.size.width or 0
+            except Exception:
+                width = 0
+            budget = max(10, (width - 10)) if width else 60
+            try:
+                self.diag.title = f"[bold cyan]Prompt:[/bold cyan] [dim]{cell_truncate(latest['text'], budget)}[/dim]"
+            except Exception:
+                pass
+        # Карточки вопросов (создаём недоимостающие, обновляем заголовки).
+        if self.diag_list is not None:
+            for entry in self.diag_entries:
+                key = entry["key"]
+                node = self._diag_widgets.get(key)
+                if node is None:
+                    cid = self._diag_id(key)
+                    self._diag_id_to_key[cid] = key
+                    node = Collapsible(Static(normalize_cells(entry["text"])),
+                                       title=self._diag_card_title(entry),
+                                       collapsed=True, id=cid)
+                    self._diag_widgets[key] = node
+                    try:
+                        self.diag_list.mount(node)
+                        node.collapsed = True
+                    except Exception:
+                        self._diag_widgets.pop(key, None)
+                        self._diag_id_to_key.pop(cid, None)
+                else:
+                    try:
+                        node.title = self._diag_card_title(entry)
+                    except Exception:
+                        pass
+        self._diag_last_refresh = time.time()
 
     def _update_stats_panel(self) -> None:
         if not self.stats_rows:
@@ -701,20 +804,14 @@ class BotinokTextualApp(App):
     def update_stats_display(self) -> None:
         if self.header_display:
             self._update_header()
-        if self.content_title and self.content_container and self.chat and self._stats_dirty:
-            try:
-                h = self.content_container.size.height if self.content_container else 20
-                self.content_title.update(f"Response (Lines: ~{h})")
-            except Exception:
-                self.content_title.update("Response")
         if self._stats_dirty:
             self._update_stats_panel()
             self._stats_dirty = False
         if self._tools_dirty:
             self._update_tools_panel()
             self._tools_dirty = False
-        if self.footer_display and self._footer_dirty:
-            self._update_footer()
+        if self._footer_dirty:
+            self._update_diag()
             self._footer_dirty = False
 
     _GGUF_TAG_RE = re.compile(r"(?:<\|[^\n\r]*?\|>|</?[^>\n\r]+?>)", re.IGNORECASE)
@@ -740,6 +837,15 @@ class BotinokTextualApp(App):
                 self._add_static(f"[red]Ошибка загрузки истории: {e}[/red]")
         if history:
             for entry in history:
+                if entry.get("role") == "user" and entry.get("content"):
+                    ts = None
+                    raw_ts = entry.get("timestamp")
+                    if raw_ts:
+                        try:
+                            ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).timestamp()
+                        except Exception:
+                            ts = None
+                    self._record_diag(str(entry.get("content")), ts)
                 self._render_history_entry(entry)
             self.chat.scroll_end()
         else:
@@ -822,6 +928,7 @@ class BotinokTextualApp(App):
             pass
 
     def append_user_message(self, content: str) -> None:
+        self._record_diag(str(content))
         ts = datetime.now().strftime("%H:%M:%S")
         self._add_static(f"[dim]━━━ {ts} ━━━[/dim]")
         self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(str(content))}")
@@ -1055,7 +1162,5 @@ class BotinokTextualApp(App):
         if not self.on_submit:
             return
         self._start_time = time.time()
-        self._add_static(f"[dim]━━━ {datetime.now().strftime('%H:%M:%S')} ━━━[/dim]")
-        self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(user_input)}")
-        self._add_static("")
+        self.append_user_message(user_input)
         self.on_submit(user_input)
