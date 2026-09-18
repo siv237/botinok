@@ -5,7 +5,7 @@ Smoke-тест: переоткрытие встроенного терминал
 Регрессии:
   * после «Закрыть» inline новый shell снова открывается встроенно
     (call_after_refresh не срабатывал на простое — заменили на call_next);
-  * в заголовке терминала виден статус и счётчик: «идёт Ns»/«завершён за Ns».
+  * в заголовке терминала виден статус и счётчик: «выполняется Ns»/«завершено».
 
 Запуск: venv/bin/python -u tests/test_shell_reopen.py
 """
@@ -74,13 +74,28 @@ async def main_async() -> int:
         check("s1_inline", await _wait_inline(app))
         await asyncio.sleep(0.4)
         t1 = _title(app)
-        check("title_running", "идёт" in t1 and "s" in t1, f"title={t1!r}")
+        check("title_running", "выполняется" in t1 and "s" in t1, f"title={t1!r}")
+        # Кнопка во время работы называется «Прервать».
+        from textual.widgets import Button as _Btn
+        action_btn = next(b for b in app.inline_shell_widget.query(_Btn)
+                          if b.id == "inline_shell_close")
+        check("action_button_interrupt", str(action_btn.label) == "Прервать",
+              f"label={action_btn.label!r}")
 
-        # 2. Закрываем inline.
+        # 2. «Прервать» шлёт SIGINT, панель остаётся; затем «Закрыть» убирает её.
+        check("interrupt_pressed", _press(app.inline_shell_widget, "inline_shell_close"))
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            if not reg.get(sid1).is_running():
+                break
+        await asyncio.sleep(0.4)
+        check("interrupted_session", not reg.get(sid1).is_running())
+        check("panel_still_open", app.inline_shell_active)
+        check("action_button_close", str(action_btn.label) == "Закрыть",
+              f"label={action_btn.label!r}")
         check("close_pressed", _press(app.inline_shell_widget, "inline_shell_close"))
         await asyncio.sleep(0.5)
         check("closed_inline", not app.inline_shell_active)
-        check("closed_session", not reg.get(sid1).is_running())
 
         # 3. Новый shell обязан снова открыться встроенно (регрессия reopen).
         r2 = json.loads(shell_exec(command="echo DONE; sleep 60",
@@ -99,7 +114,7 @@ async def main_async() -> int:
                 break
         await asyncio.sleep(0.4)
         t2 = _title(app)
-        check("title_finished", "завершено за" in t2, f"title={t2!r}")
+        check("title_finished", "завершено" in t2 and "завершено за" not in t2, f"title={t2!r}")
         # В логе терминала есть явная строка-маркер завершения.
         try:
             log = app.query_one("#inline_shell_log", RichLog)

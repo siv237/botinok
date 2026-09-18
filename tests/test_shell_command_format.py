@@ -95,7 +95,8 @@ async def main_async() -> int:
         text = str(cmd_w.content)
         check("click_content_formatted", "for h in" in text and len(text.splitlines()) >= 6,
               f"text={text[:200]!r}")
-        await pilot.click("#inline_shell_title")
+        # После раскрытия «сокращённая» (title) скрыта — сворачиваем кликом по команде.
+        await pilot.click("#inline_shell_cmd")
         await asyncio.sleep(0.3)
         check("second_click_hides", not cmd_w.has_class("show"))
 

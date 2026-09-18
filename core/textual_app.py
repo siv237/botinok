@@ -358,10 +358,17 @@ class BotinokTextualApp(App):
                                     background: #0f0f0f; color: #d0d0d0;
                                     padding: 0 1; border: none; }
     #inline_shell_cmd.show, #shell_cmd.show { display: block; }
+    /* Раскрытая команда окрашена как «сокращённая» строка (title). */
+    #inline_shell_cmd.show, #shell_cmd.show { background: cyan; color: black;
+                                              text-style: bold; }
+    /* Когда команда раскрыта — сокращённая (title) не показывается. */
+    ShellInline.cmd-open #inline_shell_title { display: none; }
+    ShellScreen.cmd-open #shell_title { display: none; }
     #inline_shell_log { height: 1fr; border: none; padding: 0 1; background: #0c0c0c; }
     #inline_shell_hint { height: 1; color: $text-muted; padding: 0 1; }
-    #inline_shell_input { height: 3; }
-    #inline_shell_buttons { height: 3; align: right middle; }
+    #inline_shell_bottom { height: 3; }
+    #inline_shell_input { height: 3; width: 1fr; }
+    #inline_shell_buttons { height: 3; width: auto; align: right middle; }
     #inline_shell_buttons Button { min-width: 12; height: 3; margin: 0 1; }
     #chat { height: 1fr; border: solid green; padding: 0 1; overflow-y: auto; }
     #right { width: 1fr; }
