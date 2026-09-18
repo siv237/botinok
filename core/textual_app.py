@@ -1677,20 +1677,21 @@ class BotinokTextualApp(App):
         self.update_stats_display()
 
     def request_stop(self) -> None:
-        """Немедленная остановка: флаг + убийство всех дочерних процессов."""
+        """Мягкая остановка по Esc: только флаг, без убийства процессов.
+
+        Сессия не должна умирать: запущенный через `process_control.run()`
+        инструмент сам увидит флаг и аккуратно завершит своё дерево, а цикл хода
+        штатно финализирует ответ и вернёт UI в покой. Никакого `kill_all` из
+        обработчика клавиши — он гоняется с записью `context.json` и рвёт сессию.
+        """
         self._stop_requested = True
         if _pc is not None:
-            _pc.request_stop()  # SIGTERM/SIGKILL всей группе запущенных процессов
-        try:
-            from core.shell_session import ShellSessionRegistry
-            ShellSessionRegistry.instance().close_all()
-        except Exception:
-            pass
+            _pc.signal_stop()
 
     def _log_stop_once(self) -> None:
         if not self._stop_logged:
             self._stop_logged = True
-            self.append_log("[dim]⏹ Остановлено. Завершаю процессы…[/dim]")
+            self.append_log("[dim]⏹ Остановлено. Прерываю действие и завершаю ход…[/dim]")
 
     def on_key(self, event) -> None:
         if event.key == "escape" and self.is_streaming:
@@ -1831,16 +1832,32 @@ class BotinokTextualApp(App):
 
     def flush_tool_buffer(self) -> None:
         self._flush_tool_spoilers()
+        stopped = self._stop_requested
         self.is_streaming = False
         self._last_chunk_time = 0.0
-        if self._queued_inputs:
-            text = "\n\n".join(self._queued_inputs)
+        if not self._queued_inputs:
+            return
+        if stopped:
+            # Esc: НЕ продолжаем диалог сами. Возвращаем накопленный ввод в поле
+            # и ждём, пока пользователь сам отправит следующее сообщение.
+            pending = "\n\n".join(self._queued_inputs)
             self._queued_inputs = []
             self._update_queue_placeholder()
-            self.append_user_message(text)
-            if self.on_submit:
-                self.is_streaming = True
-                self.on_submit(text)
+            try:
+                if self.input_widget is not None:
+                    self.input_widget.text = pending
+                    self._autosize_composer()
+            except Exception:
+                pass
+            self.append_log("[dim]⏹ Остановлено. Жду следующее сообщение…[/dim]")
+            return
+        text = "\n\n".join(self._queued_inputs)
+        self._queued_inputs = []
+        self._update_queue_placeholder()
+        self.append_user_message(text)
+        if self.on_submit:
+            self.is_streaming = True
+            self.on_submit(text)
 
     def append_log(self, text: str) -> None:
         # Текст лога приходит с rich-разметкой ([yellow]…[/yellow]) — не

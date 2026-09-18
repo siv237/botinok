@@ -53,10 +53,8 @@ class HistoryViewerApp(App):
             return
 
         try:
-            with open(context_path, "r", encoding="utf-8", errors="ignore") as f:
-                context = json.load(f)
-
-            history = context.get("history", [])
+            from core.session_manager import SessionManager
+            history = SessionManager().load_history_entries(self.session_path) or []
             self.rich_log.clear()
 
             for entry in history:

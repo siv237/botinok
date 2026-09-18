@@ -528,3 +528,44 @@ TypeError: execute() got an unexpected keyword argument 'resume'`.
 - Реально восстановлена сессия `20260918_212628` (64 записи из `messages.json`).
 - Тест `tests/test_session_recovery.py` (атомарность, `.bak`, fallback, засев).
 - Страницы: `entities/session_manager.md`.
+
+## [2026-09-18] fix | Esc: прервать и ЖДАТЬ, а не убивать сессию
+Симптом: Esc «не завершал» ход: модель/авто-продолжение шли дальше, а при
+остановке сессия получала обрубленный `context.json` и умирала.
+- `process_control.signal_stop()` — мягкая остановка (только флаг); запущенный
+  `run()` сам гасит свою группу. `request_stop()` оставлен как жёсткий kill_all.
+- `App.request_stop()` больше НЕ зовёт `kill_all()`/`ShellSessionRegistry.close_all()`:
+  убийство из обработчика клавиши гонялось с записью `context.json`.
+- `flush_tool_buffer` при остановке не отправляет накопленную очередь, а
+  возвращает её в поле ввода и пишет «Жду следующее сообщение…».
+- Контракт: Esc → стоп хода → ожидание следующего сообщения (без авто-продолжений).
+- Предыдущая правка (сброс флага только в `reset_turn_state`) остаётся.
+- Тест `tests/test_process_control.py`: `signal_stop` прерывает `run()`, но
+  посторонний процесс не убивает.
+- Страницы: `entities/process_control.md`.
+
+## [2026-09-18] repair | восстановление сессии 20260918_212628_visual_run
+Причина потери: `context.json` был записан обрубленным (неатомарная запись),
+затем восстановление засеяло историю из `messages.json` — а это скользящее окно
+последних 20 сообщений → потеряна история 21:26–23:36.
+- Жёсткий сброс убран: `update_context` больше не перезаписывает историю
+  снапшотом и не переносит файл; `_salvage_history` вычитывает максимум из
+  обрезанного JSON, `_merge_history` склеивает источники без потерь.
+- `_read_history_soft`: context.json → salvage → .bak → messages.json; на нём
+  переведены `load_history_entries`, `build_resume_brief`, `restore_session`,
+  `audit_context`. Приложение и просмотрщик истории читают через него.
+- Сессия восстановлена: 311 записей — `.corrupt-1789738545` (130) + context/bak
+  + снапшот + достройка ассистентских ответов из `session_raw.log` и tool-шагов
+  из `steps/` (21:xx–23:xx непрерывно). Оригиналы и полный бэкап папки сохранены.
+- Тест `tests/test_session_recovery.py` (атомарность, `.bak`, salvage, fallback).
+- Страницы: `entities/session_manager.md`.
+
+## [2026-09-18] fix | тесты больше не сорят в рабочие сессии
+Симптом: приложение открывало пустую «сессию» с «привет/ответ/ещё» вместо
+настоящей (полдня диалога) — тесты создавали сессии в `~/.botinok/sessions`, и
+самая свежая (`*_recovery-test`) перебивала реальную.
+- `SessionManager` понимает переопределение `BOTINOK_SESSIONS_DIR` (env).
+- `tests/test_session_recovery.py` пишет в `tempfile.mkdtemp` (изоляция).
+- Мусорные `*_recovery-test`/`*_recovery-snapshot` и бэкап убраны из
+  `~/.botinok/sessions`; настоящая сессия снова самая свежая.
+- Страницы: `entities/session_manager.md`.
