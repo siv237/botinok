@@ -17,6 +17,16 @@ status: stable
 - Исправления мерцания в SSH-терминалах с низкой скоростью (Rich-эпоха).
 - Компактный прогрессбар контекста.
 
+## Остановка по Esc (обрыв генерации модели)
+`response.close()` **не** прерывает блокирующий read в потоке-читателе
+(`_stream_reader` → `response.iter_lines()`), поэтому UI вставал, а модель
+продолжала генерировать. `_abort_stream(response)` делает `shutdown(SHUT_RDWR)`
+сокета (через `response.raw._fp.fp.raw._sock`, для OpenAI-обёртки — `._resp`),
+разблокирует read и рвёт соединение — сервер (Ollama) прекращает генерацию.
+Ход завершается: частичный ответ сохраняется, `stopped_by_user` →
+`_finalize_turn`, дальше не идём. Запущенные процессы при этом убиваются через
+`core/process_control.py`. → `entities/process_control.md`
+
 ## Отображаемые метрики
 - TTFT, TPS, использованный/лимит контекста, VRAM на всех этапах.
 - Метрики сохраняются в YAML-футер сессии (`BOTINOK_SESSION_METADATA`). → `entities/session_directory.md`, `entities/session_manager.md`

@@ -24,6 +24,11 @@ import shutil
 import subprocess
 from typing import Dict, List, Optional
 
+try:
+    from core import process_control as _pc
+except Exception:  # pragma: no cover
+    _pc = None
+
 DEFAULT_MAX_BYTES = 256_000
 BASE64_MAX_BYTES = 20_000_000
 TIMEOUT_SEC = 15
@@ -38,9 +43,10 @@ def _run(argv: List[str], max_bytes: int = DEFAULT_MAX_BYTES, timeout: int = TIM
     env = dict(os.environ)
     env.setdefault("LC_ALL", "C")  # стабильный машинночитаемый вывод
     env.setdefault("LANG", "C")
+    runner = _pc.run if _pc else subprocess.run
     try:
-        cp = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                            cwd=cwd, env=env)
+        cp = runner(argv, capture_output=True, text=True, timeout=timeout,
+                    cwd=cwd, env=env)
     except FileNotFoundError:
         return f"Ошибка: команда не найдена: {argv[0]}"
     except subprocess.TimeoutExpired:

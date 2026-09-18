@@ -24,6 +24,11 @@ from datetime import datetime
 from core.text_width import normalize_cells, cell_truncate
 from core.shell_screen import format_shell_command
 
+try:
+    from core import process_control as _pc
+except Exception:  # pragma: no cover
+    _pc = None
+
 SPOILER_PREVIEW = 80
 # Для прилипания «вниз» требуется буквальная позиция в самом низу (допуск 1px),
 # иначе любой прокрут вверх колесом будет неправильно считаться «я всё ещё внизу»
@@ -365,7 +370,7 @@ class Composer(TextArea):
             if getattr(app, "is_streaming", False):
                 try:
                     app.request_stop()
-                    app.append_log("[dim]⏹ Stop requested[/dim]")
+                    app._log_stop_once()
                 except Exception:
                     pass
                 return
@@ -532,6 +537,7 @@ class BotinokTextualApp(App):
         self._tool_items: List[str] = []
         self.is_streaming = False
         self._stop_requested = False
+        self._stop_logged = False
         self._user_scrolled_away = False
         self._last_scroll_y: Optional[float] = None
         self._queued_inputs: List[str] = []
@@ -1446,12 +1452,12 @@ class BotinokTextualApp(App):
 
     def load_history(self) -> None:
         history = []
-        context_path = os.path.join(self.session_path, "context.json") if self.session_path else ""
-        if context_path and os.path.exists(context_path):
+        # Надёжная загрузка: context.json → context.json.bak → messages.json
+        # (битый context.json больше не роняет историю; см. SessionManager).
+        if self.session_path:
             try:
-                with open(context_path, "r", encoding="utf-8", errors="ignore") as f:
-                    context = json.load(f)
-                history = context.get("history", []) or []
+                from core.session_manager import SessionManager
+                history = SessionManager().load_history_entries(self.session_path) or []
             except Exception as e:
                 self._add_static(f"[red]Ошибка загрузки истории: {e}[/red]")
         if history:
@@ -1573,11 +1579,16 @@ class BotinokTextualApp(App):
     def reset_turn_state(self) -> None:
         """Сброс состояния, которое не должно переживать запрос пользователя.
 
-        Отказ от повышения прав относится к конкретному запросу: в новом запросе
-        пользователь снова должен получить окно переключения, а не молчаливый
-        отказ.
+        Вызывается ОДИН раз на запрос пользователя (не на каждую итерацию цикла
+        инструментов). Сбрасывает отказ от повышения прав и флаг остановки:
+        иначе Esc, зажатый между итерациями, затирался бы и модель продолжала
+        генерировать.
         """
         self.dangerous_switch_denied = False
+        self._stop_requested = False
+        self._stop_logged = False
+        if _pc is not None:
+            _pc.clear_stop()
 
     def start_assistant_turn(self) -> None:
         self._flush_tool_spoilers()
@@ -1588,7 +1599,8 @@ class BotinokTextualApp(App):
         self._stream_thinking = ""
         self._last_tool_content = ""
         self.is_streaming = True
-        self._stop_requested = False
+        # ВАЖНО: здесь НЕ сбрасываем _stop_requested/clear_stop — функция
+        # вызывается на каждой итерации цикла инструментов, и сброс гасил Esc.
 
     def _update_queue_placeholder(self) -> None:
         try:
@@ -1665,12 +1677,25 @@ class BotinokTextualApp(App):
         self.update_stats_display()
 
     def request_stop(self) -> None:
+        """Немедленная остановка: флаг + убийство всех дочерних процессов."""
         self._stop_requested = True
+        if _pc is not None:
+            _pc.request_stop()  # SIGTERM/SIGKILL всей группе запущенных процессов
+        try:
+            from core.shell_session import ShellSessionRegistry
+            ShellSessionRegistry.instance().close_all()
+        except Exception:
+            pass
+
+    def _log_stop_once(self) -> None:
+        if not self._stop_logged:
+            self._stop_logged = True
+            self.append_log("[dim]⏹ Остановлено. Завершаю процессы…[/dim]")
 
     def on_key(self, event) -> None:
         if event.key == "escape" and self.is_streaming:
             self.request_stop()
-            self.append_log("[dim]⏹ Stop requested[/dim]")
+            self._log_stop_once()
             event.stop()
 
     def on_click(self, event) -> None:

@@ -15,7 +15,8 @@ status: stable
 - **Сессии**: создание директории сессии (`sessions/<timestamp>_<name>/`), гарантия подпапок (`steps`, `artifacts`, `project`, `proofreader`). → `entities/session_directory.md`, `concepts/session_lifecycle.md`
 - **Промпты**: копирование `prompts/*.txt` в сессию при создании; загрузка промпта с подстановкой `{{VAR}}`. → `sources/prompts_readme.md`
 - **Логирование**: `log_chunk` (построчный лог с дельтой; инкрементная запись `thinking.md`/`response.md`), `log_tool_call` (`tools.log`, с `call_id`), `log_step` (`steps/*.json` + `performance.log`, уникальные имена без затирания), метаданные-заголовки/футеры.
-- **Контекст**: `update_context(role, content, thinking, tool_calls, tool_call_id, name, extra)` — запись в `context.json`; дедупликация подряд идущих одинаковых записей.
+- **Контекст**: `update_context(role, content, thinking, tool_calls, tool_call_id, name, extra)` — запись в `context.json`; дедупликация подряд идущих одинаковых записей. Запись **атомарная** (`_atomic_write_json`: tmp+fsync+`os.replace`, бэкап прошлой версии в `.bak`), поэтому обрыв/убийство процесса не портит файл.
+- **Защита от повреждения**: `_read_json_with_backup` (context → `.bak`), `load_history_entries` (context → `.bak` → `messages.json`); при повреждении обоих `update_context` **засевает историю из снапшота** и откладывает битый файл в `context.json.corrupt-<ts>`.
 - **Канонический снапшот**: `save_messages_snapshot()` → `messages.json` (точный массив сообщений, медиа выносится в `artifacts` по хэшу), `load_messages_snapshot()`, `restore_session()` (EXACT/DERIVED), `load_context_messages()`, `reconstruct_messages()` (обратная совместимость старых сессий), `audit_context()`.
 - **Ollama**: `get_ollama_status()` (`/api/ps`), `unload_models()` (keep_alive=0).
 - **Артефакты**: `save_artifact()`, `save_media()` — дампы/медиа в `artifacts/`.

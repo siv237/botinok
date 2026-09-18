@@ -439,7 +439,12 @@ def _read_os_release() -> str:
 
 def _run_safe_command(argv: List[str], max_bytes: int = 256_000) -> str:
     try:
-        cp = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        from core import process_control as _pc
+        runner = _pc.run
+    except Exception:
+        runner = subprocess.run
+    try:
+        cp = runner(argv, capture_output=True, text=True, timeout=10)
         out = (cp.stdout or "") + ("\n" + cp.stderr if cp.stderr else "")
         data = out.encode("utf-8", errors="ignore")
         if len(data) > max_bytes:
