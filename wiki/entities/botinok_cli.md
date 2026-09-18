@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [llm, session, tui]
-updated: 2026-09-17
-sources: 3
+updated: 2026-09-18
+sources: 4
 status: stable
 ---
 
@@ -12,7 +12,7 @@ status: stable
 
 ## CLI-флаги (см. `sources/readme.md`)
 - `-m MODEL` — модель Ollama; `-c CTX` — размер контекста (напр. 16384/32768).
-- `--dangerous` — разовая активация опасных инструментов.
+- `--dangerous` — разовая активация опасных инструментов (ставит `BOTINOK_DANGEROUS=1`). Без него мутации разрешены только внутри папки сессии; выход за её пределы в TUI запрашивает переключение. → `concepts/dangerous_mode.md`
 - `--stealth` — headless-режим: только финальный ответ (для автоматизации).
 - `-p/--prompt` / позиционный аргумент — стартовый запрос; в Textual отправляется автоматически.
 - `--proofread` — режим корректора, работает и в Textual, и в headless. → `concepts/proofreader.md`

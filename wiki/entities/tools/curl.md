@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [tool, network]
-updated: 2026-08-23
-sources: 2
+updated: 2026-09-18
+sources: 3
 status: stable
 ---
 
@@ -17,9 +17,11 @@ status: stable
 
 ## Политика записи
 - **Readonly по умолчанию**.
-- Запись файлов разрешена **только внутри папки сессии** (`session_path`).
-- Запись вне сессии требует **dangerous mode**. → `concepts/dangerous_mode.md`
-- Поддерживает `progress_callback` (прогресс скачивания) — прокидывается из `ToolManager.call_tool`. → `entities/tool_manager.md`
+- `output_path` внутри папки сессии (`session_path`) — разрешено без dangerous mode.
+- `output_path` вне сессии требует **dangerous mode**: в простом режиме
+  `ToolManager.call_tool` возвращает ошибку, а TUI предлагает переключиться.
+  → `concepts/dangerous_mode.md`, `entities/tool_manager.md`
+- Поддерживает `progress_callback` (прогресс скачивания) — прокидывается из `ToolManager.call_tool`.
 
 ## Связи
 Зарегистрирован как `curl`. Альтернатива `open_url`/`web_extract` для сырых бинарных/JSON-ответов и больших файлов.

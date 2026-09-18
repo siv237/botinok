@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [tool, safety, dev]
-updated: 2026-08-23
-sources: 2
+updated: 2026-09-18
+sources: 3
 status: stable
 ---
 
@@ -17,7 +17,12 @@ status: stable
 - Опции: `create`, `expected_sha256` (контроль перед записью).
 
 ## Безопасность
-Требует **dangerous mode**. Пути резолвятся безопасно (`_safe_path`) относительно проекта/сессии; проверки выхода за пределы (`_resolve_code_editor_target_path` в `botinok.py`). → `concepts/dangerous_mode.md`
+- `read` — всегда; запись (`write`/`replace`/`apply`) внутри `session_path` —
+  без dangerous mode; **вне сессии** — требуется dangerous mode (TUI запрашивает
+  переключение). → `concepts/dangerous_mode.md`
+- Путь резолвится `_safe_path` (ограничение корнем); при `dangerous_mode=True`
+  ограничение снимается, путь берётся как `realpath` (аргумент `dangerous_mode`
+  прокидывается из `ToolManager`).
 
 ## Связи
 Зарегистрирован как `code_editor`. Отображаемые аргументы экранируются (`_code_editor_args_for_display`). → `entities/tool_manager.md`, `entities/botinok_cli.md`

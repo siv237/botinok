@@ -7,6 +7,56 @@ from datetime import datetime
 
 TOOLS_LOG = os.path.expanduser("~/.botinok/logs/tools.log")
 
+DANGEROUS_FILESYSTEM_ACTIONS = ("delete", "move", "copy", "mkdir", "chmod", "symlink", "touch")
+DANGEROUS_EDITOR_ACTIONS = ("write", "replace", "apply")
+DANGEROUS_SHELL_ACTIONS = ("run", "send", "send_key", "kill", "wait")
+
+
+def path_within(base, path) -> bool:
+    """True, если path лежит внутри base (или равен ему).
+
+    Относительный path трактуется относительно base (папки сессии), а не
+    текущей рабочей директории процесса — иначе легитимные пути внутри сессии
+    ошибочно считались бы «вне».
+    """
+    if not base or not path:
+        return False
+    try:
+        base = os.path.realpath(base)
+        target = os.path.realpath(path) if os.path.isabs(path) \
+            else os.path.realpath(os.path.join(base, path))
+        return target == base or target.startswith(base + os.sep)
+    except Exception:
+        return False
+
+
+def allowed_in_session(name, args, session_path) -> bool:
+    """Опасное действие целиком внутри папки сессии — dangerous mode не нужен.
+
+    Единый источник политики «внутри/вне сессии» для гейта `ToolManager.call_tool`
+    и для TUI (окно переключения в dangerous mode).
+    """
+    if not isinstance(args, dict) or not session_path:
+        return False
+    if name == "code_editor":
+        if args.get("action") in DANGEROUS_EDITOR_ACTIONS:
+            return path_within(session_path, args.get("path"))
+        return True
+    if name == "file_system":
+        action = args.get("action")
+        if action in DANGEROUS_FILESYSTEM_ACTIONS:
+            if not path_within(session_path, args.get("path")):
+                return False
+            if action in ("move", "copy", "symlink"):
+                return path_within(session_path, args.get("dest"))
+            return True
+        return True
+    if name == "curl":
+        out = args.get("output_path")
+        return True if not out else path_within(session_path, out)
+    # shell_exec всегда опасен и не привязан к папке сессии.
+    return False
+
 def log_tool_error(tool_name, error_type, error_msg, traceback_str):
     """Логирует ошибку загрузки инструмента"""
     os.makedirs(os.path.dirname(TOOLS_LOG), exist_ok=True)
@@ -421,11 +471,21 @@ class ToolManager:
         if name not in self._tool_registry:
             return f"Error: unknown tool '{name}'"
 
-        # Опасные команды file_system
-        DANGEROUS_FILESYSTEM_ACTIONS = ("delete", "move", "copy", "mkdir", "chmod", "symlink", "touch")
-        
-        if (not self.dangerous_mode) and name == "file_system" and isinstance(args, dict) and args.get("action") in DANGEROUS_FILESYSTEM_ACTIONS:
-            return f"Error: file_system action '{args.get('action')}' requires dangerous mode"
+        # Опасные действия в простом режиме: разрешены только внутри папки сессии.
+        if not self.dangerous_mode:
+            action = args.get("action") if isinstance(args, dict) else None
+            if name == "shell_exec" and (action or "run") in DANGEROUS_SHELL_ACTIONS:
+                return (f"Error: shell_exec action '{action or 'run'}' requires dangerous mode "
+                        "(пользователь может разрешить переключение)")
+            if (name in ("code_editor", "file_system")
+                    and action in (DANGEROUS_EDITOR_ACTIONS + DANGEROUS_FILESYSTEM_ACTIONS)
+                    and not allowed_in_session(name, args, session_path)):
+                return (f"Error: {name} action '{action}' outside session requires dangerous mode "
+                        "(пользователь может разрешить переключение)")
+            if name == "curl" and isinstance(args, dict) and args.get("output_path") \
+                    and not allowed_in_session(name, args, session_path):
+                return ("Error: curl output_path outside session requires dangerous mode "
+                        "(пользователь может разрешить переключение)")
 
         tool = self.get_tool(name)
         if not tool or "function" not in tool:
@@ -440,8 +500,8 @@ class ToolManager:
                     # Для curl передаем progress_callback
                     if name == "curl" and progress_callback is not None:
                         return func(session_path=session_path, progress_callback=progress_callback, **args)
-                    # Для file_system передаем dangerous_mode
-                    if name == "file_system":
+                    # Для file_system/code_editor передаем dangerous_mode
+                    if name in ("file_system", "code_editor"):
                         return func(session_path=session_path, dangerous_mode=self.dangerous_mode, **args)
                     return func(session_path=session_path, **args)
                 except TypeError:

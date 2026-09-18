@@ -674,7 +674,12 @@ def _dangerous_action(
 ) -> str:
     """Обработчик опасных операций с файловой системой."""
     if not dangerous_mode:
-        return f"Ошибка: действие '{action}' требует dangerous mode"
+        # В простом режиме разрешены мутации только внутри папки сессии.
+        inside = _is_within_session(path, session_path)
+        if action in ("move", "copy", "symlink"):
+            inside = inside and _is_within_session(dest, session_path)
+        if not inside:
+            return f"Ошибка: действие '{action}' вне сессии требует dangerous mode"
     
     # Проверка на пути вне сессии теперь выполняется на уровне botinok.py
     # с интерактивным подтверждением. Здесь только выполнение.

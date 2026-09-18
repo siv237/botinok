@@ -40,13 +40,19 @@ def code_editor(
     expected_sha256: Optional[str] = None,
     max_bytes: int = 20_000_000,
     session_path: Optional[str] = None,
+    dangerous_mode: bool = False,
 ) -> str:
     if action not in ("read", "write", "replace", "apply"):
         return f"Ошибка: неизвестный action '{action}'"
 
     try:
         root = os.path.abspath(session_path) if session_path else _project_root()
-        safe_path = _safe_path(path, root=root)
+        if dangerous_mode:
+            # dangerous mode: разрешена запись за пределами папки сессии.
+            safe_path = os.path.realpath(path) if os.path.isabs(path) \
+                else os.path.realpath(os.path.join(root, path))
+        else:
+            safe_path = _safe_path(path, root=root)
 
         if action == "read":
             if not os.path.isfile(safe_path):

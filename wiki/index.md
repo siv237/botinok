@@ -25,12 +25,12 @@
 | Инструмент | Страница | Краткое описание |
 |-----------|----------|------------------|
 | file_system | [entities/tools/file-system.md](entities/tools/file-system.md) | FS: навигация, поиск, grep, инспекция; мутации — dangerous |
-| code_editor | [entities/tools/code-editor.md](entities/tools/code-editor.md) | Редактирование файлов (read/write/replace/apply), dangerous |
+| code_editor | [entities/tools/code-editor.md](entities/tools/code-editor.md) | Редактирование файлов (read/write/replace/apply); запись вне сессии — dangerous |
 | shell_exec | [entities/tools/shell-exec.md](entities/tools/shell-exec.md) | PTY-сессия команд (run/read/search/send/wait/kill), dangerous, встроенный терминал |
 | web_search | [entities/tools/web-search.md](entities/tools/web-search.md) | Поиск DuckDuckGo через lynx |
 | open_url | [entities/tools/open-url.md](entities/tools/open-url.md) | Извлечение текста страницы через lynx -dump |
 | web_extract | [entities/tools/web-extract.md](entities/tools/web-extract.md) | Структурированное извлечение (links, images, tables) через httpx+selectolax |
-| curl | [entities/tools/curl.md](entities/tools/curl.md) | HTTP GET, скачивание, jq-фильтры; запись только в сессию |
+| curl | [entities/tools/curl.md](entities/tools/curl.md) | HTTP GET, скачивание, jq-фильтры; запись вне сессии — dangerous |
 | journal | [entities/tools/journal.md](entities/tools/journal.md) | Read-only анализ systemd journal (journalctl) |
 | github | [entities/tools/github.md](entities/tools/github.md) | Работа с GitHub API |
 | experience | [entities/tools/experience.md](entities/tools/experience.md) | База «позитивного/негативного» опыта |

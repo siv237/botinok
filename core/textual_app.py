@@ -7,7 +7,7 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (Input, Static, Collapsible, OptionList, Button,
-                             Markdown, ProgressBar, TextArea)
+                             Markdown, ProgressBar, TextArea, Checkbox)
 from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal, VerticalScroll
 # rich.text.Text используется только как renderable для ANSI-вывода (логотип,
@@ -41,46 +41,72 @@ class ConfirmationScreen(ModalScreen):
     BINDINGS = []  # обрабатываем клавиши вручную через on_key
 
     def __init__(self, tool_name: str, args_display: str, warn_text: str = "",
-                 on_resolve: Optional[Callable] = None, **kwargs):
+                 on_resolve: Optional[Callable] = None, kind: str = "confirm", **kwargs):
         super().__init__(**kwargs)
         self.tool_name = tool_name
         self.args_display = args_display
         self.warn_text = warn_text
         self.on_resolve = on_resolve
+        self.kind = kind
+        self._switch_kind = (kind == "switch")
         self._reason_mode = False
         self._body: Optional[Static] = None
         self._options: Optional[OptionList] = None
+        self._auto: Optional[Checkbox] = None
 
     def _esc(self, text: str) -> str:
         return str(text or "").replace("[", r"\[")
 
     def compose(self) -> ComposeResult:
         warn = f"{self._esc(self.warn_text)}\n" if self.warn_text else ""
+        if self._switch_kind:
+            title = "[bold red]🔓 ТРЕБУЕТСЯ DANGEROUS MODE[/bold red]"
+            lead = ("[bold yellow]Инструмент[/bold yellow] "
+                    f"{self._esc(self.tool_name)} хочет выполнить действие вне сессии.\n"
+                    "[dim]Переключиться в dangerous mode и выполнить?[/dim]")
+        else:
+            title = "[bold red]⚠️  ПОДТВЕРДИТЕ ОПАСНОЕ ДЕЙСТВИЕ[/bold red]"
+            lead = (f"[bold yellow]Инструмент:[/bold yellow] {self._esc(self.tool_name)}\n"
+                    f"[bold yellow]Аргументы:[/bold yellow] {self._esc(self.args_display)}")
         self._body = Static(
-            f"[bold red]⚠️  ПОДТВЕРДИТЕ ОПАСНОЕ ДЕЙСТВИЕ[/bold red]\n"
-            f"[bold yellow]Инструмент:[/bold yellow] {self._esc(self.tool_name)}\n"
-            f"[bold yellow]Аргументы:[/bold yellow] {self._esc(self.args_display)}\n"
-            f"{warn}"
+            f"{title}\n{lead}\n{warn}"
             f"[dim]y — да · n/esc — нет · ↑↓ — выбор · Enter — подтвердить[/dim]",
             id="confirm_body")
         yield self._body
-        self._options = OptionList(
-            Option("✅ Да, выполнить", id="yes"),
-            Option("❌ Нет, отменить", id="no"),
-            Option("✏️  Отменить с причиной", id="no_reason"),
-            id="confirm_options")
-        yield self._options
+        if self._switch_kind:
+            opts = [
+                Option("✅ Да, переключить и выполнить", id="yes"),
+                Option("❌ Нет, отменить", id="no"),
+            ]
+        else:
+            opts = [
+                Option("✅ Да, выполнить", id="yes"),
+                Option("❌ Нет, отменить", id="no"),
+                Option("✏️  Отменить с причиной", id="no_reason"),
+            ]
+        self._options = OptionList(*opts, id="confirm_options")
+        with Horizontal(id="confirm_choice_row"):
+            yield self._options
+            if not self._switch_kind:
+                self._auto = Checkbox("Автосогласие на сессию (a)", id="confirm_auto")
+                yield self._auto
 
     def on_mount(self) -> None:
         if self._options:
             self._options.focus()
+
+    def _auto_checked(self) -> bool:
+        try:
+            return bool(self._auto and self._auto.value)
+        except Exception:
+            return False
 
     def _resolve(self, choice: str, reason: str = "") -> None:
         confirmed = (choice == "yes")
         final_reason = reason if (choice == "no_reason" and reason) else ""
         try:
             if self.on_resolve:
-                self.on_resolve(confirmed, final_reason)
+                self.on_resolve(confirmed, final_reason, self._auto_checked())
         finally:
             self.app.pop_screen()
 
@@ -119,6 +145,10 @@ class ConfirmationScreen(ModalScreen):
         elif k in ("n", "escape"):
             self._resolve("no")
             event.stop()
+        elif k in ("a", "ф"):
+            if self._auto is not None:
+                self._auto.value = not self._auto.value
+            event.stop()
 
 
 class ConfirmInline(Vertical):
@@ -132,15 +162,18 @@ class ConfirmInline(Vertical):
     BINDINGS = []
 
     def __init__(self, tool_name: str, args_display: str, warn_text: str = "",
-                 on_resolve: Optional[Callable] = None, **kwargs):
+                 on_resolve: Optional[Callable] = None, kind: str = "confirm", **kwargs):
         super().__init__(**kwargs)
         self.tool_name = tool_name
         self.args_display = args_display
         self.warn_text = warn_text
         self.on_resolve = on_resolve
+        self.kind = kind
+        self._switch_kind = (kind == "switch")
         self._reason_mode = False
         self._body: Optional[Static] = None
         self._options: Optional[OptionList] = None
+        self._auto: Optional[Checkbox] = None
         try:
             self._args = json.loads(args_display)
         except Exception:
@@ -172,11 +205,17 @@ class ConfirmInline(Vertical):
         warn = f"{self._esc(self.warn_text)}\n" if self.warn_text else ""
         has_cmd = self._command() is not None
         label = "Команда:" if has_cmd else "Аргументы:"
+        if self._switch_kind:
+            title = "[bold red]🔓 ТРЕБУЕТСЯ DANGEROUS MODE[/bold red]"
+            lead = (f"[bold yellow]Инструмент[/bold yellow] {self._esc(self.tool_name)} "
+                    "хочет выполнить действие вне сессии.\n"
+                    "[dim]Переключиться в dangerous mode и выполнить?[/dim]")
+        else:
+            title = "[bold red]⚠️  ПОДТВЕРДИТЕ ОПАСНОЕ ДЕЙСТВИЕ[/bold red]"
+            lead = (f"[bold yellow]Инструмент:[/bold yellow] {self._esc(self.tool_name)}\n"
+                    f"[bold yellow]{label}[/bold yellow]")
         self._body = Static(
-            f"[bold red]⚠️  ПОДТВЕРДИТЕ ОПАСНОЕ ДЕЙСТВИЕ[/bold red]\n"
-            f"[bold yellow]Инструмент:[/bold yellow] {self._esc(self.tool_name)}\n"
-            f"[bold yellow]{label}[/bold yellow]\n"
-            f"{warn}"
+            f"{title}\n{lead}\n{warn}"
             f"[dim]y — да · n/esc — нет · ↑↓ — выбор · Enter — подтвердить[/dim]",
             id="inline_confirm_body")
         yield self._body
@@ -185,23 +224,40 @@ class ConfirmInline(Vertical):
         yield VerticalScroll(
             Static(self._args_block(), markup=False, id="inline_confirm_cmd"),
             id="inline_confirm_cmd_scroll")
-        self._options = OptionList(
-            Option("✅ Да, выполнить", id="yes"),
-            Option("❌ Нет, отменить", id="no"),
-            Option("✏️  Отменить с причиной", id="no_reason"),
-            id="inline_confirm_options")
-        yield self._options
+        if self._switch_kind:
+            opts = [
+                Option("✅ Да, переключить и выполнить", id="yes"),
+                Option("❌ Нет, отменить", id="no"),
+            ]
+        else:
+            opts = [
+                Option("✅ Да, выполнить", id="yes"),
+                Option("❌ Нет, отменить", id="no"),
+                Option("✏️  Отменить с причиной", id="no_reason"),
+            ]
+        self._options = OptionList(*opts, id="inline_confirm_options")
+        with Horizontal(id="inline_confirm_choice_row"):
+            yield self._options
+            if not self._switch_kind:
+                self._auto = Checkbox("Автосогласие на сессию (a)", id="inline_confirm_auto")
+                yield self._auto
 
     def on_mount(self) -> None:
         if self._options:
             self._options.focus()
+
+    def _auto_checked(self) -> bool:
+        try:
+            return bool(self._auto and self._auto.value)
+        except Exception:
+            return False
 
     def _resolve(self, choice: str, reason: str = "") -> None:
         confirmed = (choice == "yes")
         final_reason = reason if (choice == "no_reason" and reason) else ""
         try:
             if self.on_resolve:
-                self.on_resolve(confirmed, final_reason)
+                self.on_resolve(confirmed, final_reason, self._auto_checked())
         finally:
             self._hide()
 
@@ -248,6 +304,10 @@ class ConfirmInline(Vertical):
             event.stop()
         elif k in ("n", "escape"):
             self._resolve("no")
+            event.stop()
+        elif k in ("a", "ф") and not self._switch_kind:
+            if self._auto is not None:
+                self._auto.value = not self._auto.value
             event.stop()
 
 
@@ -298,6 +358,17 @@ class Composer(TextArea):
         if key == "escape":
             event.stop()
             event.prevent_default()
+            # Во время генерации Esc — сигнал остановки, а не очистка ввода.
+            # Composer держит фокус и не даёт клавише всплыть до App.on_key,
+            # поэтому останавливаем сессию прямо здесь.
+            app = self.app
+            if getattr(app, "is_streaming", False):
+                try:
+                    app.request_stop()
+                    app.append_log("[dim]⏹ Stop requested[/dim]")
+                except Exception:
+                    pass
+                return
             self.text = ""
             return
         await super()._on_key(event)
@@ -323,10 +394,16 @@ class BotinokTextualApp(App):
 
     CSS = """
     Screen { layout: vertical; }
-    #header { height: 1; min-height: 1; max-height: 1; padding: 0; margin: 0;
-              content-align: center middle; background: #0055aa; color: white; text-style: bold; }
-    #header.dangerous { background: red; color: white; }
-    #header.proofreader { background: yellow; color: black; }
+    #header_row { height: 1; min-height: 1; max-height: 1; padding: 0; margin: 0;
+                  background: #0055aa; }
+    #header_row.dangerous { background: red; }
+    #header_row.proofreader { background: yellow; }
+    #header { width: 1fr; height: 1; padding: 0; margin: 0;
+              content-align: center middle; background: transparent; color: white; text-style: bold; }
+    /* Флаг автосогласия в шапке: виден только когда включён; клик — отключить. */
+    #auto_flag { width: auto; height: 1; padding: 0 1; margin: 0; display: none;
+                 background: #cc8800; color: black; text-style: bold; }
+    #auto_flag.on { display: block; }
     #main { height: 1fr; }
     #content { width: 2fr; height: 1fr; padding: 0; }
     #diag { height: auto; width: 1fr; background: transparent; border: none; padding: 0; }
@@ -344,11 +421,14 @@ class BotinokTextualApp(App):
     #inline_confirm_cmd_scroll { height: auto; max-height: 12; overflow-y: auto; }
     #inline_confirm_cmd { height: auto; background: #0f0f0f; color: #d0d0d0; padding: 0 1; }
     #inline_confirm_options { height: auto; max-height: 10; border: none;
-                              padding: 0; background: transparent; }
+                              padding: 0; background: transparent; width: 1fr; }
     #inline_confirm_options:focus { border: none; }
     #inline_confirm_reason { height: 3; }
+    /* Строка выбора согласия + галочка автосогласия на сессию. */
+    #inline_confirm_choice_row, #confirm_choice_row { height: auto; }
+    #inline_confirm_auto, #confirm_auto { width: auto; height: auto; margin: 0 0 0 2; }
     /* Запасной модальный вариант: без вложенной рамки OptionList. */
-    #confirm_options { border: none; padding: 0; background: transparent; }
+    #confirm_options { border: none; padding: 0; background: transparent; width: 1fr; }
     #inline_shell { height: 50%; display: none; border: solid cyan; padding: 0; }
     #inline_shell.active { display: block; }
     #inline_shell ShellInline { height: 1fr; }
@@ -419,6 +499,8 @@ class BotinokTextualApp(App):
         self.ctx_bar: Optional[ProgressBar] = None
         self.tools_list: Optional[Vertical] = None
         self.header_display: Optional[Static] = None
+        self.header_row: Optional[Horizontal] = None
+        self.auto_flag: Optional[Static] = None
         self.diag: Optional[Collapsible] = None
         self.diag_list: Optional[Vertical] = None
         self.diag_scroll: Optional[VerticalScroll] = None
@@ -458,6 +540,13 @@ class BotinokTextualApp(App):
         self._history_idx = 0
         self._confirmation_event: Optional[threading.Event] = None
         self._confirmation_result: bool = False
+        self._confirmation_kind: str = "confirm"
+        # Автосогласие на опасные действия до конца сессии (галочка в окне
+        # подтверждения dangerous mode).
+        self.dangerous_auto_confirm = False
+        # Пользователь отказался переключаться в dangerous mode — больше не
+        # спрашиваем в этой сессии, агент должен искать другие пути.
+        self.dangerous_switch_denied = False
         # Встроенное подтверждение опасного действия (не модалка).
         self.inline_confirm_container: Optional[Vertical] = None
         self.inline_confirm_widget = None
@@ -563,8 +652,12 @@ class BotinokTextualApp(App):
         return s
 
     def compose(self) -> ComposeResult:
+        self.header_row = Horizontal(id="header_row")
         self.header_display = Static("", id="header")
-        yield self.header_display
+        self.auto_flag = Static("АВТОСОГЛАСИЕ: ВКЛ ✕", id="auto_flag")
+        with self.header_row:
+            yield self.header_display
+            yield self.auto_flag
         with Horizontal(id="main"):
             self.content_container = Vertical(id="content")
             with self.content_container:
@@ -641,6 +734,12 @@ class BotinokTextualApp(App):
     def set_model_info(self, model: str, dangerous: bool = False, proofreader: bool = False):
         self.model_name = model
         self.dangerous_mode = dangerous
+        if dangerous:
+            # Режим включён вручную — отказ от переключения больше не актуален.
+            self.dangerous_switch_denied = False
+        else:
+            # Выключение dangerous mode сбрасывает автосогласие сессии.
+            self.dangerous_auto_confirm = False
         self.is_proofreader = proofreader
         self._stats_dirty = True
         self._tools_dirty = True
@@ -1046,8 +1145,17 @@ class BotinokTextualApp(App):
         self.header_display.update(self._render_header_text())
         # Цвет шапки — CSS-классы (см. CSS).
         try:
-            self.header_display.set_class(self.dangerous_mode, "dangerous")
-            self.header_display.set_class(self.is_proofreader, "proofreader")
+            row = self.header_row or self.header_display
+            row.set_class(self.dangerous_mode, "dangerous")
+            row.set_class(self.is_proofreader, "proofreader")
+        except Exception:
+            pass
+        # Флаг автосогласия в шапке.
+        try:
+            if self.auto_flag is not None:
+                show = self.dangerous_auto_confirm
+                self.auto_flag.set_class(show, "on")
+                self.auto_flag.update("АВТОСОГЛАСИЕ: ВКЛ ✕" if show else "")
         except Exception:
             pass
 
@@ -1556,6 +1664,17 @@ class BotinokTextualApp(App):
             self.append_log("[dim]⏹ Stop requested[/dim]")
             event.stop()
 
+    def on_click(self, event) -> None:
+        # Клик по флагу автосогласия в шапке — выключить его.
+        try:
+            if getattr(event, "widget", None) is self.auto_flag and self.dangerous_auto_confirm:
+                self.dangerous_auto_confirm = False
+                self.append_log("[yellow]Автосогласие отключено.[/yellow]")
+                self._update_header()
+                event.stop()
+        except Exception:
+            pass
+
     @staticmethod
     def _collapse_newlines(text: str) -> str:
         return re.sub(r'\n{3,}', '\n\n', text)
@@ -1690,24 +1809,36 @@ class BotinokTextualApp(App):
                 self.on_submit(text)
 
     def append_log(self, text: str) -> None:
+        # Текст лога приходит с rich-разметкой ([yellow]…[/yellow]) — не
+        # экранируем скобки, иначе теги видны как обычный текст. Динамические
+        # значения в этих строках экранируют вызывающие при необходимости.
         if self.chat:
-            self._add_static(self._rich_escape(text))
+            self._add_static(text)
             self.chat.scroll_end(animate=False)
 
     def clear_log(self) -> None:
         if self.chat:
             self.chat.remove_children()
 
-    def show_confirmation_prompt(self, tool_name: str, args_display: str, warn_text: str) -> None:
+    def show_confirmation_prompt(self, tool_name: str, args_display: str, warn_text: str = "",
+                                 kind: str = "confirm") -> None:
         self._confirmation_event = threading.Event()
         self._confirmation_result = False
         self._confirmation_reason = ""
+        self._confirmation_kind = kind
+        # Автосогласие действует только для подтверждений внутри dangerous mode,
+        # не для запросов на переключение режима.
+        if kind == "confirm" and self.dangerous_auto_confirm:
+            self._confirmation_result = True
+            self._confirmation_event.set()
+            return
         # По умолчанию — ВСТРОЕННОЕ подтверждение в окне вывода (не накрывает
         # правые панели). Модальный ConfirmationScreen — только запасной путь,
         # если inline-слот недоступен.
         widget = ConfirmInline(
             tool_name, args_display, warn_text,
             on_resolve=self._apply_confirmation,
+            kind=kind,
         )
         if self.inline_confirm_container is not None:
             self.hide_inline_confirmation()
@@ -1721,6 +1852,7 @@ class BotinokTextualApp(App):
         self.push_screen(ConfirmationScreen(
             tool_name, args_display, warn_text,
             on_resolve=self._apply_confirmation,
+            kind=kind,
         ))
 
     def hide_inline_confirmation(self) -> None:
@@ -1747,10 +1879,21 @@ class BotinokTextualApp(App):
     def _restore_input_placeholder(self) -> None:
         self._update_queue_placeholder()
 
-    def _apply_confirmation(self, confirmed: bool, reason: str = "") -> None:
-        """Колбэк модального экрана — вызывается из UI-потока."""
+    def _apply_confirmation(self, confirmed: bool, reason: str = "", auto: bool = False) -> None:
+        """Колбэк окна подтверждения — вызывается из UI-потока."""
         self._confirmation_result = confirmed
         self._confirmation_reason = reason
+        kind = getattr(self, "_confirmation_kind", "confirm")
+        if kind == "switch" and not confirmed:
+            # Отказ от переключения фиксируем: повторно не спрашиваем.
+            self.dangerous_switch_denied = True
+        if confirmed and auto and kind == "confirm":
+            self.dangerous_auto_confirm = True
+            try:
+                self.append_log("[yellow]⚠️ Автосогласие на опасные действия включено до конца сессии (флаг в шапке — клик, чтобы выключить).[/yellow]")
+            except Exception:
+                pass
+        self._update_header()
         self._restore_input_placeholder()
         self.update_stats_display()
         if self._confirmation_event:
