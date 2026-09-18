@@ -259,8 +259,8 @@ class ToolManager:
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain"],
-                                "description": "summary - сводка сессии, turns - список обменов, get_turn - конкретный turn, search - поиск по тексту, filter - фильтрация, timeline - хронология, stats - статистика, chain - цепочка turns"
+                                "enum": ["resume_brief", "summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain"],
+                                "description": "resume_brief - быстрый сбор сессии для продолжения (задача, состояние, последние ходы), summary - сводка сессии, turns - список обменов, get_turn - конкретный turn, search - поиск по тексту, filter - фильтрация, timeline - хронология, stats - статистика, chain - цепочка turns"
                             },
                             "session_path": {"type": "string", "description": "Путь к сессии (опционально, по умолчанию текущая)"},
                             "turn_id": {"type": "integer", "description": "ID turn для get_turn"},
