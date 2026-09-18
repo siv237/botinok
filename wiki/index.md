@@ -24,13 +24,15 @@
 ### Инструменты ([entities/tools/](entities/tools/))
 | Инструмент | Страница | Краткое описание |
 |-----------|----------|------------------|
+| web | [entities/tools/web.md](entities/tools/web.md) | Единый добыватель данных: search/open/extract/json/download; харнес подсказок |
+| download_manager | [entities/download_manager.md](entities/download_manager.md) | Глобальная память загрузок web: что/куда/целое, докачка, хеши |
 | file_system | [entities/tools/file-system.md](entities/tools/file-system.md) | FS: навигация, поиск, grep, инспекция; мутации — dangerous |
 | code_editor | [entities/tools/code-editor.md](entities/tools/code-editor.md) | Редактирование файлов (read/write/replace/apply); запись вне сессии — dangerous |
 | shell_exec | [entities/tools/shell-exec.md](entities/tools/shell-exec.md) | PTY-сессия команд (run/read/search/send/wait/kill), dangerous, встроенный терминал |
-| web_search | [entities/tools/web-search.md](entities/tools/web-search.md) | Поиск DuckDuckGo через lynx |
-| open_url | [entities/tools/open-url.md](entities/tools/open-url.md) | Извлечение текста страницы через lynx -dump |
-| web_extract | [entities/tools/web-extract.md](entities/tools/web-extract.md) | Структурированное извлечение (links, images, tables) через httpx+selectolax |
-| curl | [entities/tools/curl.md](entities/tools/curl.md) | HTTP GET, скачивание, jq-фильтры; запись вне сессии — dangerous |
+| web_search | [entities/tools/web-search.md](entities/tools/web-search.md) | legacy-обёртка web (поиск) |
+| open_url | [entities/tools/open-url.md](entities/tools/open-url.md) | legacy-обёртка web (текст страницы) |
+| web_extract | [entities/tools/web-extract.md](entities/tools/web-extract.md) | legacy-обёртка web (структура) |
+| curl | [entities/tools/curl.md](entities/tools/curl.md) | legacy-обёртка web (JSON/файлы); jq_filter восстановлен |
 | journal | [entities/tools/journal.md](entities/tools/journal.md) | Read-only анализ systemd journal (journalctl) |
 | github | [entities/tools/github.md](entities/tools/github.md) | Работа с GitHub API |
 | experience | [entities/tools/experience.md](entities/tools/experience.md) | База «позитивного/негативного» опыта |
@@ -47,6 +49,7 @@
 - [concepts/context_management.md](concepts/context_management.md) — обрезка, переполнение, SESSION_PROTOCOL, детекция зацикливания
 - [concepts/function_calling.md](concepts/function_calling.md) — механика tool-calls в потоке агента
 - [concepts/dangerous_mode.md](concepts/dangerous_mode.md) — безопасность: dangerous mode и подтверждения
+- [concepts/web_kit.md](concepts/web_kit.md) — единый веб-кит: один добыватель, харнес подсказок, контекстная дисциплина
 - [concepts/streaming_tui.md](concepts/streaming_tui.md) — стриминг, TTFT/TPS, VRAM, плавность UI
 - [concepts/terminal_unicode_width.md](concepts/terminal_unicode_width.md) — ширина Unicode в терминале: почему «плывут» панели и как лечим
 - [concepts/embedded_terminal.md](concepts/embedded_terminal.md) — встроенный терминал: PTY-сессии, свернуть/вернуть, общий доступ человека и агента

@@ -1,22 +1,18 @@
 ---
 type: entity
 tags: [tool, network]
-updated: 2026-08-23
-sources: 2
-status: stable
+updated: 2026-09-18
+sources: 3
+status: legacy
 ---
 
-# Инструмент open_url
+# Инструмент open_url (legacy-обёртка)
 
-`tools/open_url.py` → функция `open_url(url, session_path=None)`. Извлечение текстового содержимого страницы через `lynx -dump`.
-
-## Особенности
-- Быстрый способ прочитать «читабельный» текст страницы без HTML-мусора.
-- Настройки lynx в `[Tools]` конфига.
-- `session_path` прокидывается опционально.
+`tools/open_url.py` → функция `open_url(url, session_path=None)`. **Legacy-алиас**
+единого веб-кита `entities/tools/web.md`: делегирует в `web action=open`
+(читаемый основной текст страницы в markdown). Если схема опущена — добавляет
+`https://`.
 
 ## Связи
-Зарегистрирован как `open_url`. Компаньон `web_search` и `curl`. → `entities/tools/web-search.md`, `entities/tools/curl.md`
-
-## Различие с web_extract
-`open_url` даёт сплошной текст; `web_extract` — структурированные данные (ссылки, изображения, таблицы). При глубоком разборе предпочтителен `web_extract`. → `entities/tools/web-extract.md`
+Зарегистрирован как `open_url`. Предпочтительный инструмент — `web action=open`.
+→ `entities/tools/web.md`

@@ -1,19 +1,18 @@
 ---
 type: entity
 tags: [tool, network]
-updated: 2026-08-23
-sources: 2
-status: stable
+updated: 2026-09-18
+sources: 3
+status: legacy
 ---
 
-# Инструмент web_extract
+# Инструмент web_extract (legacy-обёртка)
 
-`tools/web_extract.py` → функция `web_extract(url, extract, ...)`. Извлечение структурированных ресурсов со страницы: ссылки, изображения, заголовки, мета-теги, таблицы. Использует **httpx + selectolax** (быстрый C-парсер). Алиас — `web_extractor` для совместимости.
-
-## Параметры
-- `extract` — что извлекать (enum): `links`, `images`, `headings`, `meta`, `tables`, `all`.
-- `max_items`, `timeout_sec`, `headers` (формат `Key: Value`).
-- `url` — обязателен.
+`tools/web_extract.py` → функция `web_extract(url, extract, ...)`. **Legacy-алиас**
+единого веб-кита `entities/tools/web.md`: делегирует в `web action=extract`
+(структура: ссылки, изображения, заголовки, мета-теги, таблицы + `css`-селекторы).
+Алиас `web_extractor` сохранён.
 
 ## Связи
-Зарегистрирован как `web_extract` (и алиас `web_extractor`). → `entities/tools/open-url.md`
+Зарегистрирован как `web_extract` (и `web_extractor`). Предпочтительный
+инструмент — `web action=extract`. → `entities/tool_manager.md`

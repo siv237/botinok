@@ -118,6 +118,28 @@ async def test_ui() -> None:
         check("click_disables", app.dangerous_auto_confirm is False)
         check("header_flag_off", not app.auto_flag.has_class("on"))
 
+        # РЕГРЕССИЯ (реальная поломка): отказ от повышения прав не должен
+        # «залипать» на последующие запросы пользователя — иначе система
+        # навсегда молча отказывает, не показывая окно переключения.
+        app.dangerous_switch_denied = False
+        app.show_confirmation_prompt("shell_exec", '{"command": "ls"}', "", "switch")
+        await pilot.pause()
+        app.inline_confirm_widget.on_key(_Key("n"))
+        await pilot.pause()
+        check("refusal_sets_denied", app.dangerous_switch_denied is True)
+
+        # Новый запрос пользователя: состояние отказа сбрасывается...
+        app.reset_turn_state()
+        check("denied_reset_on_new_turn", app.dangerous_switch_denied is False)
+        # ...и окно переключения снова реально показывается (а не молчаливый отказ).
+        app.show_confirmation_prompt("shell_exec", '{"command": "ls"}', "", "switch")
+        await pilot.pause()
+        check("switch_prompt_shown_after_refusal", app.inline_confirm_widget is not None)
+        w = app.inline_confirm_widget
+        w.on_key(_Key("y"))
+        await pilot.pause()
+        check("switch_approve_result", app._confirmation_result is True)
+
 
 async def main_async() -> int:
     print("=" * 70)

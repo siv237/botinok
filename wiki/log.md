@@ -358,3 +358,68 @@ Ns ───`), флаг `_done_written` (сбрасывается в `set_sessi
 - Страницы: `concepts/dangerous_mode.md`, `entities/tool_manager.md`,
   `entities/textual_ui.md`, `entities/botinok_cli.md`,
   `entities/tools/{file-system,code-editor,shell-exec,curl}.md`.
+
+## [2026-09-18] ingest | web-кит: один добыватель вместо четырёх инструментов
+Консолидация `web_search` + `open_url` + `web_extract` + `curl` в единый
+инструмент `web` (`tools/web.py`) с каркасом «помогающего» инструмента.
+- **Действия**: `auto` (роутинг по content-type), `open` (читаемый markdown),
+  `extract` (links/images/headings/meta/tables + `css`), `json` (jq или сводка),
+  `download`, `search` (DDG HTML через httpx, fallback lynx), `help`.
+- **Харнес** (по образцу `session_memory`): мета (`kind/type/size/elapsed/final/
+  saved/items/truncated`), `provenance` (`readable/extracted/projected/raw/saved`),
+  «💡 Совет», «➡ Следующие шаги (web)».
+- **Контекстная дисциплина**: большие HTML/JSON сохраняются в папку сессии,
+  в контекст идёт превью + путь.
+- **Фикс регрессии curl**: `jq_filter` был вырезан реализацией в `307dcf8`
+  (29.03.2026), но остался в схеме → `TypeError`. Восстановлен через
+  `web action=json`; `curl`/`web_extract`/`open_url`/`web_search` стали
+  тонкими обёртками.
+- **Схема/гейт**: в `_tool_registry` добавлен `web`; `allowed_in_session` и
+  `is_dangerous_tool` учитывают запись `web` вне сессии (→ dangerous mode).
+- **Промпты**: `tool_policy.txt` и `tool_reminder.txt` рекомендуют `web`.
+- **Тесты**: `tests/test_web_kit.py` (локальный HTTP-сервер: все действия,
+  харнес, jq-safety, регрессия `jq_filter`, гейт записи).
+- Страницы: `entities/tools/web.md`, `concepts/web_kit.md`; обновлены
+  `entities/tools/{curl,web-extract,open-url,web-search}.md`, `entities/tool_manager.md`,
+  `index.md`.
+
+## [2026-09-18] lint/fix | web: тело ответа сервера на ошибке + общая методика
+Диагностика сессии `20260918_203213`: новый `web action=json` на HTTP 400
+**выбрасывал тело ответа сервера**, поэтому модель не видела присланную
+причину и перебирала параметры (несколько неудачных запросов, обращение к
+legacy `curl`, потеря времени). Ошибка универсальная и не зависит от темы
+запроса: если сервер объясняет причину в теле, инструмент обязан её показать.
+- `_http_error` теперь включает `Ответ сервера: <reason>` (общий разбор JSON
+  `reason/error/message/detail`).
+- **Методика вместо доменной конкретики**: из текста ошибки извлекается имя
+  упомянутого сервером query-параметра и в «Следующих шагах» предлагается
+  вызов без него; автоматически делается только беззнаковая правка —
+  декодирование безопасных процент-экранирований (`%2F/%3A/%2C/%40`),
+  структурные `& = # ?` не трогаются. Конкретные значения API в коде не
+  зашиваются.
+- Тесты: `tests/test_web_kit.py` — `http_error_body`, `encoded_slash_autofix`,
+  `param_named_in_error`, `param_strip_next_action`; страница
+  `entities/tools/web.md` дополнена разделом «Умные ошибки (методика)».
+
+## [2026-09-18] ingest | web: надёжные загрузки (aria2c, память, докачка, хеши, торренты)
+Диагностика сессии `20260918_212628` (погода + фото): на фото-этапе
+`khv_amur_panorama.jpg` на диске оказался ровно **256000 байт** из 4608×3072 —
+новый `web` **молча обрезал** загрузку по `max_bytes` (старый curl не обрезал, а
+отказывал). Плюс Wikimedia на 429 отдавала HTML, который мог сохраниться как
+картинка, а извлечение фото было хрупким (только `img[src]`).
+- **`tools/download_manager.py`** — глобальная память загрузок
+  (`~/.botinok/downloads/history.json`, вне сессий): статус, размер, sha256, тип,
+  движок; `verify`/`pending`. Новая сессия не качает заново — `web` вернёт целый
+  файл из памяти; недокачанное предлагается к `resume=true`.
+- **`web` download**: через `aria2c` (докачка, большие файлы/ISO, торренты
+  `magnet:`/`.torrent`, `--seed-time=0`), без обрезки; HTML-заглушки
+  распознаются и не сохраняются; `expected_sha256` — при несовпадении файл
+  удаляется; `action=downloads` — память/проверка.
+- **Извлечение фото**: `srcset`, `data-src`/`data-original`/`data-lazy-src`,
+  `source[srcset]`, `og:image`/`twitter:image`; ранжирование фото выше иконок.
+- **Фикс `_human_size`** (двойное деление).
+- Тесты `tests/test_web_kit.py`: `download_not_truncated`, `html_stub_rejected`,
+  `download_sha_ok`/`download_sha_mismatch`, `downloads_memory`/`downloads_pending`,
+  `images_lazy_and_og`, `torrent_detect`, `magnet_destination`.
+- Live: тот же файл теперь качается целиком (3.6 МБ) через aria2c.
+- Страницы: `entities/tools/web.md`, `entities/download_manager.md`, `index.md`.

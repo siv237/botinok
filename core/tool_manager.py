@@ -51,7 +51,7 @@ def allowed_in_session(name, args, session_path) -> bool:
                 return path_within(session_path, args.get("dest"))
             return True
         return True
-    if name == "curl":
+    if name in ("curl", "web"):
         out = args.get("output_path")
         return True if not out else path_within(session_path, out)
     # shell_exec всегда опасен и не привязан к папке сессии.
@@ -80,6 +80,7 @@ class ToolManager:
         
         # Регистрация инструментов: имя -> модуль.функция
         self._tool_registry = {
+            "web": ("tools.web", "execute"),
             "web_search": ("tools.web_search", "ddg_search"),
             "open_url": ("tools.open_url", "open_url"),
             "web_extract": ("tools.web_extract", "web_extract"),
@@ -99,6 +100,45 @@ class ToolManager:
         
         # Базовые описания (пока tool не загружен)
         self._descriptions = {
+            "web": {
+                "type": "function",
+                "function": {
+                    "name": "web",
+                    "description": ("Единый добыватель данных из сети. Один инструмент вместо web_search/open_url/web_extract/curl. "
+                                    "action: auto — сам выберет стратегию по типу данных; open — читаемый текст страницы; "
+                                    "extract — структура (links/images/headings/meta/tables/css); json — JSON + jq-фильтр; "
+                                    "download — скачать файл (aria2c, докачка, торренты/magnet, проверка sha256; память загрузок action=downloads); "
+                                    "search — поиск в интернете; help — справка. "
+                                    "Возвращает мета-данные, совет и следующие шаги. Запись вне папки сессии требует dangerous mode."),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["auto", "open", "extract", "json", "download", "downloads", "search", "help"],
+                                       "description": "Что сделать (по умолчанию auto). downloads — память загрузок (что/куда/целое)"},
+                            "url": {"type": "string", "description": "URL http/https (для auto/open/extract/json/download)"},
+                            "query": {"type": "string", "description": "Поисковый запрос (для action=search)"},
+                            "extract": {"type": "array", "items": {"type": "string", "enum": ["links", "images", "headings", "meta", "tables", "all"]},
+                                        "description": "Что извлекать (action=extract), по умолчанию all"},
+                            "css": {"type": "array", "items": {"type": "string"}, "description": "CSS-селекторы для точечного извлечения (action=extract)"},
+                            "jq": {"type": "string", "description": ("jq-фильтр (action=json). Применяется к ответу как к входу '.': "
+                                       "'.daily', '.items[] | .name', '{temp: .current.temperature_2m}'. "
+                                       "Выборка по условию: '.items[] | select(.value | startswith(\"2026\"))' "
+                                       "(после 'as $x |' вход НЕ меняется — внутри select пиши '$x | ...', напр. "
+                                       "select($x | startswith(\"…\"))). Ведущая точка не обязательна (добавится). "
+                                       "Проще всего: сначала '.daily', потом уточняй; при ошибке jq вернётся её текст.")},
+                            "output_path": {"type": "string", "description": "Куда сохранить файл (action=download; вне сессии — dangerous mode)"},
+                            "resume": {"type": "boolean", "description": "Для download: докачать/перекачать (aria2c). Если файл уже цел — вернётся из глобальной памяти загрузок"},
+                            "expected_sha256": {"type": "string", "description": "Для download: ожидаемый sha256 файла; при несовпадении файл удаляется и возвращается ошибка"},
+                            "headers": {"type": "array", "items": {"type": "string"}, "description": "HTTP заголовки, формат 'Key: Value'"},
+                            "timeout_sec": {"type": "integer", "description": "Таймаут в секундах (по умолчанию 30)"},
+                            "max_bytes": {"type": "integer", "description": "Максимальный размер ответа в байтах"},
+                            "follow_redirects": {"type": "boolean", "description": "Следовать за редиректами (по умолчанию true)"},
+                            "max_items": {"type": "integer", "description": "Максимум элементов на категорию (action=extract/search)"}
+                        },
+                        "required": []
+                    }
+                }
+            },
             "web_search": {
                 "type": "function",
                 "function": {
@@ -249,7 +289,7 @@ class ToolManager:
                 "type": "function",
                 "function": {
                     "name": "curl",
-                    "description": "HTTP GET запросы. Readonly по умолчанию. Запись файлов разрешена только внутри папки сессии (session_path). Для записи вне сессии требуется dangerous_mode",
+                    "description": "Legacy-алиас web (HTTP GET/JSON/файлы). Поддерживает jq_filter. Для новых задач используй web action=json/download.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -482,9 +522,9 @@ class ToolManager:
                     and not allowed_in_session(name, args, session_path)):
                 return (f"Error: {name} action '{action}' outside session requires dangerous mode "
                         "(пользователь может разрешить переключение)")
-            if name == "curl" and isinstance(args, dict) and args.get("output_path") \
+            if name in ("curl", "web") and isinstance(args, dict) and args.get("output_path") \
                     and not allowed_in_session(name, args, session_path):
-                return ("Error: curl output_path outside session requires dangerous mode "
+                return (f"Error: {name} output_path outside session requires dangerous mode "
                         "(пользователь может разрешить переключение)")
 
         tool = self.get_tool(name)
