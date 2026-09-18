@@ -44,10 +44,17 @@ def _looks_like_html(data: bytes) -> bool:
     return head.startswith(b"<!doctype") or head.startswith(b"<html")
 
 
+_BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+
 def _download_image(url: str, timeout: int = 30) -> tuple[bytes, str]:
-    """Скачивает изображение по URL, возвращает (data, mime_type)"""
+    """Скачивает изображение по URL, возвращает (data, mime_type)."""
     try:
-        resp = httpx.get(url, timeout=timeout, follow_redirects=True)
+        # Многие CDN/хостинги отдают 403 без User-Agent — представляемся браузером.
+        resp = httpx.get(url, timeout=timeout, follow_redirects=True,
+                         headers={"User-Agent": _BROWSER_UA,
+                                  "Accept": "image/*,*/*;q=0.8"})
         resp.raise_for_status()
         
         # Проверяем Content-Type из заголовков

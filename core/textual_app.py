@@ -1570,6 +1570,15 @@ class BotinokTextualApp(App):
         self._add_static("")
         self.chat.scroll_end(animate=False)
 
+    def reset_turn_state(self) -> None:
+        """Сброс состояния, которое не должно переживать запрос пользователя.
+
+        Отказ от повышения прав относится к конкретному запросу: в новом запросе
+        пользователь снова должен получить окно переключения, а не молчаливый
+        отказ.
+        """
+        self.dangerous_switch_denied = False
+
     def start_assistant_turn(self) -> None:
         self._flush_tool_spoilers()
         self._last_chunk_time = 0.0

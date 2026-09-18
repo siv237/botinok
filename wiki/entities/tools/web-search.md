@@ -1,19 +1,17 @@
 ---
 type: entity
 tags: [tool, network]
-updated: 2026-08-23
-sources: 2
-status: stable
+updated: 2026-09-18
+sources: 3
+status: legacy
 ---
 
-# Инструмент web_search
+# Инструмент web_search (legacy-обёртка)
 
-`tools/web_search.py` → функция `ddg_search(query, session_path=None)`. Поиск в интернете через **DuckDuckGo** (использует `lynx`). → `entities/ollama_backend.md`
-
-## Особенности
-- Принимает поисковый запрос; в `config.cfg` `[Tools]` настраиваются `lynxuseragent`, `lynxmaxchars`, таймауты.
-- Отладочный вывод через `_debug`.
-- `session_path` прокидывается (для записи артефактов при необходимости).
+`tools/web_search.py` → функция `ddg_search(query, session_path=None)`.
+**Legacy-алиас** единого веб-кита `entities/tools/web.md`: делегирует в
+`web action=search` (DuckDuckGo HTML через httpx, fallback — lynx).
 
 ## Связи
-Зарегистрирован как `web_search`. Типичная связка: серия `web_search` → `open_url`/`web_extract` для чтения найденного. → `entities/tools/open-url.md`, `entities/tools/web-extract.md`, `concepts/function_calling.md`
+Зарегистрирован как `web_search`. Предпочтительный инструмент — `web action=search`.
+→ `entities/tools/web.md`

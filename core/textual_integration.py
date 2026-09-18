@@ -562,6 +562,13 @@ def ask_ollama_textual(
         streaming_tool_tokens = 0
         tool_tokens = 0
 
+        # Новый запрос пользователя: отказ от dangerous mode из прошлого запроса
+        # не переносим — иначе окно переключения больше никогда не появится.
+        try:
+            _call_from_thread(app.reset_turn_state)
+        except Exception:
+            app.dangerous_switch_denied = False
+
         while True:
             tool_rounds += 1
             if tool_rounds > MAX_TOOL_ROUNDS_PER_TURN:
@@ -1136,7 +1143,8 @@ def ask_ollama_textual(
                     (tool_name == "shell_exec" and (action or "run") in DANGEROUS_SHELL_ACTIONS)
                     or (tool_name == "code_editor" and action in DANGEROUS_EDITOR_ACTIONS)
                     or (tool_name == "file_system" and action in DANGEROUS_FS_ACTIONS)
-                    or (tool_name == "curl" and bool(tool_args.get("output_path")))
+                    or (tool_name in ("curl", "web") and bool(tool_args.get("output_path")))
+                    or (tool_name == "web" and action == "download")
                 )
                 if is_dangerous_tool:
                     # В простом режиме внутри сессии писать можно без dangerous mode;
@@ -1161,10 +1169,16 @@ def ask_ollama_textual(
                         confirmed = app._confirmation_result
                     if needs_prompt and not confirmed:
                         if kind == "switch":
-                            result = ("ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Пользователь запретил переключение "
-                                      "в dangerous mode. Это действие выполнить нельзя. НЕ повторяй "
-                                      "его и НЕ запрашивай dangerous mode снова; ищи безопасную "
-                                      "альтернативу или сообщи о невозможности.")
+                            result = (
+                                "ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Пользователь запретил повышение прав "
+                                "(dangerous mode) на эту сессию: выполнение кода и внешних "
+                                "бинарников недоступно. Все навыки, требующие выполнения кода "
+                                "(requires.bins / CLI), для этой задачи НЕРЕЛЕВАНТНЫ — их "
+                                "инструкции, правила, флаги и примеры применять НЕЛЬЗЯ. "
+                                "Не повторяй это действие и не запрашивай dangerous mode снова. "
+                                "Работай только безопасными инструментами; если задача без "
+                                "выполнения кода невыполнима — прямо сообщи об этом."
+                            )
                         else:
                             reason = (getattr(app, "_confirmation_reason", "")
                                       or "пользователь отклонил выполнение.")
