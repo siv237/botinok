@@ -24,7 +24,13 @@ import requests
 from typing import Optional, List, Dict, Callable
 
 from core.session_manager import SessionManager
-from core.tool_manager import ToolManager
+from core.tool_manager import (
+    ToolManager,
+    allowed_in_session,
+    DANGEROUS_FILESYSTEM_ACTIONS as DANGEROUS_FS_ACTIONS,
+    DANGEROUS_EDITOR_ACTIONS,
+    DANGEROUS_SHELL_ACTIONS,
+)
 from core.openai_compat import is_openai_backend, chat_stream_request, chat_once
 from core.textual_app import BotinokTextualApp
 
@@ -1123,23 +1129,46 @@ def ask_ollama_textual(
                         project_dir = os.path.join(session_path, "project")
                         tool_args["path"] = os.path.realpath(os.path.join(project_dir, raw_path))
 
-                DANGEROUS_FS_ACTIONS = ("delete", "move", "copy", "mkdir", "chmod", "symlink", "touch")
-                is_dangerous_tool = tool_name in ("shell_exec", "code_editor") or (
-                    tool_name == "file_system" and isinstance(tool_args, dict)
-                    and tool_args.get("action", "") in DANGEROUS_FS_ACTIONS
+                action = tool_args.get("action") if isinstance(tool_args, dict) else None
+                # Опасные действия: shell_exec (run/send/...), запись code_editor,
+                # мутации file_system и запись curl в файл.
+                is_dangerous_tool = (
+                    (tool_name == "shell_exec" and (action or "run") in DANGEROUS_SHELL_ACTIONS)
+                    or (tool_name == "code_editor" and action in DANGEROUS_EDITOR_ACTIONS)
+                    or (tool_name == "file_system" and action in DANGEROUS_FS_ACTIONS)
+                    or (tool_name == "curl" and bool(tool_args.get("output_path")))
                 )
-                if is_dangerous_tool and tm.dangerous_mode:
-                    _call_from_thread(
-                        app.show_confirmation_prompt,
-                        tool_name,
-                        json.dumps(tool_args, ensure_ascii=False),
-                        ""
-                    )
-                    app._confirmation_event.wait(timeout=300)
-                    confirmed = app._confirmation_result
-                    if not confirmed:
-                        reason = getattr(app, "_confirmation_reason", "") or "пользователь отклонил выполнение."
-                        result = f"ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Причина: {reason}"
+                if is_dangerous_tool:
+                    # В простом режиме внутри сессии писать можно без dangerous mode;
+                    # выход за пределы сессии требует переключения режима.
+                    needs_prompt = tm.dangerous_mode or not allowed_in_session(
+                        tool_name, tool_args, session_path)
+                    kind = "confirm" if tm.dangerous_mode else "switch"
+                    # Если пользователь уже отказался переключаться — не спрашиваем
+                    # повторно (иначе агент будет «долбить» одним и тем же запросом).
+                    switch_denied = (kind == "switch"
+                                     and getattr(app, "dangerous_switch_denied", False))
+                    confirmed = False
+                    if needs_prompt and not switch_denied:
+                        _call_from_thread(
+                            app.show_confirmation_prompt,
+                            tool_name,
+                            json.dumps(tool_args, ensure_ascii=False),
+                            "",
+                            kind,
+                        )
+                        app._confirmation_event.wait(timeout=300)
+                        confirmed = app._confirmation_result
+                    if needs_prompt and not confirmed:
+                        if kind == "switch":
+                            result = ("ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Пользователь запретил переключение "
+                                      "в dangerous mode. Это действие выполнить нельзя. НЕ повторяй "
+                                      "его и НЕ запрашивай dangerous mode снова; ищи безопасную "
+                                      "альтернативу или сообщи о невозможности.")
+                        else:
+                            reason = (getattr(app, "_confirmation_reason", "")
+                                      or "пользователь отклонил выполнение.")
+                            result = f"ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Причина: {reason}"
                         artifact_path = ""
                         compact_msg = _compact_tool_message(tool_name, tool_args, result, "")
                         messages.append({
@@ -1155,6 +1184,16 @@ def ask_ollama_textual(
                         _update_tool(tool_name, status="aborted", size_kb=0)
                         _append_tool_result(tool_name, compact_msg[:500])
                         continue
+                    if kind == "switch" and confirmed:
+                        # Пользователь разрешил переключение — включаем dangerous mode
+                        # и выполняем действие в этом же ходе.
+                        tm.dangerous_mode = True
+                        os.environ["BOTINOK_DANGEROUS"] = "1"
+                        try:
+                            _call_from_thread(app.set_model_info, _current_model, dangerous=True)
+                        except Exception:
+                            pass
+                        _write_log("[yellow]⚠️ Dangerous mode: ON (по запросу инструмента)[/yellow]")
 
                 tool_result = tm.call_tool(
                     tool_name,

@@ -2,7 +2,7 @@
 type: concept
 tags: [safety, tui]
 updated: 2026-09-18
-sources: 3
+sources: 4
 status: stable
 ---
 
@@ -11,31 +11,65 @@ status: stable
 Потенциально опасные действия требуют явного включения. Цель — предотвратить случайные разрушительные операции LLM-агентом.
 
 ## Включение
-- Опасные инструменты (`code_editor`, `shell_exec`) по умолчанию отключены.
+- Опасные инструменты (`code_editor`, `shell_exec`) по умолчанию ограничены.
 - Активация на сессию: `botinok --dangerous` (разовый флаг CLI). → `entities/botinok_cli.md`
-- Либо env `BOTINOK_DANGEROUS=1` (читается `ToolManager`).
+- Либо env `BOTINOK_DANGEROUS=1` (читается `ToolManager`). → `entities/tool_manager.md`
+- В TUI — команда `/dangerous` (тумблер, синхронизирует env и `tm.dangerous_mode`).
+- Переключение можно запросить **из простого режима**: при попытке опасного
+  действия вне сессии показывается окно «Да, переключить и выполнить / Нет».
 
 ## Что считается опасным
-- `code_editor` (write/replace/apply) — правка кода.
-- `shell_exec` — выполнение команд (всегда запрашивает подтверждение пользователя перед выполнением).
-- `file_system` мутации: `delete` · `move` · `copy` · `mkdir` · `chmod` · `symlink` · `touch` — требуют dangerous mode; вне сессии ещё и подтверждение.
-- `curl` запись ответа **вне** папки сессии.
+- `code_editor` (`write`/`replace`/`apply`) — правка кода.
+- `shell_exec` (`run`/`send`/`send_key`/`kill`/`wait`) — выполнение команд.
+- `file_system` мутации: `delete` · `move` · `copy` · `mkdir` · `chmod` · `symlink` · `touch`.
+- `curl` запись ответа (`output_path`).
 
-## Реализация
-- `ToolManager.call_tool` блокирует опасные действия вне dangerous mode возвратом ошибки.
-- Безопасная FS-обёртка: проверки «в пределах» (`_is_within`, `_is_within_session`), `_confirm_action`, `_safe_path`. → `entities/tools/file-system.md`
-- Промпт-уведомление `dangerous_mode.txt` говорит модели о режиме. → `sources/prompts_readme.md`
+## Политика простого режима (без dangerous mode)
+Действие разрешено, если оно **целиком внутри папки сессии**; иначе нужен
+dangerous mode:
+- `code_editor`: `read` — всегда; запись внутри сессии — можно, вне — запрос переключения.
+- `file_system`: мутации внутри сессии — можно, вне — запрос переключения.
+- `curl`: `output_path` внутри сессии — можно, вне — запрос переключения.
+- `shell_exec`: всегда опасен (не привязан к папке сессии) — запрос переключения.
+
+Проверка «внутри/вне» дублируется на двух уровнях:
+- `ToolManager.call_tool` (единая точка, покрывает и headless) — возвращает ошибку,
+  если действие не разрешено без dangerous mode. → `entities/tool_manager.md`
+- TUI-цикл (`textual_integration.py`) — перехватывает такое действие **до** вызова
+  и показывает окно переключения. → `entities/textual_ui.md`
 
 ## Подтверждение в TUI
 Подтверждение (`show_confirmation_prompt`) показывается **встроенно** в окно
 вывода — `#inline_confirm` (`ConfirmInline`), а не модалкой поверх правых
-панелей (модальный `ConfirmationScreen` остаётся запасным путём). Варианты:
-✅ Да · ❌ Нет · ✏️ Отменить с причиной (`y/д`, `n/esc`, ↑↓+Enter). Воркер ждёт
-ответ через `threading.Event` (`_confirmation_event`), таймаут 300 с. После
-выбора `ConfirmInline` вызывает `_apply_confirmation` и убирается
+панелей (модальный `ConfirmationScreen` остаётся запасным путём). Два вида окна
+(`kind`):
+- `confirm` — dangerous mode уже включён: «✅ Да, выполнить · ❌ Нет ·
+  ✏️ Отменить с причиной» (`y/д`, `n/esc`, ↑↓+Enter) плюс галочка
+  **«Автосогласие на сессию»**.
+- `switch` — режим выключен, действие вне сессии: только
+  «✅ Да, переключить и выполнить · ❌ Нет, отменить» (без причины и галочки).
+
+Воркер ждёт ответ через `threading.Event` (`_confirmation_event`), таймаут 300 с.
+После выбора `ConfirmInline` вызывает `_apply_confirmation` и убирается
 (`hide_inline_confirmation`). Команда `shell_exec` показывается **развёрнутой**
 через `shfmt` (`format_shell_command`) в прокручиваемом блоке; прочие аргументы —
 pretty-JSON. → `entities/shell_screen.md`
 
+## Автосогласие на сессию
+Галочка в окне `confirm` («a»/«ф» или мышью) включает
+`app.dangerous_auto_confirm`: последующие опасные подтверждения в этой сессии
+проходят без окна. Флаг показывается в шапке (`#auto_flag`, «АВТОСОГЛАСИЕ: ВКЛ ✕»);
+**клик по флагу выключает** автосогласие. Сбрасывается при выключении dangerous
+mode. Автосогласие не действует на окно `switch`.
+
+## Отказ от переключения
+Если пользователь отказался (`switch` → «Нет»), `app.dangerous_switch_denied`
+запоминается: повторные запросы переключения в этой сессии **не показываются**.
+Агенту возвращается результат: «ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ… НЕ повторяй… ищи
+безопасную альтернативу», чтобы он сразу искал другой путь. Сбрасывается при
+ручном включении dangerous mode.
+
 ## Связи
 Инструменты: `code_editor`, `shell_exec`, `file_system`, `curl`.
+Реализация: `entities/tool_manager.md`, `entities/textual_ui.md`,
+`entities/botinok_cli.md`, `entities/tools/*`.

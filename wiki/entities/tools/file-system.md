@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [tool, system, safety]
-updated: 2026-08-23
-sources: 2
+updated: 2026-09-18
+sources: 3
 status: stable
 ---
 
@@ -17,12 +17,16 @@ status: stable
 - Чтение с лимитами (`_read_file`, `_read_text_with_limits`, offset/limit), `_tail_file`, `grep`/regex (`_grep_files`, `_grep_regex`).
 - Системная инспекция: `_proc_list`, `_proc_info`, `_sys_meminfo`, `_sys_disk_free`, `_read_os_release`, `_fs_tree`.
 
-**Опасные** (требуют dangerous mode + подтверждение вне сессии):
+**Опасные** (в простом режиме — только внутри папки сессии; вне — dangerous mode):
 `delete` · `move` · `copy` · `mkdir` · `chmod` · `symlink` · `touch`
 - Обёртки `_dangerous_action`, `_confirm_action`, `_parse_mode`, `_is_within_session`.
+- `_dangerous_action` разрешает мутацию без dangerous mode, если `path` (и `dest`
+  для `move`/`copy`/`symlink`) внутри `session_path`; иначе — ошибка.
 
 ## Безопасность
-Проверка пути на выход за пределы рабочей области; запрос подтверждения для мутирующих действий вне сессии; dangerous_mode прокидывается из `ToolManager`. → `concepts/dangerous_mode.md`, `entities/tool_manager.md`
+Проверка пути на выход за пределы сессии (`_is_within_session`); мутации внутри
+сессии разрешены без dangerous mode; вне — гейт в `ToolManager.call_tool` и
+запрос переключения/подтверждения в TUI. → `concepts/dangerous_mode.md`, `entities/tool_manager.md`
 
 ## Связи
 Зарегистрирован в `ToolManager._tool_registry` как `file_system`. Журнал вызовов — `tools.log` сессии. → `entities/session_directory.md`

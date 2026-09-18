@@ -327,3 +327,34 @@ Ns ───`), флаг `_done_written` (сбрасывается в `set_sessi
   resume-brief, round-trip). Страницы: `entities/tools/session-memory.md`,
   `concepts/session_resume.md`, обновлены `entities/session_manager.md`,
   `concepts/session_lifecycle.md`, `index.md`.
+
+## [2026-09-18] ingest | dangerous mode: политика внутри/вне сессии, автосогласие, запрос переключения
+Переработан механизм подтверждений и гейт опасных действий.
+- **Гейт `ToolManager.call_tool`** (простой режим): `shell_exec` запрещён;
+  `code_editor` (write/replace/apply), мутации `file_system` и `curl output_path`
+  разрешены только внутри `session_path`; хелперы `_path_within`/`_allowed_in_session`.
+  Раньше блокировался только `file_system`, а `code_editor`/`shell_exec`
+  выполнялись без подтверждения при выключенном dangerous mode.
+- **`file_system._dangerous_action`**: разрешает мутации внутри сессии без
+  dangerous mode (вне — ошибка).
+- **`code_editor`**: новый параметр `dangerous_mode`; при включении снимается
+  ограничение корня `_safe_path` (запись вне сессии после переключения).
+- **TUI (`textual_integration.py`)**: опасное действие вне сессии в простом
+  режиме → окно `kind="switch"` (да/нет); согласие включает dangerous mode и
+  выполняет действие; отказ → `dangerous_switch_denied` (повторно не спрашивать)
+  и явный результат агенту («ищи безопасную альтернативу»).
+- **Подтверждение** `kind="confirm"` + галочка **автосогласия на сессию**
+  (`dangerous_auto_confirm`), флаг в шапке `#auto_flag` с отключением по клику.
+- **Фикс прерывания по Esc**: `Composer._on_key` перехватывал `Esc` всегда
+  (гасил событие) и не давал всплыть до `App.on_key` → остановка стрима не
+  срабатывала. Теперь при `is_streaming` `Esc` вызывает `request_stop()`.
+- **Фикс рендера логов**: `append_log` не экранирует markup, поэтому
+  `[yellow]…[/yellow]` больше не отображаются как текст.
+- **Ревью-фиксы**: единый источник политики вынесен в
+  `ToolManager.path_within` / `allowed_in_session` (их импортирует
+  `textual_integration` вместо локальной копии); относительные `path`/
+  `output_path` трактуются относительно `session_path`, а не CWD.
+- **Тесты**: `tests/test_dangerous_mode.py` (гейт + UI switch/автосогласие/клик).
+- Страницы: `concepts/dangerous_mode.md`, `entities/tool_manager.md`,
+  `entities/textual_ui.md`, `entities/botinok_cli.md`,
+  `entities/tools/{file-system,code-editor,shell-exec,curl}.md`.

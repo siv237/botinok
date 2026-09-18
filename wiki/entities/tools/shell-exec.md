@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [tool, safety, session, tui]
-updated: 2026-09-16
-sources: 2
+updated: 2026-09-18
+sources: 3
 status: stable
 ---
 
@@ -46,9 +46,12 @@ status: stable
 headless (сессия в реестре).
 
 ## Безопасность
-Опасное действие: включается только в **dangerous mode**, и при вызове всегда
-запрашивается подтверждение пользователя (модальный `ConfirmationScreen`) —
-до старта команды. → `concepts/dangerous_mode.md`
+Опасные action (`run`/`send`/`send_key`/`kill`/`wait`) требуют **dangerous mode**.
+В простом режиме вызов блокируется гейтом `ToolManager`; в TUI пользователю
+предлагается окно переключения (да/нет), после согласия режим включается и
+команда выполняется. В dangerous mode перед стартом команды всегда показывается
+встроенное подтверждение (`ConfirmInline`, с галочкой автосогласия) — не модалка.
+→ `concepts/dangerous_mode.md`
 
 ## Связи
 - Ядро сессии и реестры: `entities/shell_session.md`.
