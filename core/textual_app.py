@@ -22,6 +22,7 @@ import time
 import threading
 from datetime import datetime
 from core.text_width import normalize_cells, cell_truncate
+from core.shell_screen import format_shell_command
 
 SPOILER_PREVIEW = 80
 # Для прилипания «вниз» требуется буквальная позиция в самом низу (допуск 1px),
@@ -120,6 +121,136 @@ class ConfirmationScreen(ModalScreen):
             event.stop()
 
 
+class ConfirmInline(Vertical):
+    """Встроенное в окно вывода подтверждение опасного действия.
+
+    Не накрывает правые панели (в отличие от модального ConfirmationScreen):
+    живёт в `#content` над терминалом/чатом. Логика та же: y/д — да,
+    n/esc — нет, ↑↓ + Enter — выбор, «Отменить с причиной» — мини-инпут.
+    """
+
+    BINDINGS = []
+
+    def __init__(self, tool_name: str, args_display: str, warn_text: str = "",
+                 on_resolve: Optional[Callable] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.tool_name = tool_name
+        self.args_display = args_display
+        self.warn_text = warn_text
+        self.on_resolve = on_resolve
+        self._reason_mode = False
+        self._body: Optional[Static] = None
+        self._options: Optional[OptionList] = None
+        try:
+            self._args = json.loads(args_display)
+        except Exception:
+            self._args = None
+
+    def _esc(self, text: str) -> str:
+        return str(text or "").replace("[", r"\[")
+
+    def _command(self) -> Optional[str]:
+        if isinstance(self._args, dict):
+            cmd = self._args.get("command")
+            if isinstance(cmd, str) and cmd.strip():
+                return cmd
+        return None
+
+    def _args_block(self) -> str:
+        """Тело для показа: команда (развёрнутая) либо pretty-JSON аргументов."""
+        cmd = self._command()
+        if cmd is not None:
+            return format_shell_command(cmd)
+        if isinstance(self._args, dict):
+            try:
+                return json.dumps(self._args, ensure_ascii=False, indent=2)[:4000]
+            except Exception:
+                pass
+        return str(self.args_display or "")[:4000]
+
+    def compose(self) -> ComposeResult:
+        warn = f"{self._esc(self.warn_text)}\n" if self.warn_text else ""
+        has_cmd = self._command() is not None
+        label = "Команда:" if has_cmd else "Аргументы:"
+        self._body = Static(
+            f"[bold red]⚠️  ПОДТВЕРДИТЕ ОПАСНОЕ ДЕЙСТВИЕ[/bold red]\n"
+            f"[bold yellow]Инструмент:[/bold yellow] {self._esc(self.tool_name)}\n"
+            f"[bold yellow]{label}[/bold yellow]\n"
+            f"{warn}"
+            f"[dim]y — да · n/esc — нет · ↑↓ — выбор · Enter — подтвердить[/dim]",
+            id="inline_confirm_body")
+        yield self._body
+        # Развёрнутая команда/аргументы — в прокручиваемом блоке, чтобы
+        # длинную команду было удобно читать глазами прямо в подтверждении.
+        yield VerticalScroll(
+            Static(self._args_block(), markup=False, id="inline_confirm_cmd"),
+            id="inline_confirm_cmd_scroll")
+        self._options = OptionList(
+            Option("✅ Да, выполнить", id="yes"),
+            Option("❌ Нет, отменить", id="no"),
+            Option("✏️  Отменить с причиной", id="no_reason"),
+            id="inline_confirm_options")
+        yield self._options
+
+    def on_mount(self) -> None:
+        if self._options:
+            self._options.focus()
+
+    def _resolve(self, choice: str, reason: str = "") -> None:
+        confirmed = (choice == "yes")
+        final_reason = reason if (choice == "no_reason" and reason) else ""
+        try:
+            if self.on_resolve:
+                self.on_resolve(confirmed, final_reason)
+        finally:
+            self._hide()
+
+    def _hide(self) -> None:
+        try:
+            app = self.app
+        except Exception:
+            app = None
+        if app is not None:
+            try:
+                app.hide_inline_confirmation()
+            except Exception:
+                pass
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        opt_id = getattr(event.option, "id", "") or ""
+        if opt_id == "no_reason":
+            self._reason_mode = True
+            if self._body is not None:
+                self._body.update(
+                    getattr(self._body, "content", "")
+                    + "\n[bold cyan]Причина отказа (Enter — отправить, esc — просто отменить):[/bold cyan]")
+            reason_input = Input(placeholder="причина отказа...", id="inline_confirm_reason")
+            self.mount(reason_input)
+            reason_input.focus()
+        else:
+            self._resolve(opt_id)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if not self._reason_mode:
+            return
+        reason = event.value.strip()
+        self._resolve("no_reason", reason or "Отменено пользователем без объяснения причин.")
+
+    def on_key(self, event) -> None:
+        if self._reason_mode:
+            if event.key == "escape":
+                self._resolve("no")
+                event.stop()
+            return
+        k = event.key.lower()
+        if k in ("y", "д"):
+            self._resolve("yes")
+            event.stop()
+        elif k in ("n", "escape"):
+            self._resolve("no")
+            event.stop()
+
+
 class Composer(TextArea):
     """Многострочный композер ввода.
 
@@ -205,12 +336,47 @@ class BotinokTextualApp(App):
     #diag_list Collapsible { width: 1fr; height: auto; background: transparent;
                              border: none; padding: 0; }
     #diag_list CollapsibleTitle { padding: 0; width: 1fr; }
+    #inline_confirm { height: auto; max-height: 60%; display: none;
+                      border: solid red; padding: 0 1; background: $surface; }
+    #inline_confirm.active { display: block; }
+    #inline_confirm ConfirmInline { height: auto; }
+    #inline_confirm_body { height: auto; padding: 0 1; }
+    #inline_confirm_cmd_scroll { height: auto; max-height: 12; overflow-y: auto; }
+    #inline_confirm_cmd { height: auto; background: #0f0f0f; color: #d0d0d0; padding: 0 1; }
+    #inline_confirm_options { height: auto; max-height: 10; border: none;
+                              padding: 0; background: transparent; }
+    #inline_confirm_options:focus { border: none; }
+    #inline_confirm_reason { height: 3; }
+    /* Запасной модальный вариант: без вложенной рамки OptionList. */
+    #confirm_options { border: none; padding: 0; background: transparent; }
+    #inline_shell { height: 50%; display: none; border: solid cyan; padding: 0; }
+    #inline_shell.active { display: block; }
+    #inline_shell ShellInline { height: 1fr; }
+    #inline_shell_title { height: 1; background: cyan; color: black;
+                          text-style: bold; padding: 0 1; }
+    #inline_shell_cmd, #shell_cmd { height: auto; max-height: 40%; display: none;
+                                    background: #0f0f0f; color: #d0d0d0;
+                                    padding: 0 1; border: none; }
+    #inline_shell_cmd.show, #shell_cmd.show { display: block; }
+    #inline_shell_log { height: 1fr; border: none; padding: 0 1; background: #0c0c0c; }
+    #inline_shell_hint { height: 1; color: $text-muted; padding: 0 1; }
+    #inline_shell_input { height: 3; }
+    #inline_shell_buttons { height: 3; align: right middle; }
+    #inline_shell_buttons Button { min-width: 12; height: 3; margin: 0 1; }
     #chat { height: 1fr; border: solid green; padding: 0 1; overflow-y: auto; }
     #right { width: 1fr; }
     #shells { height: auto; max-height: 50%; display: none; border: solid cyan; padding: 0; }
     #shells.has-items { display: block; }
-    #shells_title { height: 1; color: cyan; padding: 0 1; }
-    #shells Button { width: 1fr; height: 3; margin: 0; }
+    #shells_title { height: 1; color: cyan; text-style: bold; padding: 0 1; }
+    #shells_active { height: 1; padding: 0 1; color: $success; }
+    #shells Horizontal { height: 1; }
+    #shells Button { height: 1; min-height: 1; min-width: 0; margin: 0; padding: 0 1;
+                     border: none; text-align: left; text-overflow: ellipsis;
+                     content-align: left middle; }
+    #shells Button.restore { width: 1fr; }
+    #shells Static.stamp { width: auto; height: 1; padding: 0 1; color: $text-muted; }
+    #shells Button.kill { width: 3; min-width: 3; text-align: center;
+                          content-align: center middle; }
     #stats { height: 1fr; border: round yellow; border-title-color: yellow;
              border-title-style: bold; padding: 0 1; }
     #stats_rows { height: 1fr; }
@@ -285,14 +451,26 @@ class BotinokTextualApp(App):
         self._history_idx = 0
         self._confirmation_event: Optional[threading.Event] = None
         self._confirmation_result: bool = False
+        # Встроенное подтверждение опасного действия (не модалка).
+        self.inline_confirm_container: Optional[Vertical] = None
+        self.inline_confirm_widget = None
         self._stats_dirty = True
         self._tools_dirty = True
         self._footer_dirty = True
         self._last_open_spoiler: Optional[Collapsible] = None
         # Свёрнутые окна терминала: session_id -> окно «висит» на панели.
         self.minimized_shells: set = set()
-        self.shells_display: Optional[Vertical] = None
+        self.shells_display: Optional[VerticalScroll] = None
         self._shells_sig: Optional[str] = None
+        self._shell_widgets: dict = {}       # session_id -> Horizontal-строка в панели
+        self._shells_title_widget = None
+        self._shells_active_widget = None
+        # Встроенная (inline) панель терминала над чатом — режим по умолчанию.
+        # Виджет создаётся один раз и переиспользуется; «свёрнут» — скрыт
+        # (контейнер без класса active), а не удалён из DOM.
+        self.inline_shell_container: Optional[Vertical] = None
+        self.inline_shell_widget = None
+        self.inline_shell_active = False
 
     def _spoiler_title(self, label: str, text: str) -> str:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -329,6 +507,14 @@ class BotinokTextualApp(App):
 
     def _keep_focus(self) -> None:
         try:
+            # Не отбираем фокус у встроенного терминала: пользователь может
+            # печатать в него, пока модель стримит ответ в чат ниже.
+            if self.inline_shell_active and self.inline_shell_widget is not None:
+                node = self.focused
+                while node is not None:
+                    if node is self.inline_shell_widget:
+                        return
+                    node = getattr(node, "parent", None)
             self.set_focus(self.query_one("#input", Composer))
         except Exception:
             pass
@@ -379,10 +565,18 @@ class BotinokTextualApp(App):
                 self.diag_scroll = VerticalScroll(self.diag_list, id="diag_scroll")
                 self.diag = Collapsible(self.diag_scroll, title="Prompt:", collapsed=True, id="diag")
                 yield self.diag
+                # Встроенное подтверждение опасного действия (не модалка —
+                # чтобы не накрывать правые панели).
+                self.inline_confirm_container = Vertical(id="inline_confirm")
+                yield self.inline_confirm_container
+                # Встроенный терминал: занимает верхнюю часть колонки вывода,
+                # чат со стримом модели остаётся под ним.
+                self.inline_shell_container = Vertical(id="inline_shell")
+                yield self.inline_shell_container
                 self.chat = Vertical(id="chat")
                 yield self.chat
             with Vertical(id="right"):
-                self.shells_display = Vertical(id="shells")
+                self.shells_display = VerticalScroll(id="shells")
                 yield self.shells_display
                 with Vertical(id="stats"):
                     self.stats_rows = Static("", id="stats_rows")
@@ -500,50 +694,218 @@ class BotinokTextualApp(App):
             sessions.append(s)
         return sessions
 
-    def _update_shells_panel(self) -> None:
-        """Перерисовать панель свёрнутых терминалов (только при изменениях)."""
-        if self.shells_display is None:
-            return
-        sessions = self._shell_sessions_minimized()
-        sig = "|".join(
-            f"{s.session_id}:{s.is_running()}:{s.name}" for s in sessions
-        )
-        if sig == self._shells_sig:
-            return
-        self._shells_sig = sig
+    @staticmethod
+    def _shell_clock(ts: float, with_date: bool = False) -> str:
+        fmt = "%d.%m %H:%M:%S" if with_date else "%H:%M:%S"
         try:
-            self.shells_display.remove_children()
+            return time.strftime(fmt, time.localtime(ts or 0))
         except Exception:
-            pass
-        if not sessions:
+            return "--:--:--"
+
+    @staticmethod
+    def _shell_duration(secs: float) -> str:
+        secs = int(secs or 0)
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            return f"{secs // 60}m{secs % 60:02d}s"
+        return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+
+    @classmethod
+    def _shell_name(cls, s, prefix: str = "", limit: int = 200) -> str:
+        state = "▶" if s.is_running() else "■"
+        name = (getattr(s, "name", "") or "").replace("\n", " ").strip()
+        if len(name) > limit:
+            name = name[:limit - 1] + "…"
+        return f"{prefix}{state} {name}"
+
+    @classmethod
+    def _shell_stamp(cls, s, with_date: bool = False) -> str:
+        start = cls._shell_clock(getattr(s, "started_at", 0), with_date)
+        try:
+            secs = int(s.elapsed)
+        except Exception:
+            secs = 0
+        return f"{start} · {cls._shell_duration(secs)}"
+
+    @classmethod
+    def _shell_row_label(cls, s, prefix: str = "") -> str:
+        return f"{cls._shell_name(s, prefix)} · {cls._shell_stamp(s, with_date=True)}"
+
+    def _active_shell_session(self):
+        if not self.inline_shell_active:
+            return None
+        w = self.inline_shell_widget
+        if w is None:
+            return None
+        s = getattr(w, "session", None)
+        if s is None or not getattr(s, "session_id", ""):
+            return None
+        return s
+
+    def _clear_shells_panel(self) -> None:
+        for sid in list(self._shell_widgets):
+            entry = self._shell_widgets.pop(sid)
             try:
-                self.shells_display.remove_class("has-items")
+                entry["row"].remove()
             except Exception:
                 pass
-            return
+        for attr in ("_shells_title_widget", "_shells_active_widget"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    w.remove()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
         try:
-            self.shells_display.add_class("has-items")
-            self.shells_display.mount(
-                Static("[bold cyan]Терминалы (свёрнуты)[/bold cyan]", id="shells_title"))
-            for s in sessions:
-                state = "▶ выполняется" if s.is_running() else "■ завершён"
-                label = f"{s.name[:26]}  ({state})"
-                self.shells_display.mount(
-                    Button(label, id=f"shell_restore_{s.session_id}", variant="primary"))
+            self.shells_display.remove_class("has-items")
         except Exception:
             pass
 
+    def _update_shells_panel(self) -> None:
+        """Обновить панель терминалов инкрементально.
+
+        Верхняя строка — всегда активный (встроенный) терминал с тикающим
+        счётчиком секунд; ниже — однострочные свёрнутые сессии с временем
+        старта, длительностью и кнопкой закрытия. Полный rebuild конкурирует с
+        асинхронной уборкой DOM, поэтому строки переиспользуются по session_id.
+        """
+        if self.shells_display is None:
+            return
+        active = self._active_shell_session()
+        active_sid = getattr(active, "session_id", "")
+        sessions = [s for s in self._shell_sessions_minimized()
+                    if s.session_id != active_sid]
+        sig_parts = [f"{s.session_id}:{s.is_running()}:{s.name}:{int(s.elapsed)}"
+                     for s in sessions]
+        if active is not None:
+            sig_parts.append(
+                f"active:{active_sid}:{active.is_running()}:{int(active.elapsed)}")
+        sig = "|".join(sig_parts)
+        if sig == self._shells_sig:
+            return
+        self._shells_sig = sig
+
+        if active is None and not sessions:
+            self._clear_shells_panel()
+            return
+
+        try:
+            self.shells_display.add_class("has-items")
+        except Exception:
+            pass
+
+        if self._shells_title_widget is None:
+            self._shells_title_widget = Static(
+                "[bold cyan]Терминалы[/bold cyan]", id="shells_title")
+            try:
+                self.shells_display.mount(self._shells_title_widget)
+            except Exception:
+                self._shells_title_widget = None
+
+        if self._shells_active_widget is None:
+            self._shells_active_widget = Static("", id="shells_active")
+            try:
+                self.shells_display.mount(self._shells_active_widget)
+            except Exception:
+                self._shells_active_widget = None
+        if self._shells_active_widget is not None:
+            try:
+                if active is not None:
+                    self._shells_active_widget.update(
+                        "[bold]● активный[/bold] " + self._shell_row_label(active))
+                else:
+                    self._shells_active_widget.update("")
+            except Exception:
+                pass
+
+        current = {s.session_id for s in sessions}
+        for sid in list(self._shell_widgets):
+            if sid not in current:
+                entry = self._shell_widgets.pop(sid)
+                try:
+                    entry["row"].remove()
+                except Exception:
+                    pass
+
+        for s in sessions:
+            sid = s.session_id
+            name = self._shell_name(s)
+            stamp = self._shell_stamp(s)
+            entry = self._shell_widgets.get(sid)
+            if entry is None:
+                restore = Button(name, id=f"shell_restore_{sid}",
+                                 variant="primary", classes="restore")
+                clock = Static(stamp, classes="stamp")
+                kill = Button("✕", id=f"shell_kill_{sid}",
+                              variant="error", classes="kill")
+                row = Horizontal(restore, clock, kill)
+                self._shell_widgets[sid] = {"row": row, "restore": restore, "clock": clock}
+                try:
+                    self.shells_display.mount(row)
+                except Exception:
+                    self._shell_widgets.pop(sid, None)
+            else:
+                try:
+                    entry["restore"].label = name
+                except Exception:
+                    pass
+                try:
+                    entry["clock"].update(stamp)
+                except Exception:
+                    pass
+
+    def _hide_inline_shell(self, session_id: str = "", minimize: bool = False) -> None:
+        """Спрятать встроенную панель (виджет остаётся в DOM для переиспользования).
+
+        Удалять виджет через remove() нельзя: уборка DOM асинхронна, и новый
+        терминал, смонтированный до prune, оставлял «застрявшего» потомка —
+        после этого следующий shell уже не открывался встроенно. Вместо
+        удаления отписываемся от PTY и убираем класс active (контейнер display:none).
+
+        minimize=True — дополнительно отправить сессию в панель свёрнутых.
+        """
+        w = self.inline_shell_widget
+        if w is None:
+            return
+        wsid = getattr(getattr(w, "session", None), "session_id", "")
+        if session_id and wsid != session_id:
+            return
+        try:
+            w.detach()
+        except Exception:
+            pass
+        self.inline_shell_active = False
+        try:
+            self.inline_shell_container.remove_class("active")
+        except Exception:
+            pass
+        # Скрытый виджет остаётся в DOM и иначе удерживает фокус на своём Input —
+        # клавиатура уходит в невидимый терминал. Возвращаем фокус в композер.
+        try:
+            w.query_one("#inline_shell_input", Input).blur()
+        except Exception:
+            pass
+        self._keep_focus()
+        if minimize and wsid:
+            self.minimized_shells.add(wsid)
+        self._shells_sig = None
+        self._update_shells_panel()
+
     def minimize_shell_session(self, session) -> None:
-        """Колбэк ShellScreen: окно свёрнуто, сессия остаётся живой."""
+        """Колбэк терминала: панель/окно свёрнуты, сессия остаётся живой."""
         sid = getattr(session, "session_id", "")
         if not sid:
             return
+        self._hide_inline_shell(session_id=sid)
         self.minimized_shells.add(sid)
         self._shells_sig = None
         self._update_shells_panel()
 
     def forget_shell_session(self, session_id: str) -> None:
-        """Колбэк ShellScreen: окно закрыто и сессия завершена."""
+        """Колбэк терминала: панель/окно закрыты и сессия завершена."""
+        self._hide_inline_shell(session_id=session_id)
         self.minimized_shells.discard(session_id)
         self._shells_sig = None
         self._update_shells_panel()
@@ -569,34 +931,99 @@ class BotinokTextualApp(App):
             except Exception:
                 pass
 
-    def open_shell_session(self, session) -> None:
-        """Показать окно терминала для сессии (свернув уже открытые окна)."""
-        from core.shell_screen import ShellScreen
+    def embed_shell_session(self, session) -> None:
+        """Показать терминал встроенным в окно вывода (над чатом) — режим по умолчанию.
+
+        Предыдущая встроенная панель уходит в панель свёрнутых: одновременно
+        встроен не более чем один терминал.
+        """
+        from core.shell_screen import ShellInline
         sid = getattr(session, "session_id", "")
+        # Держим на виду не более одного терминала: открытые модалки с другими
+        # сессиями свёртываем в панель.
         self._minimize_open_shell_screens(except_session_id=sid)
         if sid:
             self.minimized_shells.discard(sid)
-            self._shells_sig = None
-            self._update_shells_panel()
+        existing = self.inline_shell_widget
+        if existing is not None:
+            # Виджет создан один раз и переиспользуется: старая сессия уходит в
+            # свёрнутые, новая занимает место без remove+mount.
+            old = getattr(existing, "session", None)
+            old_sid = getattr(old, "session_id", "")
+            try:
+                existing.set_session(session)
+                self.inline_shell_active = True
+                self.inline_shell_container.add_class("active")
+                if old_sid and old_sid != sid:
+                    self.minimized_shells.add(old_sid)
+            except Exception:
+                self.inline_shell_active = False
+        else:
+            try:
+                widget = ShellInline(session)
+                if self.inline_shell_container is not None:
+                    self.inline_shell_container.mount(widget)
+                    self.inline_shell_container.add_class("active")
+                    self.inline_shell_widget = widget
+                    self.inline_shell_active = True
+                else:
+                    self.inline_shell_widget = None
+                    self.inline_shell_active = False
+            except Exception:
+                self.inline_shell_widget = None
+                self.inline_shell_active = False
+        self._shells_sig = None
+        self._update_shells_panel()
+
+    def open_shell_session(self, session) -> None:
+        """Открыть терминал для сессии. По умолчанию — встроенная панель."""
+        self.embed_shell_session(session)
+
+    def expand_shell_session(self, session) -> None:
+        """Развернуть терминал в модальное окно на весь экран."""
+        from core.shell_screen import ShellScreen
+        sid = getattr(session, "session_id", "")
+        self._hide_inline_shell(session_id=sid)
+        if sid:
+            self.minimized_shells.discard(sid)
+        self._shells_sig = None
+        self._update_shells_panel()
+        self._minimize_open_shell_screens(except_session_id=sid)
         self.push_screen(ShellScreen(session=session))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = getattr(event.button, "id", "") or ""
-        if not bid.startswith("shell_restore_"):
+        if bid.startswith("shell_restore_"):
+            event.stop()
+            sid = bid[len("shell_restore_"):]
+            try:
+                from core.shell_session import ShellSessionRegistry
+                session = ShellSessionRegistry.instance().get(sid)
+            except Exception:
+                session = None
+            if session is None:
+                self.minimized_shells.discard(sid)
+                self._shells_sig = None
+                self._update_shells_panel()
+                return
+            self.open_shell_session(session)
             return
-        event.stop()
-        sid = bid[len("shell_restore_"):]
-        try:
-            from core.shell_session import ShellSessionRegistry
-            session = ShellSessionRegistry.instance().get(sid)
-        except Exception:
-            session = None
-        if session is None:
+        if bid.startswith("shell_kill_"):
+            event.stop()
+            sid = bid[len("shell_kill_"):]
+            try:
+                from core.shell_session import ShellSessionRegistry
+                session = ShellSessionRegistry.instance().get(sid)
+            except Exception:
+                session = None
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
             self.minimized_shells.discard(sid)
             self._shells_sig = None
             self._update_shells_panel()
-            return
-        self.open_shell_session(session)
 
     def _render_header_text(self) -> str:
         danger_tag = " | DANGEROUS MODE: ON" if self.dangerous_mode else ""
@@ -960,6 +1387,21 @@ class BotinokTextualApp(App):
         except Exception:
             pass
 
+    def _format_tool_call(self, name: str, args) -> str:
+        """Тело раскрытого tool-call: команда через shfmt либо pretty-JSON.
+
+        Именно это видно при клике по строке вызова в истории сессии.
+        """
+        try:
+            if name == "shell_exec" and isinstance(args, dict) \
+                    and isinstance(args.get("command"), str):
+                return f"🔧 {name}\n\n" + format_shell_command(args["command"])
+            if isinstance(args, dict):
+                return f"🔧 {name}\n\n" + json.dumps(args, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return f"🔧 {name}"
+
     def _render_history_entry(self, entry: dict) -> None:
         role = entry.get("role", "")
         content = entry.get("content", "")
@@ -997,7 +1439,8 @@ class BotinokTextualApp(App):
                         args = {}
                     args_json = json.dumps(args, ensure_ascii=False)
                     title = self._spoiler_title(name, args_json)
-                    self._mount_spoiler(title, Static(f"🔧 {self._rich_escape(name)}({self._rich_escape(args_json)})"))
+                    self._mount_spoiler(title, Static(self._format_tool_call(name, args),
+                                                      markup=False))
         elif role == "tool":
             title = self._spoiler_title("Tool result", str(content)[:200])
             self._mount_spoiler(title, Static(f"[dim]{self._rich_escape(str(content)[:1000])}[/dim]"))
@@ -1252,13 +1695,41 @@ class BotinokTextualApp(App):
         self._confirmation_event = threading.Event()
         self._confirmation_result = False
         self._confirmation_reason = ""
-        # Модальный экран выбора: да / нет / отменить с причиной.
-        # Экранируем аргументы здесь — Options сами по себе markup не парсят,
-        # а Static парсит, поэтому escape нужен для тела.
+        # По умолчанию — ВСТРОЕННОЕ подтверждение в окне вывода (не накрывает
+        # правые панели). Модальный ConfirmationScreen — только запасной путь,
+        # если inline-слот недоступен.
+        widget = ConfirmInline(
+            tool_name, args_display, warn_text,
+            on_resolve=self._apply_confirmation,
+        )
+        if self.inline_confirm_container is not None:
+            self.hide_inline_confirmation()
+            try:
+                self.inline_confirm_container.mount(widget)
+                self.inline_confirm_container.add_class("active")
+                self.inline_confirm_widget = widget
+                return
+            except Exception:
+                self.inline_confirm_widget = None
         self.push_screen(ConfirmationScreen(
             tool_name, args_display, warn_text,
             on_resolve=self._apply_confirmation,
         ))
+
+    def hide_inline_confirmation(self) -> None:
+        """Убрать встроенное подтверждение (после выбора/таймаута)."""
+        w = self.inline_confirm_widget
+        if w is not None:
+            try:
+                w.remove()
+            except Exception:
+                pass
+            self.inline_confirm_widget = None
+        try:
+            self.inline_confirm_container.remove_class("active")
+        except Exception:
+            pass
+        self._keep_focus()
 
     def wait_for_confirmation(self, timeout: float = 300) -> bool:
         if self._confirmation_event:

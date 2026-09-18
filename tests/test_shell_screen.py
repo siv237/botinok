@@ -107,11 +107,11 @@ async def main_async() -> int:
         # работает как в ConfirmationScreen. Поэтому здесь проверяем только
         # неблокирующую часть, а сам pop — отдельным юнит-тестом ниже.
         with screen._lock:
-            screen._closed = True
+            screen._view_closed = True
         if screen._on_chunk is not None:
             session.unsubscribe(screen._on_chunk)
             screen._on_chunk = None
-        check("screen_closed_flag", screen._closed is True)
+        check("screen_view_closed_flag", screen._view_closed is True)
         check("session_survives_close", reg.get(session.session_id) is not None)
         check("ctrl_c_interrupted_session", not session.is_running(),
               f"running={session.is_running()} rc={session.returncode}")
@@ -193,7 +193,7 @@ def test_close_logic_without_app() -> None:
     finally:
         active_app_ctx.reset(token)
 
-    check("close_sets_flag", screen._closed is True)
+    check("close_sets_flag", screen._view_closed is True)
     check("close_unsubscribes", screen._on_chunk is None)
     check("close_calls_pop_screen", "pop_screen" in pop_calls,
           f"pop_calls={pop_calls} calls={calls}")

@@ -91,9 +91,14 @@ def _ui_push_screen(session: ShellSession, on_done) -> bool:
         app.call_from_thread(_push)
         return True
     except Exception:
-        # Запасной вариант: вдруг вызвали из UI-потока — пушим напрямую.
+        # Запасной вариант: инструмент вызвали из UI-потока (call_from_thread
+        # требует другого потока). Тогда планируем показ в контексте pump через
+        # call_next: mount/remove виджетов должны идти из pump. call_after_refresh
+        # здесь не годится — на простое (нет перерисовки) его колбэк не
+        # выполняется, и новый терминал не открывается.
         try:
-            return _push()
+            app.call_next(_push)
+            return True
         except Exception:
             return False
 
