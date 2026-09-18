@@ -296,3 +296,34 @@ Ns ───`), флаг `_done_written` (сбрасывается в `set_sessi
 `requirements.txt` += `shfmt-py` (beautysh не подошёл — он только выравнивает
 отступы и не разбирает однострочники). Тесты: `tests/test_shell_command_format.py`,
 обновлён `tests/test_confirm_inline.py`.
+
+## [2026-09-18] ingest | session_memory: restore/EXACT, прощающий синтаксис, гибкий поиск
+`tools/session_memory.py` переработан в «архивариуса-советника».
+- Новое действие `restore` — точное восстановление из канонического
+  `messages.json` (EXACT), иначе реконструкция из `context.json` (DERIVED,
+  `SessionManager.restore_session`, флаг `stale`).
+- Достоверность в каждом ответе: `_confidence` = EXACT | DERIVED | HINT
+  (`search` — HINT).
+- Полные тексты: `MessagePart` больше не отбрасывает content >400;
+  `get_turn include_content=true` отдаёт полный ход (раньше — превью 200,
+  из-за чего агент шёл читать файлы).
+- Ходы группируются по завершённым обменам; tool-раунды и авто-продолжения
+  не создают пустых ходов; финальный ответ закрывает ход.
+- Прощающий синтаксис: синонимы action, строковые числа, алиасы, пустой
+  action → `resume_brief`, промах `turn_id` → ближайший, плохой путь →
+  последняя сессия. Неизвестное действие → `ambiguous=true` (не подменяется).
+- Гибкий поиск (RU): регистр/ё/пробелы/пунктуация, части слов, стеммер
+  окончаний, режимы auto/all/any/regex; блок «где именно» — `файл:строка`
+  с временем по `response.md`, `thinking.md`, `tools.log`, `session_raw.log`,
+  `context.json`, `messages.json`.
+- Советник: `_meta` (сессия/диапазон/последняя метка), `_advice`,
+  `_next_actions`, action `help`.
+- Resume: `build_resume_brief` (статус прервана/завершена, полный последний
+  ответ), `_clean_answer`/`_last_final_assistant`; на resume инструкции про
+  `skills`/`experience` не отправляются (`strip_skills_mandate`).
+- Устойчивость к обрывам API: `_stream_turn` повторяет запрос при
+  `stream_error`, сохраняет прерванный ход/пометку (`_persist_connection_failure`).
+- Тесты: `tests/test_session_snapshot.py` (restore/provenance/ambiguity,
+  resume-brief, round-trip). Страницы: `entities/tools/session-memory.md`,
+  `concepts/session_resume.md`, обновлены `entities/session_manager.md`,
+  `concepts/session_lifecycle.md`, `index.md`.

@@ -14,11 +14,12 @@ status: stable
 - **Конфиги**: определение пути по приоритету (личный → локальный → системный) и чтение `config.cfg`. → `concepts/config_priority.md`, `entities/config_system.md`
 - **Сессии**: создание директории сессии (`sessions/<timestamp>_<name>/`), гарантия подпапок (`steps`, `artifacts`, `project`, `proofreader`). → `entities/session_directory.md`, `concepts/session_lifecycle.md`
 - **Промпты**: копирование `prompts/*.txt` в сессию при создании; загрузка промпта с подстановкой `{{VAR}}`. → `sources/prompts_readme.md`
-- **Логирование**: `log_chunk` (построчный лог с дельтой; инкрементная запись `thinking.md`/`response.md`), `log_tool_call` (`tools.log`), `log_step` (`steps/*.json` + `performance.log`), метаданные-заголовки/футеры.
-- **Контекст**: `update_context()` — добавление записи (role, content, thinking, tool_calls) в `context.json`.
+- **Логирование**: `log_chunk` (построчный лог с дельтой; инкрементная запись `thinking.md`/`response.md`), `log_tool_call` (`tools.log`, с `call_id`), `log_step` (`steps/*.json` + `performance.log`, уникальные имена без затирания), метаданные-заголовки/футеры.
+- **Контекст**: `update_context(role, content, thinking, tool_calls, tool_call_id, name, extra)` — запись в `context.json`; дедупликация подряд идущих одинаковых записей.
+- **Канонический снапшот**: `save_messages_snapshot()` → `messages.json` (точный массив сообщений, медиа выносится в `artifacts` по хэшу), `load_messages_snapshot()`, `restore_session()` (EXACT/DERIVED), `load_context_messages()`, `reconstruct_messages()` (обратная совместимость старых сессий), `audit_context()`.
 - **Ollama**: `get_ollama_status()` (`/api/ps`), `unload_models()` (keep_alive=0).
-- **Артефакты**: `save_artifact()` — дампы больших результатов инструментов в `artifacts/`.
-- **Возобновление**: `load_last_assistant_answer()`, `load_first_user_prompt()`.
+- **Артефакты**: `save_artifact()`, `save_media()` — дампы/медиа в `artifacts/`.
+- **Возобновление**: `load_last_assistant_answer()` (последний **финальный** ответ, очищенный от YAML), `load_first_user_prompt()`, `build_resume_brief()`, `strip_skills_mandate()`.
 - **Корректор**: `load/save_proofreader_history()`.
 
 ## Ключевые методы

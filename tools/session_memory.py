@@ -23,17 +23,21 @@ class ToolCall:
     arguments: Dict[str, Any]
     timestamp: Optional[str] = None
     result_preview: Optional[str] = None
+    result: Optional[str] = None          # полный результат (если доступен)
+    artifact: Optional[str] = None        # указатель на полный артефакт
     status: str = "unknown"  # running | completed | failed
 
     @classmethod
     def from_tool_log_entry(cls, entry: Dict) -> "ToolCall":
         """Создаёт ToolCall из записи tools.log"""
+        full = str(entry.get("full_result", "")) if entry.get("full_result") else ""
         return cls(
-            id=entry.get("call_id", f"tool_{entry.get('tool')}_{hash(str(entry))}"),
+            id=entry.get("call_id") or f"tool_{entry.get('tool')}_{hash(str(entry))}",
             tool=entry.get("tool", "unknown"),
             arguments=entry.get("arguments", {}),
             timestamp=entry.get("timestamp"),
-            result_preview=str(entry.get("full_result", ""))[:200] if entry.get("full_result") else None,
+            result_preview=full[:200] if full else None,
+            result=full or None,
             status=entry.get("status", "unknown")
         )
 
@@ -46,8 +50,12 @@ class ToolCall:
         }
         if include_args:
             result["arguments"] = self.arguments
+        if self.artifact:
+            result["artifact"] = self.artifact
         if self.result_preview:
             result["result_preview"] = self.result_preview
+        if include_args and self.result:
+            result["result"] = self.result
         return result
 
 
@@ -73,13 +81,17 @@ class MessagePart:
         
         content_str = str(content) if content else ""
         thinking_str = str(thinking) if thinking else ""
-        
+
+        # Важно: полный контент храним всегда. Раньше длинные тексты (>400)
+        # отбрасывались в None, и get_turn(include_content=True) возвращал
+        # только 200-символьное превью — из-за этого агент «не мог прочитать»
+        # отчёт из session_memory и лез в файлы.
         return cls(
             role=entry.get("role", "unknown"),
-            content=content_str if len(content_str) <= max_preview * 2 else None,
+            content=content_str,
             content_preview=content_str[:max_preview] if len(content_str) > max_preview else None,
             content_length=len(content_str),
-            thinking=thinking_str if thinking_str and len(thinking_str) <= max_preview * 2 else None,
+            thinking=thinking_str,
             thinking_preview=thinking_str[:max_preview] if thinking_str and len(thinking_str) > max_preview else None,
             thinking_length=len(thinking_str),
             timestamp=entry.get("timestamp"),
@@ -184,119 +196,213 @@ class SessionParser:
                 pass
     
     def parse_turns(self) -> List[Turn]:
-        """Парсит историю в список Turn объектов"""
+        """Парсит историю в список Turn объектов.
+
+        Ход НЕ закрывается на каждом assistant: агент часто отвечает
+        несколькими раундами (assistant с tool_calls → tool → снова assistant),
+        а авто-продолжения добавляют пустые user-записи. Раньше из-за этого
+        реальный финальный ответ попадал в «пустой» ход, и get_turn возвращал
+        Assistant (0 chars). Теперь ход закрывается только на новом непустом
+        user (или в конце), а внутри накапливаются assistant-текст и tool-calls.
+        """
         history = self.context_data.get("history", [])
         turns: List[Turn] = []
         current_turn: Optional[Turn] = None
+        current_assistant_has_tc = False
         turn_counter = 0
-        
-        i = 0
-        while i < len(history):
-            entry = history[i]
+        last_user_text: Optional[str] = None
+        current_user: Optional[MessagePart] = None
+
+        def _start(entry: Optional[Dict], user: Optional[MessagePart] = None):
+            nonlocal turn_counter, current_assistant_has_tc
+            turn_counter += 1
+            current_assistant_has_tc = False
+            return Turn(
+                turn_id=turn_counter,
+                timestamp_start=(entry or {}).get("timestamp"),
+                user=user if user is not None else current_user,
+            )
+
+        def _close():
+            nonlocal current_turn
+            if current_turn is None:
+                return
+            if current_turn.timestamp_start and current_turn.timestamp_end:
+                try:
+                    t1 = datetime.fromisoformat(current_turn.timestamp_start.replace("Z", "+00:00"))
+                    t2 = datetime.fromisoformat(current_turn.timestamp_end.replace("Z", "+00:00"))
+                    current_turn.duration_sec = round((t2 - t1).total_seconds(), 2)
+                except Exception:
+                    pass
+            turns.append(current_turn)
+            current_turn = None
+
+        for entry in history:
             role = entry.get("role")
-            
+            content = str(entry.get("content") or "")
+
             if role == "user":
-                # Новый turn начинается с user
-                if current_turn is not None:
-                    turns.append(current_turn)
-                turn_counter += 1
-                current_turn = Turn(
-                    turn_id=turn_counter,
-                    timestamp_start=entry.get("timestamp"),
-                    user=MessagePart.from_context_entry(entry)
-                )
-                
-            elif role == "assistant" and current_turn is not None:
-                current_turn.assistant = MessagePart.from_context_entry(entry)
-                current_turn.timestamp_end = entry.get("timestamp")
-                
-                # Считаем duration если есть оба timestamp
-                if current_turn.timestamp_start and current_turn.timestamp_end:
-                    try:
-                        t1 = datetime.fromisoformat(current_turn.timestamp_start.replace("Z", "+00:00"))
-                        t2 = datetime.fromisoformat(current_turn.timestamp_end.replace("Z", "+00:00"))
-                        current_turn.duration_sec = round((t2 - t1).total_seconds(), 2)
-                    except Exception:
-                        pass
-                
-                # Ищем tool_calls в записи assistant
-                tool_calls = entry.get("tool_calls", [])
-                for tc in tool_calls:
+                text = content.strip()
+                if not text:
+                    # пустой auto-continue user — часть текущего хода
+                    continue
+                if current_turn is not None and text == last_user_text:
+                    # дубль подряд (старый формат) — не создаём фантомный ход
+                    continue
+                _close()
+                current_user = MessagePart.from_context_entry(entry)
+                current_turn = _start(entry, current_user)
+                last_user_text = text
+
+            elif role == "assistant":
+                if current_turn is None:
+                    current_turn = _start(entry)  # продолжение без нового user
+                part = MessagePart.from_context_entry(entry)
+                has_tc = bool(entry.get("tool_calls"))
+                # Финальный ответ (без tool_calls) закрывает обмен; промежуточные
+                # tool-раунды копятся в том же ходе.
+                if part.content_length > 0:
+                    if current_turn.assistant is None:
+                        current_turn.assistant = part
+                        current_assistant_has_tc = has_tc
+                    elif not has_tc:
+                        current_turn.assistant = part
+                        current_assistant_has_tc = False
+                    elif current_assistant_has_tc:
+                        current_turn.assistant = part
+                current_turn.timestamp_end = entry.get("timestamp") or current_turn.timestamp_end
+                for tc in (entry.get("tool_calls") or []):
                     tc_id = tc.get("id", f"tc_{len(current_turn.tool_calls)}")
-                    tc_func = tc.get("function", {})
-                    
-                    # arguments может быть строкой или dict
+                    tc_func = tc.get("function", {}) or {}
                     args = tc_func.get("arguments", {})
                     if isinstance(args, str):
                         try:
                             args = json.loads(args) if args else {}
                         except json.JSONDecodeError:
                             args = {"raw": args}
-                    
                     current_turn.tool_calls.append(ToolCall(
                         id=tc_id,
                         tool=tc_func.get("name", "unknown"),
                         arguments=args if args else {},
-                        timestamp=entry.get("timestamp")
+                        timestamp=entry.get("timestamp"),
                     ))
-                
-                turns.append(current_turn)
-                current_turn = None
-                
-            i += 1
-        
-        # Добавляем незавершённый turn если есть
-        if current_turn is not None:
-            turns.append(current_turn)
-        
-        # Дополняем tool_calls из tools.log
+                # Финальный ответ завершает обмен (ход). Следующие записи без
+                # нового user (авто-продолжение) начнут новый ход, унаследовав
+                # текущий user-промпт.
+                if not has_tc and part.content_length > 0:
+                    _close()
+
+            elif role == "tool":
+                if current_turn is None:
+                    continue
+                full = content
+                tid = entry.get("tool_call_id")
+                target = None
+                if tid:
+                    target = next((t for t in current_turn.tool_calls if t.id == tid), None)
+                if target is None:
+                    target = next((t for t in current_turn.tool_calls
+                                   if not t.result and not t.result_preview), None)
+                if target is None:
+                    target = next((t for t in reversed(current_turn.tool_calls)
+                                   if t.tool == entry.get("name")), None)
+                if target is not None:
+                    target.result = full
+                    target.result_preview = full[:200]
+                    m = re.search(r"artifact_path:\s*(\S+)", full)
+                    if m:
+                        target.artifact = m.group(1)
+                    if target.status in ("unknown", ""):
+                        target.status = "completed"
+                current_turn.timestamp_end = entry.get("timestamp") or current_turn.timestamp_end
+
+        _close()
+        # Дополняем результаты из tools.log (полные, включая старый формат)
         self._enrich_with_tools_log(turns)
-        
         return turns
     
     def _enrich_with_tools_log(self, turns: List[Turn]):
-        """Дополняет turns данными из tools.log"""
+        """Дополняет turns данными из tools.log.
+
+        Быстрый путь — по call_id (новый формат). Старый формат без call_id
+        матчим по имени инструмента внутри временного окна хода.
+        """
+        if not turns or not self.tools_log:
+            return
+
+        # Индекс turn по call_id: O(tool_calls).
+        turn_by_id: Dict[str, Turn] = {}
+        for turn in turns:
+            for tc in turn.tool_calls:
+                if tc.id:
+                    turn_by_id.setdefault(tc.id, turn)
+
+        # Предвычисленные окна ходов для матчинга старого формата.
+        windows = []
+        for turn in turns:
+            if not turn.timestamp_start:
+                continue
+            try:
+                t0 = datetime.fromisoformat(turn.timestamp_start.replace("Z", "+00:00"))
+                t1 = (datetime.fromisoformat(turn.timestamp_end.replace("Z", "+00:00"))
+                      if turn.timestamp_end else t0)
+            except Exception:
+                continue
+            windows.append((t0, t1, turn))
+
         for log_entry in self.tools_log:
+            cid = log_entry.get("call_id")
+            if cid and cid in turn_by_id:
+                self._update_tool_call(turn_by_id[cid], log_entry)
+                continue
             timestamp = log_entry.get("timestamp")
-            tool_name = log_entry.get("tool")
-            
-            # Ищем ближайший turn по времени
-            for turn in turns:
-                if turn.timestamp_start and timestamp:
-                    try:
-                        t_turn = datetime.fromisoformat(turn.timestamp_start.replace("Z", "+00:00"))
-                        t_log = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                        
-                        # Если tool_call в пределах turn (или сразу после)
-                        if turn.timestamp_end:
-                            t_end = datetime.fromisoformat(turn.timestamp_end.replace("Z", "+00:00"))
-                            if t_log >= t_turn and t_log <= t_end:
-                                # Обновляем или добавляем tool_call
-                                self._update_tool_call(turn, log_entry)
-                                break
-                        elif abs((t_log - t_turn).total_seconds()) < 60:  # В пределах минуты
-                            self._update_tool_call(turn, log_entry)
-                            break
-                    except Exception:
-                        pass
+            if not timestamp:
+                continue
+            try:
+                t_log = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            except Exception:
+                continue
+            # ближайший ход, в окно которого попадает tool (или ±60с)
+            best = None
+            best_delta = None
+            for t0, t1, turn in windows:
+                if t0 <= t_log <= t1:
+                    best, best_delta = turn, 0
+                    break
+                delta = min(abs((t_log - t0).total_seconds()),
+                            abs((t_log - t1).total_seconds()))
+                if best_delta is None or delta < best_delta:
+                    best, best_delta = turn, delta
+            if best is not None and (best_delta == 0 or best_delta < 60):
+                self._update_tool_call(best, log_entry)
     
     def _update_tool_call(self, turn: Turn, log_entry: Dict):
-        """Обновляет существующий или добавляет новый ToolCall"""
+        """Обновляет существующий или добавляет новый ToolCall (полный результат)."""
         tool_name = log_entry.get("tool")
-        arguments = log_entry.get("arguments", {})
-        
-        # Ищем существующий tool_call с таким же tool и аргументами
-        for tc in turn.tool_calls:
-            if tc.tool == tool_name:
-                # Обновляем статус и результат
-                tc.status = log_entry.get("status", tc.status)
-                if log_entry.get("full_result"):
-                    tc.result_preview = str(log_entry["full_result"])[:200]
-                tc.timestamp = log_entry.get("timestamp", tc.timestamp)
-                return
-        
-        # Добавляем новый если не нашли
-        turn.tool_calls.append(ToolCall.from_tool_log_entry(log_entry))
+        call_id = log_entry.get("call_id")
+        status = log_entry.get("status", "unknown")
+        full = str(log_entry.get("full_result", "")) if log_entry.get("full_result") else ""
+
+        tc = None
+        if call_id:
+            tc = next((t for t in turn.tool_calls if t.id == call_id), None)
+        if tc is None and status != "running":
+            tc = next((t for t in turn.tool_calls
+                       if t.tool == tool_name and not t.result), None)
+        if tc is None:
+            tc = next((t for t in reversed(turn.tool_calls) if t.tool == tool_name), None)
+
+        if tc is None:
+            turn.tool_calls.append(ToolCall.from_tool_log_entry(log_entry))
+            return
+
+        if status and status != "running":
+            tc.status = status
+        # "STARTED" — не результат, не затираем им уже полученное.
+        if full and full != "STARTED":
+            tc.result = full
+            tc.result_preview = full[:200]
+        tc.timestamp = log_entry.get("timestamp", tc.timestamp)
 
 
 class SessionIndex:
@@ -445,21 +551,84 @@ def session_memory_tool(
         include_thinking: включать полный thinking
         max_preview_chars: длина превью
     """
-    
-    # Определяем путь к сессии
+
+    # --- Прощающее приведение аргументов: тупая модель не должна ошибаться ---
+    # Синонимы action и терпимость к типам/пропущенным аргументам.
+    _ALIASES = {
+        "brief": "resume_brief", "resume": "resume_brief",
+        "resume_brief": "resume_brief", "continue": "resume_brief",
+        "sum": "summary", "info": "summary", "summary": "summary",
+        "turn": "get_turn", "get": "get_turn", "get_turn": "get_turn",
+        "list": "turns", "turns": "turns",
+        "find": "search", "grep": "search", "search": "search",
+        "filter": "filter", "timeline": "timeline", "stats": "stats", "chain": "chain",
+        "help": "help", "?": "help", "actions": "help", "man": "help", "capabilities": "help",
+        "restore": "restore", "rebuild": "restore", "exact": "restore",
+        "load": "restore", "resume_exact": "restore", "snapshot": "restore",
+    }
+    _VALID = set(_ALIASES.values())
+    raw_action = str(action if isinstance(action, str) else "").strip().lower()
+    if not raw_action:
+        # Пустой action — помогаем, а не ошибаемся.
+        action = "resume_brief"
+    elif raw_action in _ALIASES:
+        action = _ALIASES[raw_action]
+    else:
+        # Строгая неоднозначность: НЕ подменяем смысл действия молча.
+        return json.dumps({
+            "ambiguous": True,
+            "requested": raw_action,
+            "candidates": sorted(_VALID),
+            "hint": "Не понял action. Точное восстановление — action=\"restore\"; "
+                    "обзор — resume_brief; поиск — search; справка — help.",
+            "_next_actions": ["action=\"restore\"", "action=\"help\"", "action=\"resume_brief\""],
+        }, ensure_ascii=False, indent=2)
+
+    def _to_int(v, default=None):
+        try:
+            if v is None or v == "":
+                return default
+            return int(v)
+        except Exception:
+            return default
+
+    turn_id = _to_int(turn_id)
+    limit = _to_int(limit, 20) or 20
+    offset = _to_int(offset, 0) or 0
+    if not query:
+        query = kwargs.get("q") or kwargs.get("text") or kwargs.get("query")
+    if turn_id is None:
+        turn_id = _to_int(kwargs.get("turn") or kwargs.get("id") or kwargs.get("turn_id"))
+    if not include_content:
+        include_content = bool(kwargs.get("full") or kwargs.get("include_full"))
+
+    # Определяем путь к сессии (прощающе: плохой путь → берём последнюю сессию)
+    requested_path = session_path
+    if session_path and not os.path.exists(session_path):
+        session_path = None
     if not session_path:
-        # Ищем текущую сессию из переменных окружения или последнюю
-        session_path = os.environ.get("BOTINOK_SESSION_PATH")
-        if not session_path:
-            # Ищем в стандартных местах
-            from core.session_manager import SessionManager
-            sm = SessionManager()
-            latest = sm.get_latest_session()
-            if latest:
-                session_path = latest["path"]
-    
+        session_path = os.environ.get("BOTINOK_SESSION_PATH") or None
     if not session_path or not os.path.exists(session_path):
-        return json.dumps({"error": "Session path not found"}, ensure_ascii=False)
+        try:
+            from core.session_manager import SessionManager
+            latest = SessionManager().get_latest_session()
+            if latest:
+                session_path = latest.get("path")
+        except Exception:
+            session_path = None
+
+    if not session_path or not os.path.exists(session_path):
+        return json.dumps({
+            "error": "Session path not found",
+            "hint": "Укажи session_path=... (папка сессии) или открой сессию; "
+                    "без него берётся последняя.",
+            "available_actions": sorted(_VALID),
+            "_next_actions": ["action=\"turns\"", "action=\"help\""],
+        }, ensure_ascii=False, indent=2)
+
+    _path_note = None
+    if requested_path and session_path != requested_path:
+        _path_note = f"Путь {requested_path} не найден — взята последняя сессия."
     
     # Получаем или строим индекс
     index = SessionIndex(session_path)
@@ -467,8 +636,14 @@ def session_memory_tool(
     
     # Выполняем action
     result = {}
-    
-    if action == "resume_brief":
+
+    if action == "help":
+        return _help_text(session_path)
+
+    if action == "restore":
+        result = _action_restore(session_path, include_content=True)
+
+    elif action == "resume_brief":
         result = _action_resume_brief(session_path, turns, limit)
 
     elif action == "summary":
@@ -481,7 +656,9 @@ def session_memory_tool(
         result = _action_get_turn(turns, turn_id, include_content, include_thinking)
     
     elif action == "search":
-        result = _action_search(turns, index, query, limit, include_content, include_thinking)
+        result = _action_search(turns, index, query, limit, include_content, include_thinking,
+                                mode=str(kwargs.get("mode", "auto")).lower(),
+                                session_path=session_path)
     
     elif action == "filter":
         result = _action_filter(turns, since, until, role, has_tool_calls, limit, offset, include_content, include_thinking)
@@ -502,6 +679,23 @@ def session_memory_tool(
             "resume_brief", "summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain"
         ]}
     
+    # Архивариус не молчит: контекст, совет и следующие шаги — всегда.
+    if isinstance(result, dict):
+        result["_meta"] = {
+            "session": os.path.basename(os.path.normpath(session_path)),
+            "turns_total": len(turns),
+            "turn_range": [turns[0].turn_id, turns[-1].turn_id] if turns else [],
+            "last_timestamp": ((turns[-1].timestamp_end or turns[-1].timestamp_start)
+                               if turns else None),
+        }
+        if _path_note:
+            result["_meta"]["note"] = _path_note
+        prov = _provenance_for(action, result)
+        result["_provenance"] = prov
+        result["_confidence"] = _CONF[prov]
+        result.setdefault("_advice", _advise(action, result))
+        result.setdefault("_next_actions", _next_actions(action, result))
+
     # Форматируем вывод
     if format == "json":
         return json.dumps(result, ensure_ascii=False, indent=2)
@@ -511,6 +705,170 @@ def session_memory_tool(
         if isinstance(result, dict) and "error" in result:
             return json.dumps(result, ensure_ascii=False)
         return _format_structured(result, action)
+
+
+def _help_text(session_path: str) -> str:
+    return (
+        "🧭 Session Memory — архивариус и советник по этой сессии.\n"
+        "\n"
+        "Что я знаю: точные timestamps, строгий порядок ходов (turn_id 1..N),\n"
+        "полные тексты user/assistant/thinking, аргументы и результаты инструментов,\n"
+        "указатели на артефакты. Зачем: продолжать сессию и искать в ней БЕЗ чтения\n"
+        "context.json/response.md напрямую — здесь быстрее и с подсказками.\n"
+        "\n"
+        "Простой синтаксис (всё прощается, регистр/пробелы не важны):\n"
+        "  • action=resume_brief                      — что было и где остановились\n"
+        "  • action=get_turn turn_id=123 include_content=true — полный ход\n"
+        "  • action=search query=кулер                — гибкий поиск (части слов, RU)\n"
+        "  • action=turns limit=20 offset=0           — список ходов\n"
+        "  • action=timeline limit=30                 — хронология\n"
+        "  • action=help                              — эта справка\n"
+        "\n"
+        "Можно звать усечённо: action=turn/123, action=list, action=find query=...\n"
+        "Если аргумент пропущен — я не ошибуюсь, а подскажу следующий шаг.\n"
+        f"Сессия: {session_path}\n"
+    )
+
+
+def _advise(action: str, data: Dict) -> str:
+    """Короткий совет архивариуса — что делать дальше."""
+    try:
+        if action == "resume_brief":
+            return ("Продолжай с последнего хода; детали любого хода — "
+                    "get_turn(turn_id=…, include_content=true).")
+        if action == "search":
+            n = data.get("total_matches", 0)
+            if n == 0:
+                return ("Совпадений нет — попробуй mode=any, одно слово или "
+                        "часть слова (поиск кириллицы учитывает окончания).")
+            return (f"Нашлось {n}. Смотри блок «Где именно» (файл:строка, время); "
+                    "детали — get_turn по turn_id из списка.")
+        if action == "get_turn":
+            return "Соседние ходы и полные результаты инструментов — в подсказках ниже."
+        if action == "turns":
+            return "Для содержания хода — get_turn; для страницы — offset."
+        if action == "restore":
+            if data.get("exact"):
+                extra = (" Снапшот старше context.json (есть прерванный хвост) — "
+                         "хвост смотри через get_turn/turns." if data.get("stale") else "")
+                return ("Точный контекст из messages.json — можно доверять "
+                        f"(EXACT); подавай как есть для продолжения.{extra}")
+            return ("Снапшота нет: это реконструкция из context.json (DERIVED) — "
+                    "ключевые места перепроверь.")
+        if action == "timeline":
+            return "Точка во времени с ошибкой/инструментом — get_turn рядом."
+        return "Могу: restore, resume_brief, get_turn, search, turns, timeline, help."
+    except Exception:
+        return ""
+
+
+def _next_actions(action: str, data: Dict) -> List[str]:
+    """Конкретные следующие вызовы session_memory (интуитивные подсказки)."""
+    def sm(a, **kw):
+        parts = [f'action="{a}"']
+        for k, v in kw.items():
+            parts.append(f'{k}="{v}"' if isinstance(v, str) else f"{k}={v}")
+        return "session_memory " + " ".join(parts)
+
+    def _kw(text, n=60):
+        s = " ".join(str(text or "").split())
+        return s[:n] if s else ""
+
+    nxt = []
+    if action == "resume_brief":
+        rt = data.get("recent_turns") or []
+        if rt:
+            nxt.append(sm("get_turn", turn_id=rt[-1]["turn_id"], include_content=True))
+        nxt.append(sm("turns", limit=20))
+        if data.get("LAST_USER_PROMPT"):
+            nxt.append(sm("search", query=_kw(data["LAST_USER_PROMPT"])))
+    elif action == "get_turn":
+        tid = data.get("turn_id")
+        if isinstance(tid, int):
+            nxt.append(sm("get_turn", turn_id=max(1, tid - 1), include_content=True))
+            nxt.append(sm("get_turn", turn_id=tid + 1, include_content=True))
+        nxt.append(sm("timeline", limit=30))
+    elif action == "turns":
+        for t in (data.get("turns") or [])[:3]:
+            if t.get("turn_id"):
+                nxt.append(sm("get_turn", turn_id=t["turn_id"], include_content=True))
+        total = data.get("total", 0)
+        off = data.get("offset", 0)
+        lim = data.get("limit", 20)
+        if total > off + lim:
+            nxt.append(sm("turns", limit=lim, offset=off + lim))
+    elif action == "search":
+        for t in (data.get("turns") or [])[:3]:
+            if t.get("turn_id"):
+                nxt.append(sm("get_turn", turn_id=t["turn_id"], include_content=True))
+        nxt.append(sm("turns", limit=20))
+    elif action == "restore":
+        nxt.append(sm("turns", limit=20))
+        nxt.append(sm("resume_brief"))
+    elif action == "timeline":
+        for e in (data.get("events") or [])[:3]:
+            if e.get("turn_id"):
+                nxt.append(sm("get_turn", turn_id=e["turn_id"], include_content=True))
+    else:
+        nxt.append(sm("resume_brief"))
+        nxt.append(sm("timeline", limit=30))
+        nxt.append(sm("turns", limit=20))
+
+    seen = set()
+    out = []
+    for x in nxt:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out[:6]
+
+
+_CONF = {"exact": "EXACT", "derived": "DERIVED", "heuristic": "HINT"}
+
+
+def _provenance_for(action: str, result: Dict) -> str:
+    if action == "restore":
+        return "exact" if result.get("exact") else "derived"
+    if action == "search":
+        return "heuristic"
+    return "derived"
+
+
+def _action_restore(session_path: str, include_content: bool = True) -> Dict:
+    """Точное восстановление контекста из канонического снапшота.
+
+    exact=True  — прочитан messages.json (источник истины, можно доверять);
+    exact=False — снапшота нет, реконструкция из context.json (derived).
+    """
+    from core.session_manager import SessionManager
+    data = SessionManager().restore_session(session_path)
+    msgs = data.get("messages") or []
+    from collections import Counter
+    roles = Counter(m.get("role") for m in msgs)
+    if include_content:
+        payload_msgs = msgs
+    else:
+        payload_msgs = [
+            {"role": m.get("role"),
+             "content_length": len(str(m.get("content") or "")),
+             "tool_call_id": m.get("tool_call_id"),
+             "has_tool_calls": bool(m.get("tool_calls"))}
+            for m in msgs
+        ]
+    return {
+        "source": data.get("source"),
+        "exact": bool(data.get("exact")),
+        "model": data.get("model"),
+        "context_limit": data.get("context_limit"),
+        "saved_at": data.get("saved_at"),
+        "stale": bool(data.get("stale")),
+        "last_context_timestamp": data.get("last_context_timestamp"),
+        "messages_count": len(msgs),
+        "roles": dict(roles),
+        "tool_messages": sum(1 for m in msgs if m.get("role") == "tool"),
+        "messages_full": include_content,
+        "messages": payload_msgs,
+    }
 
 
 def _action_resume_brief(session_path: str, turns: List[Turn], limit: int) -> Dict:
@@ -580,66 +938,231 @@ def _action_turns(turns: List[Turn], limit: int, offset: int, include_content: b
 
 
 def _action_get_turn(turns: List[Turn], turn_id: Optional[int], include_content: bool, include_thinking: bool) -> Dict:
-    """Получить конкретный turn по ID"""
+    """Получить конкретный turn по ID.
+
+    Прощающее поведение: без turn_id берём последний ход, а при промахе —
+    ближайший существующий (с пометкой), чтобы агент не упирался в ошибку.
+    """
+    if not turns:
+        return {"error": "История пуста", "turns": 0}
+
     if turn_id is None:
-        return {"error": "turn_id is required for get_turn action"}
-    
+        turn = turns[-1]
+        result = turn.to_dict(include_content, include_thinking)
+        result["_note"] = "turn_id не указан — показан последний ход."
+        result["confidence"] = "DERIVED"
+        return result
+
     for turn in turns:
         if turn.turn_id == turn_id:
-            return turn.to_dict(include_content, include_thinking)
-    
-    return {"error": f"Turn {turn_id} not found", "available_turns": [t.turn_id for t in turns]}
+            result = turn.to_dict(include_content, include_thinking)
+            result["confidence"] = "DERIVED"
+            return result
+
+    # Ближайший по номеру.
+    nearest = min(turns, key=lambda t: abs(t.turn_id - turn_id))
+    result = nearest.to_dict(include_content, include_thinking)
+    result["confidence"] = "DERIVED"
+    result["_note"] = (f"Turn {turn_id} не найден — показан ближайший "
+                       f"Turn {nearest.turn_id}. Диапазон: {turns[0].turn_id}…{turns[-1].turn_id}.")
+    return result
 
 
-def _action_search(turns: List[Turn], index: SessionIndex, query: str, limit: int, include_content: bool, include_thinking: bool) -> Dict:
-    """Поиск по turns"""
-    if not query:
-        return {"error": "query is required for search action"}
-    
-    query_lower = query.lower()
+def _norm_text(s) -> str:
+    """Нормализация для поиска: регистр, пробелы, пунктуация."""
+    s = str(s or "").lower().replace("ё", "е")
+    s = re.sub(r"[\u2018\u2019\u201c\u201d«»\"'`]", " ", s)
+    s = re.sub(r"[\x00-\x1f]", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+_RU_ENDINGS = (
+    # длинные окончания — раньше, чтобы срезать максимум
+    "ями", "ами", "иями", "ыми", "ими", "ого", "его", "ому", "ему",
+    "ах", "ях", "ов", "ев", "ий", "ый", "ой", "ей", "ом", "ем", "ью", "ию",
+    "а", "я", "о", "е", "у", "ю", "ы", "и", "ь",
+)
+
+
+def _stem(token: str) -> str:
+    """Грубый стеммер (RU/EN): «кулеры»→«кулер», «нагрузкой»→«нагрузк».
+
+    Поиск по сессии чаще кириллический, поэтому срезаем частые русские
+    окончания. Это не полноценная морфология, но резко повышает гибкость.
+    """
+    t = token
+    if len(t) > 5:
+        for end in _RU_ENDINGS:
+            if t.endswith(end) and len(t) - len(end) >= 4:
+                t = t[: -len(end)]
+                break
+    if len(t) > 4 and t.endswith("s"):
+        t = t[:-1]
+    return t
+
+
+def _query_tokens(query) -> List[str]:
+    return [t for t in re.split(r"\s+", _norm_text(query)) if t]
+
+
+def _turn_haystack(turn: Turn):
+    """Все тексты хода для поиска: (текст, метка, вес)."""
+    parts = []
+    if turn.user:
+        if turn.user.content:
+            parts.append((_norm_text(turn.user.content), "user_content", 4))
+        if turn.user.thinking:
+            parts.append((_norm_text(turn.user.thinking), "user_thinking", 1))
+    if turn.assistant:
+        if turn.assistant.content:
+            parts.append((_norm_text(turn.assistant.content), "assistant_content", 4))
+        if turn.assistant.thinking:
+            parts.append((_norm_text(turn.assistant.thinking), "assistant_thinking", 2))
+    for tc in turn.tool_calls:
+        parts.append((_norm_text(tc.tool), f"tool:{tc.tool}", 2))
+        if tc.arguments:
+            try:
+                parts.append((_norm_text(json.dumps(tc.arguments, ensure_ascii=False)),
+                              "tool_arguments", 2))
+            except Exception:
+                parts.append((_norm_text(str(tc.arguments)), "tool_arguments", 1))
+        body = tc.result or tc.result_preview or ""
+        if body:
+            parts.append((_norm_text(body), "tool_result", 1))
+        if tc.artifact:
+            parts.append((_norm_text(tc.artifact), "artifact", 1))
+    return parts
+
+
+_SEARCH_FILES = ("response.md", "thinking.md", "tools.log", "session_raw.log",
+                 "context.json", "messages.json")
+
+
+def _search_files(session_path: str, tokens: List[str],
+                  limit_per_file: int = 5) -> List[Dict]:
+    """Ищет токены построчно в файлах сессии; возвращает файл:строка + время."""
+    if not session_path or not os.path.isdir(session_path) or not tokens:
+        return []
+    found: List[Dict] = []
+    for fname in _SEARCH_FILES:
+        path = os.path.join(session_path, fname)
+        if not os.path.isfile(path):
+            continue
+        try:
+            file_mtime = datetime.fromtimestamp(os.path.getmtime(path)).isoformat(timespec="seconds")
+        except Exception:
+            file_mtime = None
+        hits = 0
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for lineno, line in enumerate(f, 1):
+                    nl = _norm_text(line)
+                    if not any(tok in nl or (len(tok) > 4 and _stem(tok) in nl)
+                               for tok in tokens):
+                        continue
+                    m = re.search(r'"timestamp"\s*:\s*"([^"]+)"', line)
+                    found.append({
+                        "file": fname,
+                        "line": lineno,
+                        "timestamp": m.group(1) if m else file_mtime,
+                        "file_mtime": file_mtime,
+                        "snippet": " ".join(line.split())[:220],
+                    })
+                    hits += 1
+                    if hits >= limit_per_file:
+                        break
+        except Exception:
+            continue
+    return found
+
+
+def _action_search(turns: List[Turn], index: SessionIndex, query: str, limit: int,
+                   include_content: bool, include_thinking: bool,
+                   mode: str = "auto", session_path: str = "") -> Dict:
+    """Очень гибкий поиск по сессии.
+
+    - регистр не важен;
+    - пробелы/пунктуация нормализуются;
+    - ищутся части слов (подстроки) и отдельные токены;
+    - при отсутствии полного совпадения возвращаются частичные.
+    mode: auto | all (все токены) | any (любой токен) | regex
+    """
+    raw = str(query or "").strip()
+    if not raw:
+        # Без запроса не ошибка — отдаём последние ходы.
+        recent = turns[-limit:]
+        out = [t.to_dict(include_content, include_thinking) for t in recent]
+        return {
+            "query": "",
+            "tokens": [],
+            "note": "Запрос пуст — показаны последние ходы. Уточни query=…",
+            "total_matches": len(turns),
+            "turns": out,
+        }
+
     matched_turns = []
-    
-    for turn in turns:
-        matched_in = []
-        score = 0
-        
-        # Поиск в user content
-        if turn.user and turn.user.content and query_lower in turn.user.content.lower():
-            matched_in.append("user_content")
-            score += 3
-        
-        # Поиск в assistant content
-        if turn.assistant:
-            if turn.assistant.content and query_lower in turn.assistant.content.lower():
-                matched_in.append("assistant_content")
-                score += 3
-            if turn.assistant.thinking and query_lower in turn.assistant.thinking.lower():
-                matched_in.append("assistant_thinking")
+    tokens = _query_tokens(raw)
+
+    if mode == "regex":
+        try:
+            rx = re.compile(raw, re.IGNORECASE)
+        except re.error:
+            rx = None
+        for turn in turns:
+            hay = " \n ".join(p[0] for p in _turn_haystack(turn))
+            if rx and rx.search(hay):
+                d = turn.to_dict(include_content, include_thinking)
+                d["matched_in"] = ["regex"]
+                d["search_score"] = 10
+                d["confidence"] = "HINT"
+                matched_turns.append(d)
+    else:
+        for turn in turns:
+            parts = _turn_haystack(turn)
+            blob = " \n ".join(p[0] for p in parts)
+            # Совпадение: сам токен или его стем (учёт кириллических окончаний).
+            hit = [tok for tok in tokens
+                   if tok in blob or (len(tok) > 4 and _stem(tok) in blob)]
+            if not hit:
+                continue
+            all_hit = len(hit) == len(tokens)
+            if mode == "all" and not all_hit:
+                continue
+            hit_variants = set()
+            for tok in hit:
+                hit_variants.add(tok)
+                if len(tok) > 4:
+                    hit_variants.add(_stem(tok))
+            matched_in = []
+            for text, label, _w in parts:
+                if any(v in text for v in hit_variants):
+                    matched_in.append(label)
+            score = len(hit) * 3
+            if all_hit:
+                score += 6
+            # бонус за попадание в user/assistant текст
+            if "user_content" in matched_in:
                 score += 2
-        
-        # Поиск в tool_calls
-        for tc in turn.tool_calls:
-            if query_lower in tc.tool.lower():
-                matched_in.append(f"tool:{tc.tool}")
+            if "assistant_content" in matched_in:
                 score += 2
-            for arg_val in tc.arguments.values():
-                if query_lower in str(arg_val).lower():
-                    matched_in.append("tool_arguments")
-                    score += 1
-        
-        if matched_in:
-            turn_dict = turn.to_dict(include_content, include_thinking)
-            turn_dict["matched_in"] = matched_in
-            turn_dict["search_score"] = score
-            matched_turns.append(turn_dict)
-    
-    # Сортируем по score
+            d = turn.to_dict(include_content, include_thinking)
+            d["matched_in"] = sorted(set(matched_in))
+            d["matched_tokens"] = hit
+            d["search_score"] = score
+            d["partial"] = not all_hit
+            d["confidence"] = "HINT"
+            matched_turns.append(d)
+
     matched_turns.sort(key=lambda x: x.get("search_score", 0), reverse=True)
-    
+
     return {
-        "query": query,
+        "query": raw,
+        "tokens": tokens,
+        "mode": mode,
         "total_matches": len(matched_turns),
-        "turns": matched_turns[:limit]
+        "turns": matched_turns[:limit],
+        "files": _search_files(session_path, tokens) if tokens else [],
     }
 
 
@@ -799,7 +1322,18 @@ def _action_chain(turns: List[Turn], from_turn: int, to_turn: int, include_conte
 def _format_structured(data: Dict, action: str) -> str:
     """Форматирует результат в структурированный текст"""
     lines = []
-    
+
+    meta = data.get("_meta") or {}
+    if meta.get("session"):
+        rng = meta.get("turn_range") or []
+        rng_s = f"[{rng[0]}..{rng[1]}]" if rng else "[]"
+        conf = data.get("_confidence") or ""
+        lines.append(f"🧭 Архивариус: {meta['session']} · ходов {meta.get('turns_total')} "
+                     f"{rng_s} · последний {meta.get('last_timestamp')}"
+                     + (f" · [{conf}]" if conf else ""))
+        if meta.get("note"):
+            lines.append(f"   ℹ {meta['note']}")
+
     if action == "resume_brief":
         lines.append("🔁 Resume Brief")
         lines.append(f"   Session: {data.get('SESSION_NAME')}")
@@ -818,6 +1352,25 @@ def _format_structured(data: Dict, action: str) -> str:
                     lines.append(f"         User: {t['user_preview'][:100]}")
                 if t.get("assistant_preview"):
                     lines.append(f"         Assistant: {t['assistant_preview'][:100]}")
+
+    elif action == "restore":
+        lines.append(f"🧩 Точное восстановление: source={data.get('source')} "
+                     f"exact={data.get('exact')} model={data.get('model')} "
+                     f"ctx={data.get('context_limit')}")
+        lines.append(f"   Сообщений: {data.get('messages_count')} · roles={data.get('roles')} "
+                     f"· tool-сообщений: {data.get('tool_messages')}")
+        if data.get("stale"):
+            lines.append(f"   ⚠ Снапшот старше context.json: последний хвост "
+                         f"{data.get('last_context_timestamp')} — смотри get_turn/turns.")
+        for m in (data.get("messages") or [])[-6:]:
+            role = m.get("role")
+            if m.get("content_length") is not None:
+                body = f"len={m.get('content_length')}"
+            else:
+                body = " ".join(str(m.get("content") or "").split())[:100]
+            lines.append(f"   • {role}: {body}")
+        if data.get("messages_full"):
+            lines.append("   (полный массив `messages` — в format=json)")
 
     elif action == "summary":
         lines.append(f"📊 Session Summary")
@@ -848,39 +1401,65 @@ def _format_structured(data: Dict, action: str) -> str:
                 lines.append(f"      User: {user_preview}...")
     
     elif action == "get_turn":
-        lines.append(f"📋 Turn {data.get('turn_id')}:")
+        lines.append(f"📋 Turn {data.get('turn_id')}  "
+                     f"[{data.get('timestamp_start')} → {data.get('timestamp_end')}]")
         if data.get("user"):
             user = data["user"]
-            lines.append(f"   User ({user.get('content_length')} chars):")
-            content = user.get("content", user.get("content_preview", ""))
-            lines.append(f"      {content[:200]}...")
-        
+            lines.append(f"   User ({user.get('content_length')} chars) "
+                         f"[{user.get('timestamp')}]:")
+            body = user.get("content") or user.get("content_preview") or ""
+            lines.append("      " + body[:8000])
+
         if data.get("assistant"):
             ass = data["assistant"]
-            lines.append(f"   Assistant ({ass.get('content_length')} chars, model: {ass.get('model')}):")
-            content = ass.get("content", ass.get("content_preview", ""))
-            lines.append(f"      {content[:200]}...")
-            
+            lines.append(f"   Assistant ({ass.get('content_length')} chars) "
+                         f"[{ass.get('timestamp')}] model={ass.get('model')}:")
+            body = ass.get("content") or ass.get("content_preview") or ""
+            lines.append("      " + body[:8000])
+
             if ass.get("thinking"):
                 lines.append(f"   Thinking ({ass.get('thinking_length')} chars):")
-                lines.append(f"      {ass['thinking'][:200]}...")
-        
-        if data.get("tool_calls"):
-            lines.append(f"   Tool calls ({len(data['tool_calls'])}):")
-            for tc in data["tool_calls"]:
-                lines.append(f"      • {tc.get('tool')}: {tc.get('status')}")
+                lines.append("      " + (ass.get("thinking") or "")[:4000])
+
+        for tc in data.get("tool_calls") or []:
+            lines.append(f"   ⚙ {tc.get('tool')} [{tc.get('status')}] id={tc.get('id')}")
+            args = tc.get("arguments")
+            if args:
+                try:
+                    lines.append("      args: " + json.dumps(args, ensure_ascii=False)[:600])
+                except Exception:
+                    lines.append(f"      args: {str(args)[:600]}")
+            if tc.get("artifact"):
+                lines.append(f"      artifact: {tc.get('artifact')}")
+            body = tc.get("result") or tc.get("result_preview") or ""
+            if body:
+                lines.append(f"      result: {str(body)[:2000]}")
     
     elif action == "search":
-        lines.append(f"🔍 Search results for '{data.get('query')}': {data.get('total_matches')} matches")
+        lines.append(f"🔍 Search '{data.get('query')}': {data.get('total_matches')} turns"
+                     + (f", tokens={data.get('tokens')}" if data.get("tokens") else ""))
         for turn in data.get("turns", []):
             turn_id = turn.get("turn_id")
             score = turn.get("search_score", 0)
             matched_in = ", ".join(turn.get("matched_in", []))
-            lines.append(f"   Turn {turn_id} (score: {score}, matched in: {matched_in})")
-            
-            user_preview = turn.get("user", {}).get("content_preview", "")
-            if user_preview:
-                lines.append(f"      User: {user_preview[:80]}...")
+            partial = " (частично)" if turn.get("partial") else ""
+            lines.append(f"   Turn {turn_id} [{turn.get('timestamp_start')}] "
+                         f"(score: {score}, in: {matched_in}){partial}")
+            user = turn.get("user") or {}
+            user_text = user.get("content") or user.get("content_preview") or ""
+            if user_text:
+                lines.append(f"      User: {' '.join(user_text.split())[:100]}")
+            ass = turn.get("assistant") or {}
+            ass_text = ass.get("content") or ass.get("content_preview") or ""
+            if ass_text:
+                lines.append(f"      Assistant: {' '.join(ass_text.split())[:100]}")
+
+        files = data.get("files") or []
+        if files:
+            lines.append("   📄 Где именно (файл:строка, время):")
+            for f in files:
+                lines.append(f"      {f.get('file')}:{f.get('line')} [{f.get('timestamp')}]")
+                lines.append(f"         {f.get('snippet', '')[:160]}")
     
     elif action == "stats":
         lines.append(f"📈 Session Statistics")
@@ -933,7 +1512,19 @@ def _format_structured(data: Dict, action: str) -> str:
     else:
         # Для остальных действий — JSON
         return json.dumps(data, ensure_ascii=False, indent=2)
-    
+
+    advice = data.get("_advice")
+    if advice:
+        lines.append("")
+        lines.append(f"💡 Совет: {advice}")
+
+    hints = data.get("_next_actions")
+    if hints:
+        lines.append("")
+        lines.append("➡ Следующие шаги (session_memory):")
+        for h in hints:
+            lines.append(f"   • {h}")
+
     return "\n".join(lines)
 
 
@@ -968,5 +1559,11 @@ def _format_as_markdown(data: Dict, action: str) -> str:
     else:
         # Fallback to JSON in code block
         lines.append(f"```json\n{json.dumps(data, ensure_ascii=False, indent=2)}\n```\n")
-    
+
+    hints = data.get("_next_actions")
+    if hints:
+        lines.append("\n**Следующие шаги (session_memory):**\n")
+        for h in hints:
+            lines.append(f"- `{h}`\n")
+
     return "".join(lines)

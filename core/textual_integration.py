@@ -415,6 +415,19 @@ def ask_ollama_textual(
     def _finalize_turn(content, thinking="", tool_calls=None):
         _call_from_thread(app.finalize_assistant_turn, content, thinking, tool_calls)
 
+    def _persist_connection_failure(reason: str, user_prompt: str = "") -> None:
+        """Сохраняет факт сетевого сбоя, чтобы контекст не выглядел как новый.
+
+        Пользовательский запрос и system-пометка фиксируются в истории, поэтому
+        после обрыва агент видит, на чём остановился, а не начинает заново.
+        """
+        if user_prompt:
+            sm.update_context(session_path, "user", user_prompt)
+        note = f"{reason} Сессия не завершена — продолжай с того же места."
+        sm.update_context(session_path, "system", note)
+        messages.append({"role": "system", "content": note})
+        _finalize_turn("", "")
+
     def _append_tool_result(tool_name, result):
         _call_from_thread(app.append_tool_result, tool_name, result)
 
@@ -617,6 +630,8 @@ def ask_ollama_textual(
                     http_retries += 1
                     time.sleep(2)
                     continue
+                _persist_connection_failure(
+                    f"Не удалось подключиться к API ({e}).", user_text)
                 break
 
             if response.status_code != 200:
@@ -663,6 +678,8 @@ def ask_ollama_textual(
                     http_retries += 1
                     time.sleep(3)
                     continue
+                _persist_connection_failure(
+                    f"API вернул ошибку {response.status_code}: {error_msg}", user_text)
                 break
 
             full_response = ""
@@ -859,7 +876,37 @@ def ask_ollama_textual(
             if stream_error:
                 _write_log(f"[red]Ollama stream error: {stream_error}[/red]")
                 _update_stats(status="Stream Error")
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                # Обрыв соединения с API в середине ответа. Раньше здесь был
+                # просто break: частичный ответ терялся, в истории оставался
+                # «висящий» user без assistant, и агент вёл себя так, будто
+                # сессия перезапущена. Теперь повторяем запрос (Ollama
+                # stateless — просто пересылаем messages), а при исчерпании
+                # попыток сохраняем прерванный ход, чтобы контекст не рвался.
+                if http_retries < max_http_retries:
+                    http_retries += 1
+                    _write_log(f"[yellow]Повтор запроса после обрыва "
+                               f"({http_retries}/{max_http_retries})…[/yellow]")
+                    time.sleep(2)
+                    continue
+                if full_response.strip() or full_thinking.strip():
+                    sm.update_context(session_path, "assistant", full_response,
+                                      thinking=full_thinking)
+                    messages.append({"role": "assistant", "content": full_response})
+                    _finalize_turn(full_response, full_thinking)
+                else:
+                    note = ("Соединение с API оборвалось до получения ответа. "
+                            "Сессия не завершена — продолжай с того же места.")
+                    sm.update_context(session_path, "system", note)
+                    messages.append({"role": "system", "content": note})
+                    _finalize_turn("", "")
                 break
+
+            # Успешный стрим — сбрасываем счётчик сетевых ретраев хода.
+            http_retries = 0
 
             elapsed = time.time() - start_time
             ttft_val = first_token_time - start_time if first_token_time else elapsed

@@ -37,11 +37,12 @@
 | vision | [entities/tools/vision.md](entities/tools/vision.md) | Анализ изображений мультимодальной моделью |
 | audio | [entities/tools/audio.md](entities/tools/audio.md) | Анализ аудио мультимодальной (omni) моделью |
 | skills | [entities/tools/skills.md](entities/tools/skills.md) | Менеджер AI-навыков (личные/проектные, ClawHub) |
-| session_memory | [entities/tools/session-memory.md](entities/tools/session-memory.md) | Объектный доступ к истории сессии |
+| session_memory | [entities/tools/session-memory.md](entities/tools/session-memory.md) | Архивариус: restore (EXACT) / resume_brief / get_turn / гибкий поиск |
 
 ## Концепции (concepts)
 Абстрактные механизмы и подходы.
 - [concepts/session_lifecycle.md](concepts/session_lifecycle.md) — жизненный цикл сессии, создание, продолжение, возобновление
+- [concepts/session_resume.md](concepts/session_resume.md) — возобновление и точное восстановление контекста (EXACT/DERIVED/HINT), устойчивость к обрывам API
 - [concepts/scrollback.md](concepts/scrollback.md) — бесконечная прокрутка истории сессии (TUI); draft
 - [concepts/context_management.md](concepts/context_management.md) — обрезка, переполнение, SESSION_PROTOCOL, детекция зацикливания
 - [concepts/function_calling.md](concepts/function_calling.md) — механика tool-calls в потоке агента
