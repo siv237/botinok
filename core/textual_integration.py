@@ -342,6 +342,53 @@ def _ollama_summarize_and_reset_context(
     return protocol_msg["content"], artifact_path
 
 
+def _abort_stream(response) -> None:
+    """Принудительно оборвать стрим модели.
+
+    `response.close()` не прерывает блокирующий read в потоке-читателе, поэтому
+    Ollama продолжает генерировать. Здесь мы делаем `shutdown()` сокета — это
+    разблокирует read и закрывает соединение, по которому сервер понимает, что
+    генерацию надо остановить.
+    """
+    # Развернуть обёртку OpenAI-совместимого бэкенда до requests.Response.
+    resp = getattr(response, "_resp", response)
+
+    # 1) socket.shutdown — единственный надёжный способ разбудить blocked recv.
+    try:
+        import socket as _socket
+        raw = getattr(resp, "raw", None)
+        fp = getattr(getattr(raw, "_fp", None), "fp", None)
+        sock = getattr(getattr(fp, "raw", None), "_sock", None)
+        if sock is not None:
+            try:
+                sock.shutdown(_socket.SHUT_RDWR)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 2) Освободить соединение urllib3.
+    try:
+        raw = getattr(resp, "raw", None)
+        if raw is not None:
+            try:
+                raw.close()
+            except Exception:
+                pass
+            try:
+                raw.release_conn()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 3) Закрыть объект ответа (requests/обёртка).
+    try:
+        response.close()
+    except Exception:
+        pass
+
+
 def ask_ollama_textual(
     model: str,
     messages: List[Dict],
@@ -570,6 +617,12 @@ def ask_ollama_textual(
             app.dangerous_switch_denied = False
 
         while True:
+            # Esc между итерациями: не отправляем новый запрос, сразу выходим и
+            # возвращаем UI в покой (ждём следующий вопрос).
+            if getattr(app, "_stop_requested", False):
+                stopped_by_user = True
+                _finalize_turn("", "")
+                break
             tool_rounds += 1
             if tool_rounds > MAX_TOOL_ROUNDS_PER_TURN:
                 if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
@@ -832,10 +885,7 @@ def ask_ollama_textual(
                         sm.log_chunk(session_path, "response", token)
 
                         if len(full_response) % 800 == 0 and _detect_repetition(full_response):
-                            try:
-                                response.close()
-                            except Exception:
-                                pass
+                            _abort_stream(response)
                             stream_done = True
                             break
 
@@ -859,10 +909,7 @@ def ask_ollama_textual(
                     break
 
                 if app._stop_requested:
-                    try:
-                        response.close()
-                    except Exception:
-                        pass
+                    _abort_stream(response)  # рвём сокет — модель прекращает генерацию
                     stream_done = True
                     stopped_by_user = True
                     break
@@ -877,10 +924,7 @@ def ask_ollama_textual(
                 time.sleep(0.1)
 
                 if app._stop_requested:
-                    try:
-                        response.close()
-                    except Exception:
-                        pass
+                    _abort_stream(response)  # рвём сокет — модель прекращает генерацию
                     _write_log("[yellow]⏹ Stopped by user[/yellow]")
                     stream_done = True
                     stopped_by_user = True
@@ -889,10 +933,7 @@ def ask_ollama_textual(
             if stream_error:
                 _write_log(f"[red]Ollama stream error: {stream_error}[/red]")
                 _update_stats(status="Stream Error")
-                try:
-                    response.close()
-                except Exception:
-                    pass
+                _abort_stream(response)
                 # Обрыв соединения с API в середине ответа. Раньше здесь был
                 # просто break: частичный ответ терялся, в истории оставался
                 # «висящий» user без assistant, и агент вёл себя так, будто
@@ -1096,6 +1137,22 @@ def ask_ollama_textual(
             _finalize_turn(full_response, full_thinking, tool_calls)
 
             for tc in tool_calls:
+                # Esc до старта инструмента: не выполняем его вовсе. Закрываем
+                # оставшиеся tool_calls aborted-результатами, чтобы в истории не
+                # осталось «висячих» вызовов без ответа.
+                if getattr(app, "_stop_requested", False):
+                    for skip_tc in tool_calls[tool_calls.index(tc):]:
+                        skip_func = skip_tc.get("function", {})
+                        skip_id = skip_tc.get("id", "")
+                        skip_name = skip_func.get("name", "unknown")
+                        skip_msg = "ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ. Инструмент не выполнен."
+                        messages.append({"role": "tool", "tool_call_id": skip_id,
+                                         "name": skip_name, "content": skip_msg})
+                        sm.update_context(session_path, "tool", skip_msg,
+                                          tool_call_id=skip_id, name=skip_name)
+                        sm.log_tool_call(session_path, skip_name, {}, skip_msg,
+                                         status="aborted", call_id=skip_id)
+                    break
                 func = tc.get("function", {})
                 tool_name = func.get("name", "unknown")
                 tc_id = tc.get("id", "")
@@ -1216,6 +1273,22 @@ def ask_ollama_textual(
                     progress_callback=progress_callback,
                 )
 
+                # Esc во время работы инструмента: процесс(ы) убиты, фиксируем
+                # прерывание и прекращаем ход, ничего не «додумывая».
+                if getattr(app, "_stop_requested", False):
+                    result = ("ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ. Действие и все запущенные "
+                              "им процессы прерваны.")
+                    compact_msg = _compact_tool_message(tool_name, tool_args, result, "")
+                    messages.append({"role": "tool", "tool_call_id": tc_id,
+                                     "name": tool_name, "content": compact_msg})
+                    sm.update_context(session_path, "tool", compact_msg,
+                                      tool_call_id=tc_id, name=tool_name)
+                    sm.log_tool_call(session_path, tool_name, tool_args, result,
+                                     status="aborted", call_id=tc_id)
+                    _update_tool(tool_name, status="aborted", size_kb=0)
+                    _append_tool_result(tool_name, compact_msg[:500])
+                    break
+
                 if tool_name == "code_editor":
                     try:
                         parsed = json.loads(str(tool_result))
@@ -1292,6 +1365,13 @@ def ask_ollama_textual(
 
                 _update_tool(tool_name, status="completed", size_kb=size_kb)
                 _append_tool_result(tool_name, compact_msg[:500])
+
+            # Если инструмент был прерван пользователем — не запускаем новый ход,
+            # возвращаем UI в покой и ждём следующий вопрос.
+            if getattr(app, "_stop_requested", False):
+                _finalize_turn("", "")
+                _update_stats(status="Ready")
+                break
 
             _append_turn_guidance(resume_turn)
 

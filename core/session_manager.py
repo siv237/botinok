@@ -4,6 +4,7 @@ import time
 import base64
 import copy
 import hashlib
+import shutil
 import configparser
 from datetime import datetime
 from typing import Optional
@@ -264,8 +265,7 @@ class SessionManager:
             "history": []
         }
         
-        with open(os.path.join(session_path, "context.json"), "w") as f:
-            json.dump(context, f, indent=4)
+        self._atomic_write_json(os.path.join(session_path, "context.json"), context, indent=4)
             
         return session_path
 
@@ -455,12 +455,78 @@ class SessionManager:
         with open(tool_log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    @staticmethod
+    def _atomic_write_json(path, obj, **kwargs):
+        """Атомарная запись JSON: tmp + fsync + os.replace, с бэкапом прежней версии."""
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(obj, f, **kwargs)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        if os.path.exists(path):
+            try:
+                shutil.copy2(path, path + ".bak")
+            except Exception:
+                pass
+        os.replace(tmp, path)
+        # Подчистить возможный «хвост» от прежней аварийной записи.
+        for junk in (path + ".tmp",):
+            if os.path.exists(junk):
+                try:
+                    os.remove(junk)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _read_json_with_backup(path):
+        """Прочитать JSON, при повреждении — из .bak. -> (data | None, источник)."""
+        for cand in (path, path + ".bak"):
+            if not os.path.exists(cand):
+                continue
+            try:
+                with open(cand, "r", encoding="utf-8", errors="ignore") as f:
+                    return json.load(f), cand
+            except Exception:
+                continue
+        return None, None
+
+    def load_history_entries(self, session_path):
+        """Надёжно получить историю: context.json → context.json.bak → messages.json."""
+        context_path = os.path.join(session_path, "context.json")
+        data, _src = self._read_json_with_backup(context_path)
+        if isinstance(data, dict) and data.get("history"):
+            return data["history"]
+        try:
+            msgs = self.load_messages_snapshot(session_path)
+            if msgs:
+                return msgs
+        except Exception:
+            pass
+        return []
+
     def update_context(self, session_path, role, content, thinking="", tool_calls=None,
                        tool_call_id=None, name=None, extra=None):
         context_path = os.path.join(session_path, "context.json")
         try:
-            with open(context_path, "r") as f:
-                context = json.load(f)
+            context, _src = self._read_json_with_backup(context_path)
+            if not isinstance(context, dict):
+                # context.json (и .bak) повреждены — засеваем историю из
+                # канонического снапшота messages.json, чтобы не потерять диалог.
+                seeded = []
+                try:
+                    seeded = self.load_messages_snapshot(session_path) or []
+                except Exception:
+                    seeded = []
+                context = {"history": list(seeded)}
+                try:
+                    if os.path.exists(context_path):
+                        os.replace(context_path,
+                                   context_path + f".corrupt-{int(time.time())}")
+                except Exception:
+                    pass
 
             entry = {
                 "timestamp": datetime.now().isoformat(),
@@ -495,9 +561,8 @@ class SessionManager:
 
             history.append(entry)
 
-            with open(context_path, "w") as f:
-                json.dump(context, f, indent=4, ensure_ascii=False)
-        except Exception as e:
+            self._atomic_write_json(context_path, context, indent=4, ensure_ascii=False)
+        except Exception:
             pass
 
     def log_step(self, session_path, step_name, request_data, response_data, metrics):
@@ -555,8 +620,7 @@ class SessionManager:
         path = os.path.join(session_path, "proofreader", "context.json")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"history": history}, f, indent=4, ensure_ascii=False)
+            self._atomic_write_json(path, {"history": history}, indent=4, ensure_ascii=False)
         except Exception:
             pass
 

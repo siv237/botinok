@@ -465,3 +465,66 @@ TypeError: execute() got an unexpected keyword argument 'resume'`.
 - Тесты: `tests/test_safe_ops.py`, `file_base64_marker` в `test_web_kit.py`.
 - Страницы: `entities/safe_ops.md`, `concepts/dangerous_mode.md`,
   `entities/tools/web.md`, `index.md`.
+
+## [2026-09-18] ingest | мгновенная остановка по Esc: killpg дерева процессов
+Симптом: Esc во время работы инструмента не прерывал действие — «Stop requested»
+копился (4 раза на скриншоте), а процесс (aria2c/jq/lynx) продолжал работать,
+потому что `subprocess.run` блокирует поток и не реагирует на флаг.
+- **`core/process_control.py`**: единый реестр процессов + `run()` с
+  `start_new_session=True`, `communicate` в потоке и опросом `stop_event`;
+  `request_stop()` убивает группу (`SIGTERM`→grace→`SIGKILL`) — процесс и всех
+  порождённых, ничего не остаётся.
+- `App.request_stop()` → `process_control.request_stop()` +
+  `ShellSessionRegistry.close_all()`; Esc логирует «Остановлено» один раз
+  (`_stop_logged`); `start_assistant_turn` сбрасывает флаг.
+- Прерванный инструмент фиксируется в сессии как `aborted`
+  («ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ…»), ход не продолжается.
+- `web` (aria2c/jq/lynx/httpx-циклы), `safe_ops`, `file_system._run_safe_command`
+  переведены на прерываемый `run`.
+- Тесты: `tests/test_process_control.py` (быстрое прерывание + отсутствие
+  оставшихся «внуков»). Страницы: `entities/process_control.md`,
+  `entities/textual_ui.md`, `index.md`.
+
+## [2026-09-18] fix | остановка самой модели по Esc (обрыв стрима)
+Дополнение к остановке процессов: Esc не останавливал **генерацию LLM**.
+`response.close()` не прерывает блокирующий `response.iter_lines()` в потоке-
+читателе → Ollama продолжал генерировать, а UI просто вставал.
+- `_abort_stream(response)`: `shutdown(SHUT_RDWR)` сокета (`response.raw._fp.fp.raw._sock`;
+  для OpenAI-обёртки — `._resp`), затем `raw.close()/release_conn()` и
+  `response.close()`. Разблокирует read и рвёт соединение → сервер прекращает
+  генерацию.
+- Применяется на всех путях остановки и при детекте повторов; после
+  `stopped_by_user` частичный ответ сохраняется и ход завершается.
+- Тест `tests/test_abort_stream.py`: локальный медленный NDJSON-сервер видит
+  разрыв (BrokenPipe), поток-читатель останавливается < 3 с.
+- Страницы: `concepts/streaming_tui.md`, `entities/process_control.md`.
+
+## [2026-09-18] fix | Esc: не терять флаг остановки между итерациями
+Симптом: после «Остановлено» модель всё равно делала новые tool-call'ы и
+размышления. Причина: `start_assistant_turn` вызывается на **каждой** итерации
+цикла инструментов и сбрасывал `_stop_requested`/`process_control.clear_stop()`,
+гася Esc.
+- Сброс флага остановки перенесён в `reset_turn_state` (один раз на запрос
+  пользователя); `start_assistant_turn` больше его не трогает.
+- Явные проверки стопа: в начале итерации (перед новым запросом к модели),
+  после каждого инструмента и **перед стартом** инструмента — при остановке
+  оставшиеся `tool_calls` не выполняются, а закрываются aborted-результатами
+  (в истории нет «висячих» вызовов).
+- UI возвращается в покой (`_finalize_turn`), частично надуманное сохраняется.
+- Страницы: `concepts/streaming_tui.md`, `entities/process_control.md`.
+
+## [2026-09-18] fix | сохранность сессии: атомарная запись и восстановление
+Симптом: «Ошибка загрузки истории: Expecting ',' delimiter…»; огромная сессия
+выглядела пустой. Причина: Esc не останавливал модель (см. выше) → приложение
+закрыли во время записи крупного `context.json`; `update_context` писал
+`json.dump` прямо в файл (не атомарно) → файл обрублен; ошибка чтения глушилась,
+история переставала обновляться.
+- `_atomic_write_json` (tmp+fsync+`os.replace`, бэкап `.bak`) в `update_context`,
+  создании сессии и proofreader.
+- `_read_json_with_backup` + `load_history_entries` (context → `.bak` →
+  `messages.json`); `update_context` засевает историю из снапшота и откладывает
+  битый файл в `context.json.corrupt-<ts>`.
+- `load_history` использует надёжный загрузчик (не падает на битом JSON).
+- Реально восстановлена сессия `20260918_212628` (64 записи из `messages.json`).
+- Тест `tests/test_session_recovery.py` (атомарность, `.bak`, fallback, засев).
+- Страницы: `entities/session_manager.md`.

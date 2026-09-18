@@ -43,6 +43,16 @@ try:
 except Exception:  # pragma: no cover
     _dlm = None
 
+try:
+    from core import process_control as _pc
+except Exception:  # pragma: no cover
+    _pc = None
+
+
+def _run(argv, **kwargs):
+    """subprocess.run, но прерываемый по Esc (через process_control)."""
+    return _pc.run(argv, **kwargs) if _pc else subprocess.run(argv, **kwargs)
+
 
 DEFAULT_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -252,6 +262,8 @@ def _fetch(url: str, headers, timeout_sec: int, max_bytes: int,
             total = 0
             truncated = False
             for chunk in resp.iter_bytes():
+                if _pc and _pc.stop_requested():
+                    raise httpx.RequestError("остановлено пользователем")
                 if total + len(chunk) > max_bytes:
                     chunks.append(chunk[:max_bytes - total])
                     truncated = True
@@ -422,7 +434,7 @@ def _save_bytes(raw: bytes, output_path: Optional[str], session_path: Optional[s
         f.write(raw)
     ftype = "file"
     try:
-        r = subprocess.run(["file", "-b", path], capture_output=True, text=True, timeout=3)
+        r = _run(["file", "-b", path], capture_output=True, text=True, timeout=3)
         if r.returncode == 0:
             ftype = r.stdout.strip()
     except Exception:
@@ -439,7 +451,7 @@ def _file_type(path: str) -> str:
     if not path or not os.path.exists(path):
         return "отсутствует"
     try:
-        r = subprocess.run(["file", "-b", path], capture_output=True, text=True, timeout=5)
+        r = _run(["file", "-b", path], capture_output=True, text=True, timeout=5)
         if r.returncode == 0:
             return r.stdout.strip()
     except Exception:
@@ -454,7 +466,7 @@ def _looks_like_html_doc(raw: bytes) -> bool:
 
 def _aria2c_available() -> bool:
     try:
-        return subprocess.run(["aria2c", "--version"], capture_output=True,
+        return _run(["aria2c", "--version"], capture_output=True,
                               timeout=5).returncode == 0
     except Exception:
         return False
@@ -519,7 +531,7 @@ def _aria2c_download(url: str, dest: str, headers, timeout_sec: int) -> Tuple[bo
     # Большие файлы/раздачи: жёсткий лимит до 6 часов.
     hard_timeout = min(max(timeout_sec, 30) * 720, 21600)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=hard_timeout)
+        r = _run(cmd, capture_output=True, text=True, timeout=hard_timeout)
     except subprocess.TimeoutExpired:
         return False, "aria2c timeout"
     if r.returncode != 0:
@@ -553,6 +565,8 @@ def _download_file(url: str, dest: str, headers, timeout_sec: int,
                     return False, f"HTTP {resp.status_code}: {_server_reason(body)}", "httpx"
                 with open(dest, "wb") as f:
                     for chunk in resp.iter_bytes():
+                        if _pc and _pc.stop_requested():
+                            raise httpx.RequestError("остановлено пользователем")
                         f.write(chunk)
         return True, "", "httpx"
     except Exception as e:
@@ -961,7 +975,7 @@ def _run_jq(text: str, jq_filter: str) -> Tuple[Optional[str], Optional[str]]:
         if not any(jq_filter.startswith(k) for k in keywords):
             jq_filter = "." + jq_filter
     try:
-        res = subprocess.run(["jq", "-r", jq_filter], input=text, capture_output=True,
+        res = _run(["jq", "-r", jq_filter], input=text, capture_output=True,
                              text=True, timeout=15)
     except FileNotFoundError:
         return None, "jq не установлен — верну сводку без фильтра"
@@ -1041,7 +1055,7 @@ def _search_lynx(query: str, timeout_sec: int, max_chars: int) -> Optional[str]:
     for tmpl in SEARCH_URLS:
         url = tmpl.format(q=encoded)
         try:
-            res = subprocess.run(
+            res = _run(
                 ["lynx", "-dump", "-number_links", "-display_charset=utf-8",
                  f"-connect_timeout={min(timeout_sec, 60)}",
                  f"-read_timeout={min(timeout_sec, 120)}", url],

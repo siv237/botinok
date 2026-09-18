@@ -27,6 +27,7 @@
 | web | [entities/tools/web.md](entities/tools/web.md) | Единый добыватель данных: search/open/extract/json/download; харнес подсказок |
 | download_manager | [entities/download_manager.md](entities/download_manager.md) | Глобальная память загрузок web: что/куда/целое, докачка, хеши |
 | safe_ops | [entities/safe_ops.md](entities/safe_ops.md) | Каталог безопасных read-only операций + подсказки эквивалента |
+| process_control | [entities/process_control.md](entities/process_control.md) | Реестр процессов и мгновенная остановка по Esc (killpg дерева) |
 | file_system | [entities/tools/file-system.md](entities/tools/file-system.md) | FS: навигация, поиск, grep, инспекция; мутации — dangerous |
 | code_editor | [entities/tools/code-editor.md](entities/tools/code-editor.md) | Редактирование файлов (read/write/replace/apply); запись вне сессии — dangerous |
 | shell_exec | [entities/tools/shell-exec.md](entities/tools/shell-exec.md) | PTY-сессия команд (run/read/search/send/wait/kill), dangerous, встроенный терминал |
