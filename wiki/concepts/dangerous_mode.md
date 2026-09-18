@@ -69,7 +69,21 @@ mode. Автосогласие не действует на окно `switch`.
 безопасную альтернативу», чтобы он сразу искал другой путь. Сбрасывается при
 ручном включении dangerous mode.
 
+## Двухуровневая модель (обновлено 2026-09-18)
+- **Безопасный каталог (везде):** read-only операции `file_system action=inspect`
+  (`fs.base64`, `fs.file_type`, `fs.hash`, `sys.*`, `net.*`, `git.*`, `image.meta`
+  и др.) доступны без dangerous mode; справка — `file_system action=help`.
+  → `entities/safe_ops.md`
+- **Внутри папки сессии:** любые **файловые мутации** разрешены без dangerous
+  mode (`allowed_in_session`, контейнмент через `realpath`). Вне сессии — dangerous.
+- **Выполнение кода** (`shell_exec run`) — всегда dangerous. При запрете система
+  предлагает безопасный эквивалент из каталога (`suggest_for_shell`).
+
+Историческая справка: в `56f1768` (2026-03-30) гейт `shell_exec`/`code_editor`
+был снят, поэтому какое-то время shell работал в простом режиме; в `48a5a5c`
+(2026-09-18) гейт возвращён как список опасных действий.
+
 ## Связи
-Инструменты: `code_editor`, `shell_exec`, `file_system`, `curl`.
+Инструменты: `code_editor`, `shell_exec`, `file_system`, `web`.
 Реализация: `entities/tool_manager.md`, `entities/textual_ui.md`,
-`entities/botinok_cli.md`, `entities/tools/*`.
+`entities/botinok_cli.md`, `entities/safe_ops.md`, `entities/tools/*`.

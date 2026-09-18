@@ -21,6 +21,7 @@ web — единый добыватель данных из сети.
 поверх этого ядра и продолжают работать.
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -182,6 +183,9 @@ def _help() -> str:
         "  web action=search query=\"…\"               — поиск в интернете\n"
         "  web action=help                           — эта справка\n"
         "\n"
+        "  web action=json url=… method=POST json_body={…} — веб-API (POST/PUT/…)\n"
+        "    для API, требующих тело: method, json_body (объект) или body (строка)\n"
+        "\n"
         "Общее: headers, timeout_sec, max_bytes, follow_redirects, session_path.\n"
         "Запись вне папки сессии требует dangerous mode.\n"
         "Память загрузок глобальна (~/.botinok/downloads/history.json) и не зависит от сессии.\n"
@@ -193,15 +197,57 @@ def _help() -> str:
 # HTTP
 # --------------------------------------------------------------------------
 
+def _resolve_file_markers(obj):
+    """Заменить маркеры локальных файлов на их base64.
+
+    Модель передаёт путь, а не гигантский base64: в json_body вместо строки
+    пишется {"$file_base64": "/путь/к/файлу"} — web сам читает файл и
+    подставляет base64. Так байты не проходят через tool-call модели.
+    """
+    if isinstance(obj, dict):
+        if set(obj.keys()) == {"$file_base64"}:
+            path = obj.get("$file_base64")
+            if hasattr(path, "__fspath__"):
+                path = os.fspath(path)
+            if not path or not os.path.isfile(path):
+                raise FileNotFoundError(f"$file_base64: файл не найден: {path}")
+            with open(path, "rb") as f:
+                return base64.b64encode(f.read()).decode("ascii")
+        return {k: _resolve_file_markers(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_resolve_file_markers(v) for v in obj]
+    return obj
+
+
+def _request_kwargs(method: str, content, json_body, data) -> dict:
+    """Собрать тело запроса для httpx из body/json/data."""
+    kwargs = {}
+    if json_body is not None:
+        kwargs["json"] = _resolve_file_markers(json_body)
+    elif data is not None:
+        if isinstance(data, (dict, list)):
+            kwargs["json"] = _resolve_file_markers(data)
+        else:
+            kwargs["content"] = data
+    elif content is not None:
+        kwargs["content"] = content
+    return kwargs
+
+
 def _fetch(url: str, headers, timeout_sec: int, max_bytes: int,
-           follow_redirects: bool) -> Tuple[bytes, str, str, int, bool]:
-    """GET с ограничением размера. -> raw, final_url, content_type, status, truncated."""
+           follow_redirects: bool, method: str = "GET",
+           content=None, json_body=None, data=None) -> Tuple[bytes, str, str, int, bool]:
+    """HTTP-запрос (GET/POST/PUT/PATCH/DELETE) с ограничением размера.
+
+    -> raw, final_url, content_type, status, truncated.
+    """
     hdrs = _build_headers(headers)
     timeout = httpx.Timeout(connect=min(timeout_sec, 60) or 10,
                             read=max(timeout_sec or 10, 10),
                             write=10, pool=10)
+    req_kwargs = _request_kwargs(method, content, json_body, data)
     with httpx.Client(follow_redirects=follow_redirects, timeout=timeout) as client:
-        with client.stream("GET", url, headers=hdrs) as resp:
+        with client.stream(method.upper(), url, headers=hdrs, **req_kwargs) as resp:
             chunks: List[bytes] = []
             total = 0
             truncated = False
@@ -1049,8 +1095,10 @@ def _action_search(query: str, headers, timeout_sec: int, max_bytes: int,
 # --------------------------------------------------------------------------
 
 def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
-        timeout_sec, max_bytes, follow_redirects, max_items, session_path,
-        resume: bool = False, expected_sha256: Optional[str] = None) -> str:
+        timeout_sec: int, max_bytes: int, follow_redirects: bool, max_items: int,
+        session_path: Optional[str], resume: bool = False,
+        expected_sha256: Optional[str] = None, method: str = "GET",
+        content=None, json_body=None, data=None) -> str:
     if not url or not str(url).strip():
         return _finish("❌ Не указан url.",
                        {"action": action}, "error",
@@ -1064,15 +1112,20 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
                        {"action": action}, "error",
                        "проверь схему URL (адрес без схемы попробуй через https://)", [])
 
+    method = (method or "GET").upper()
+    has_body = any(v is not None for v in (content, json_body, data))
+
     # Скачивание — отдельный надёжный путь (aria2c, докачка, проверка типа/хеша).
-    if action == "download":
+    # aria2c умеет только GET; запросы с телом идут обычным HTTP-путём.
+    if action == "download" and method == "GET" and not has_body:
         return _do_download(url, output_path, headers, timeout_sec, session_path,
                             resume, expected_sha256)
 
     started = time.time()
 
     def _try(u):
-        return _fetch(u, headers, timeout_sec, max_bytes, follow_redirects)
+        return _fetch(u, headers, timeout_sec, max_bytes, follow_redirects,
+                      method=method, content=content, json_body=json_body, data=data)
 
     try:
         raw, final_url, ctype, status, truncated = _try(url)
@@ -1163,11 +1216,21 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
             action = "open"
         meta["action"] = action
 
-    # download (сюда попадаем только через авто-роутинг бинарника):
-    # переиспользуем надёжный путь с aria2c/докачкой и проверкой типа.
+    # download (авто-роутинг бинарника или запрос с телом):
+    # для GET без тела — надёжный путь aria2c; иначе сохраняем полученное.
     if action == "download":
-        return _do_download(final_url or url, output_path, headers, timeout_sec,
-                            session_path, resume, expected_sha256)
+        if method == "GET" and not has_body:
+            return _do_download(final_url or url, output_path, headers, timeout_sec,
+                                session_path, resume, expected_sha256)
+        path, ftype = _save_bytes(raw, output_path, session_path, final_url or url)
+        if not path:
+            return _finish(
+                f"❌ Получено {_human_size(len(raw))} — укажи output_path или session_path.",
+                {"action": "download"}, "raw",
+                "укажи output_path (внутри сессии)", [])
+        return _finish(f"✅ Сохранено: {path}\n📊 {_human_size(len(raw))}\n📝 {ftype}",
+                       {"action": "download", "saved": path}, "saved",
+                       "файл в папке сессии", [])
 
     # json
     if action == "json" or (action == "auto" and kind == "json"):
@@ -1262,6 +1325,11 @@ def execute(
     resume: bool = False,
     expected_sha256: str = None,
     sha256: str = None,
+    method: str = "GET",
+    body: str = None,
+    data=None,
+    json_body=None,
+    json_data=None,
     progress_callback=None,
     format: str = None,
 ) -> str:
@@ -1274,6 +1342,11 @@ def execute(
     action = aliases.get(action, action)
     jq_filter = jq_filter or jq
     expected_sha256 = expected_sha256 or sha256
+    if json_body is None:
+        json_body = json_data
+    # Синонимы тела запроса: body (строка) / data / json_body (объект).
+    if data is None and body is not None:
+        data = body
 
     if action == "help":
         return _help()
@@ -1294,7 +1367,7 @@ def execute(
 
     return _go(url, action, extract, css, jq_filter, output_path, headers,
                timeout_sec, max_bytes, follow_redirects, max_items, session_path,
-               resume, expected_sha256)
+               resume, expected_sha256, method, None, json_body, data)
 
 
 # Alias

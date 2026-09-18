@@ -423,3 +423,45 @@ legacy `curl`, потеря времени). Ошибка универсальн
   `images_lazy_and_og`, `torrent_detect`, `magnet_destination`.
 - Live: тот же файл теперь качается целиком (3.6 МБ) через aria2c.
 - Страницы: `entities/tools/web.md`, `entities/download_manager.md`, `index.md`.
+
+## [2026-09-18] ingest | web: HTTP-методы и тело запроса (работа с веб-API в простом режиме)
+Диагностика сессии `20260918_212628`: модель работала с **Ollama API** и получила
+`HTTP 405 method not allowed` на `http://localhost:11434/api/generate` — `web`/`curl`
+умели только GET, а API требует POST с JSON-телом. Плюс `Error calling tool 'curl':
+TypeError: execute() got an unexpected keyword argument 'resume'`.
+- `web`: параметры `method` (GET/POST/PUT/PATCH/DELETE), `json_body`/`body`/`data`;
+  запросы с телом идут обычным HTTP-путём, GET без тела — через aria2c.
+- `curl` (legacy): принимает `method`, `json_body`/`body`/`data`, `resume`,
+  `expected_sha256` — устранён TypeError.
+- Сеть/API разрешены **в простом режиме** (dangerous mode — про локальный
+  код/файлы/шелл, не про веб).
+- Тесты: `api_get_405`, `api_post_json`, `curl_post_json`, `curl_resume_accepted`.
+- Live: POST к реальному Ollama `/api/show` вернул данные (без dangerous mode).
+- Страницы: `entities/tools/web.md`.
+
+## [2026-09-18] ingest | safe_ops: каталог безопасных операций, help и подсказки эквивалента
+Задача: агент в простом режиме должен делать «исследование системы и базовые
+вещи», а при попытке запустить запрещённую shell-команду получать безопасную
+альтернативу. Историческая причина: гейт `shell_exec`/`code_editor` был снят в
+`56f1768` и возвращён в `48a5a5c`, из-за чего `base64`/базовые команды стали
+недоступны.
+- **`tools/safe_ops.py`** — единый реестр read-only операций: `fs.base64`,
+  `fs.file_type`, `fs.stat/count/hash/listing/readlink`, `text.base64_decode`,
+  `sys.uptime/loadavg/cpu/mounts`, `proc.top`, `svc.list`, `net.interfaces/ports/dns`,
+  `dev.which`, `image.meta`, `git.*` (read-only). argv без shell, `LC_ALL=C`,
+  лимиты/таймаут, только обычные файлы.
+- **«Умный» харнес:** `file_system action=help` (сгруппированный каталог с
+  примерами), прощающий ввод (алиасы), «похоже, вы имели в виду»,
+  совет/следующий шаг, `suggest_for_shell` для запрещённого shell.
+- **`ToolManager`**: при блокировке `shell_exec run` возвращает безопасный
+  эквивалент (напр. `base64` → `file_system action=inspect command=fs.base64`).
+- **`web`**: маркер `{"$file_base64":"/путь"}` в теле — файл кодируется самим
+  `web` (`_resolve_file_markers`), base64 не проходит через модель. Live: фото →
+  Ollama `/api/chat` принято (`prompt_eval_count` вырос, модель обрабатывает).
+- **Промпты**: `tool_policy.txt`/`tool_reminder.txt` — в безопасном режиме смотреть
+  `file_system action=help`, не пытаться выполнять shell-команды.
+- Двухуровневая модель: безопасный каталог везде; файловые мутации внутри сессии;
+  выполнение кода — всегда dangerous.
+- Тесты: `tests/test_safe_ops.py`, `file_base64_marker` в `test_web_kit.py`.
+- Страницы: `entities/safe_ops.md`, `concepts/dangerous_mode.md`,
+  `entities/tools/web.md`, `index.md`.

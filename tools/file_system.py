@@ -12,6 +12,11 @@ import time
 from datetime import datetime
 from typing import List, Optional, Dict, Union, Tuple
 
+try:
+    from tools import safe_ops as _safe
+except Exception:  # pragma: no cover
+    _safe = None
+
 def file_system_tool(
     action: str,
     path: str = ".",
@@ -32,6 +37,7 @@ def file_system_tool(
     lines: int = 200,
     dest: Optional[str] = None,
     mode: Optional[str] = None,
+    algo: Optional[str] = None,
     session_path: Optional[str] = None,
     dangerous_mode: bool = False,
 ) -> str:
@@ -56,6 +62,8 @@ def file_system_tool(
     - touch: Создание пустого файла или обновление времени модификации
     """
     try:
+        if action == "help":
+            return _safe.catalog() if _safe else "Справка недоступна"
         if action == "list":
             return _list_dir(path, sort=sort, reverse=reverse, max_results=max_results)
         elif action == "search":
@@ -84,6 +92,7 @@ def file_system_tool(
                 unit=unit,
                 since=since,
                 lines=lines,
+                algo=algo,
             )
         elif action == "find":
             return _find_files(
@@ -461,6 +470,7 @@ def _inspect(
     unit: Optional[str],
     since: Optional[str],
     lines: int,
+    algo: Optional[str] = None,
 ) -> str:
     if not command:
         return "Ошибка: для action='inspect' нужен параметр command"
@@ -526,7 +536,53 @@ def _inspect(
         n = max(1, min(lines, 2000))
         return _run_safe_command(["journalctl", "--since", since, "-n", str(n), "--no-pager"], max_bytes=max_bytes)
 
+    # Расширенный безопасный каталог (read-only) — единый источник tools/safe_ops.py.
+    if _safe is not None:
+        canon = _safe.normalize_command(cmd)
+        if canon:
+            cmd = canon
+        safe_dispatch = {
+            "fs.base64": lambda: _safe.file_base64(
+                path, max_bytes=max(max_bytes, _safe.BASE64_MAX_BYTES)),
+            "fs.file_type": lambda: _safe.file_type(path),
+            "fs.stat": lambda: _safe.stat_file(path),
+            "fs.count": lambda: _safe.count_file(path),
+            "fs.readlink": lambda: _safe.readlink_file(path),
+            "fs.hash": lambda: _safe.hash_file(path, algo or "sha256"),
+            "fs.listing": lambda: _safe.listing(path, max_bytes=max_bytes),
+            "text.base64_decode": lambda: _safe.base64_decode(content_query or ""),
+            "sys.uptime": lambda: _safe.sys_uptime(),
+            "sys.loadavg": lambda: _safe.sys_loadavg(),
+            "sys.cpu": lambda: _safe.sys_cpu(max_bytes=max_bytes),
+            "sys.mounts": lambda: _safe.sys_mounts(max_bytes=max_bytes),
+            "proc.top": lambda: _safe.proc_top(max_results),
+            "svc.list": lambda: _safe.svc_list(max_results),
+            "net.interfaces": lambda: _safe.net_interfaces(),
+            "net.ports": lambda: _safe.net_ports(),
+            "net.dns": lambda: _safe.net_dns(content_query or ""),
+            "dev.which": lambda: _safe.dev_which(content_query or ""),
+            "image.meta": lambda: _safe.image_meta(path),
+        }
+        if cmd.startswith("git."):
+            return _with_advice(_safe.git_read(cmd, path, content_query or "",
+                                               max_bytes=max_bytes), cmd)
+        fn = safe_dispatch.get(cmd)
+        if fn:
+            return _with_advice(fn(), cmd)
+        near = _safe.suggest_command(command)
+        if near:
+            return (f"Ошибка: неизвестная inspect command '{command}'.\n"
+                    f"💡 Возможно, ты имел в виду: {near}\n"
+                    f"Полный список: file_system action=help")
     return f"Ошибка: неизвестная inspect command '{command}'"
+
+
+def _with_advice(text: str, command: str) -> str:
+    """Добавить короткий совет/следующий шаг к безопасной операции."""
+    if _safe is None:
+        return text
+    advice = _safe.advice_for(command, text)
+    return f"{text}\n\n{advice}" if advice else text
 
 
 def _fs_tree(path: str, depth: int, max_results: int) -> str:
