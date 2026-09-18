@@ -1068,7 +1068,7 @@ def ask_ollama_textual(
                     _call_from_thread(
                         app.show_confirmation_prompt,
                         tool_name,
-                        json.dumps(tool_args, ensure_ascii=False)[:120],
+                        json.dumps(tool_args, ensure_ascii=False),
                         ""
                     )
                     app._confirmation_event.wait(timeout=300)

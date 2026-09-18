@@ -1,8 +1,8 @@
 ---
 type: concept
-tags: [safety]
-updated: 2026-08-23
-sources: 2
+tags: [safety, tui]
+updated: 2026-09-18
+sources: 3
 status: stable
 ---
 
@@ -25,6 +25,17 @@ status: stable
 - `ToolManager.call_tool` блокирует опасные действия вне dangerous mode возвратом ошибки.
 - Безопасная FS-обёртка: проверки «в пределах» (`_is_within`, `_is_within_session`), `_confirm_action`, `_safe_path`. → `entities/tools/file-system.md`
 - Промпт-уведомление `dangerous_mode.txt` говорит модели о режиме. → `sources/prompts_readme.md`
+
+## Подтверждение в TUI
+Подтверждение (`show_confirmation_prompt`) показывается **встроенно** в окно
+вывода — `#inline_confirm` (`ConfirmInline`), а не модалкой поверх правых
+панелей (модальный `ConfirmationScreen` остаётся запасным путём). Варианты:
+✅ Да · ❌ Нет · ✏️ Отменить с причиной (`y/д`, `n/esc`, ↑↓+Enter). Воркер ждёт
+ответ через `threading.Event` (`_confirmation_event`), таймаут 300 с. После
+выбора `ConfirmInline` вызывает `_apply_confirmation` и убирается
+(`hide_inline_confirmation`). Команда `shell_exec` показывается **развёрнутой**
+через `shfmt` (`format_shell_command`) в прокручиваемом блоке; прочие аргументы —
+pretty-JSON. → `entities/shell_screen.md`
 
 ## Связи
 Инструменты: `code_editor`, `shell_exec`, `file_system`, `curl`.

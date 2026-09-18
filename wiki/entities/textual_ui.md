@@ -51,10 +51,12 @@ status: stable
 знать ширину после раскладки). → `concepts/vision_multimodal.md`
 
 ## Встроенный терминал
-`BotinokTextualApp` умеет показывать PTY-сессии `shell_exec` прямо в TUI:
-- `open_shell_session(session)` открывает `ShellScreen`; одновременно открыто не более одного окна — остальные автоматически сворачиваются.
-- Панель `#shells` в правой колонке перечисляет свёрнутые терминалы (кнопки `shell_restore_<session_id>`, метка «выполняется/завершён»), обновляется из `_tick_stats`.
-- `minimize_shell_session` / `forget_shell_session` — колбэки экрана.
+`BotinokTextualApp` показывает PTY-сессии `shell_exec` прямо в TUI:
+- По умолчанию — **встроенная панель** `#inline_shell` (`ShellInline`) над `#chat`: терминал сверху, стрим модели снизу. `open_shell_session`/`embed_shell_session` открывают/переключают её (виджет переиспользуется через `set_session`).
+- `expand_shell_session(session)` разворачивает терминал в модальное окно `ShellScreen`; кнопка «В окно» возвращает панель. Открыт не более одного терминала.
+- Панель `#shells` в правой колонке перечисляет свёрнутые терминалы (кнопки `shell_restore_<session_id>`, метка «выполняется/завершён»), обновляется инкрементально из `_tick_stats`.
+- `minimize_shell_session` / `forget_shell_session` — колбэки терминала.
+- `_keep_focus` не отбирает фокус у встроенного терминала, чтобы можно было печатать в него во время стрима.
 
 Подробно: `entities/shell_screen.md`, `entities/shell_session.md`, `concepts/embedded_terminal.md`.
 
