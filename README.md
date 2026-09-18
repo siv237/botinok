@@ -24,11 +24,10 @@
 Все инструменты динамически загружаются через `core/tool_manager.py`.
 
 ### 🌐 Сеть и поиск
-- **web_search** — Поиск в интернете через DuckDuckGo (использует `lynx`)
-- **open_url** — Извлечение текстового контента со страницы (lynx)
-- **web_extract** — Извлечение структурированных данных (ссылки, изображения, таблицы) с HTML-страниц
-- **web_extractor** — Алиас на web_extract для совместимости
-- **curl** — HTTP GET запросы, скачивание файлов
+- **web** — Единый добыватель данных: `action=search/open/extract/json/download/downloads/help`.
+  Загрузки через **aria2c** (докачка, большие файлы/ISO, торренты `magnet:`/`.torrent`),
+  проверка типа/HTML-заглушек/`sha256`, глобальная память загрузок `~/.botinok/downloads/history.json`.
+- **web_search / open_url / web_extract / curl** — legacy-алиасы `web` (работают, но для новых задач используй `web`)
 
 ### 🛠 Системные инструменты
 - **file_system** — Навигация, поиск (grep, find), чтение и инспекция файлов. Продвинутый `find` с фильтрами по размеру, времени, типу.
@@ -134,7 +133,7 @@ ollama pull qwen3.5:4b
 curl -sSL https://raw.githubusercontent.com/siv237/botinok/main/install.sh | sudo bash
 ```
 
-Скрипт установит системные зависимости (`python3-venv`, `lynx`, `git`), развернет проект в `/opt/botinok` и создаст алиас `botinok`.
+Скрипт установит системные зависимости (`python3-venv`, `lynx`, `curl`, `git`, `jq`, `aria2`, `file`), развернет проект в `/opt/botinok` и создаст алиас `botinok`. `aria2` — движок надёжных загрузок `web` (докачка/большие файлы/торренты), `file` — определение типа скачанного.
 
 ## Использование
 
