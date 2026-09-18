@@ -423,6 +423,7 @@ def session_memory_tool(
     Session Memory Tool — объектный доступ к истории сессии
     
     Actions:
+    - resume_brief: быстрый сбор сессии для продолжения после паузы/прерывания
     - summary: общая сводка по сессии
     - turns: список обменов с метаданными
     - get_turn: полный объект Turn по ID
@@ -467,7 +468,10 @@ def session_memory_tool(
     # Выполняем action
     result = {}
     
-    if action == "summary":
+    if action == "resume_brief":
+        result = _action_resume_brief(session_path, turns, limit)
+
+    elif action == "summary":
         result = _action_summary(turns, session_path)
     
     elif action == "turns":
@@ -495,7 +499,7 @@ def session_memory_tool(
     
     else:
         result = {"error": f"Unknown action: {action}", "available_actions": [
-            "summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain"
+            "resume_brief", "summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain"
         ]}
     
     # Форматируем вывод
@@ -507,6 +511,27 @@ def session_memory_tool(
         if isinstance(result, dict) and "error" in result:
             return json.dumps(result, ensure_ascii=False)
         return _format_structured(result, action)
+
+
+def _action_resume_brief(session_path: str, turns: List[Turn], limit: int) -> Dict:
+    """Быстрый сбор сессии для продолжения после прерывания/паузы."""
+    from core.session_manager import SessionManager
+    brief = SessionManager().build_resume_brief(session_path)
+    recent = []
+    for t in turns[-max(1, limit):]:
+        recent.append({
+            "turn_id": t.turn_id,
+            "timestamp_start": t.timestamp_start,
+            "timestamp_end": t.timestamp_end,
+            "user_preview": ((t.user.content or t.user.content_preview or "")[:200]
+                             if t.user else ""),
+            "assistant_preview": ((t.assistant.content or t.assistant.content_preview or "")[:200]
+                                  if t.assistant else ""),
+            "tools": [tc.tool for tc in t.tool_calls],
+        })
+    brief = dict(brief)
+    brief["recent_turns"] = recent
+    return brief
 
 
 def _action_summary(turns: List[Turn], session_path: str) -> Dict:
@@ -775,7 +800,26 @@ def _format_structured(data: Dict, action: str) -> str:
     """Форматирует результат в структурированный текст"""
     lines = []
     
-    if action == "summary":
+    if action == "resume_brief":
+        lines.append("🔁 Resume Brief")
+        lines.append(f"   Session: {data.get('SESSION_NAME')}")
+        lines.append(f"   Status: {data.get('RESUME_STATE')} | elapsed: {data.get('ELAPSED')}")
+        lines.append(f"   Original task: {data.get('ORIGINAL_TASK', '')[:200]}")
+        lines.append(f"   Last user prompt: {data.get('LAST_USER_PROMPT', '')[:200]}")
+        lines.append(f"   Last assistant: {data.get('LAST_ASSISTANT_ANSWER', '')[:200]}")
+        lines.append(f"   History: {data.get('HISTORY_LEN')} msgs, tool calls: {data.get('TOOL_CALLS')} (missing result: {data.get('TOOL_CALLS_MISSING')})")
+        recent = data.get("recent_turns", [])
+        if recent:
+            lines.append("   Recent turns:")
+            for t in recent:
+                tools = f" [{', '.join(t.get('tools', []))}]" if t.get("tools") else ""
+                lines.append(f"      Turn {t.get('turn_id')} ({t.get('timestamp_start')}){tools}")
+                if t.get("user_preview"):
+                    lines.append(f"         User: {t['user_preview'][:100]}")
+                if t.get("assistant_preview"):
+                    lines.append(f"         Assistant: {t['assistant_preview'][:100]}")
+
+    elif action == "summary":
         lines.append(f"📊 Session Summary")
         lines.append(f"   Path: {data.get('session_path')}")
         lines.append(f"   Turns: {data.get('total_turns')}, Messages: {data.get('total_messages')}, Tool calls: {data.get('total_tool_calls')}")

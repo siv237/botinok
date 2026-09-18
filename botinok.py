@@ -819,6 +819,10 @@ def main():
                                             PROJECT_DIR=os.path.join(session_path, 'project'),
                                             PROMPTS_DIR=os.path.join(session_path, 'prompts'))
         tool_policy_msg = sm.load_prompt(session_path, "tool_policy")
+        if resume_last_answer:
+            # На восстановлении инструкции про обязательную проверку навыков
+            # модели не отправляются вовсе.
+            tool_policy_msg = SessionManager.strip_skills_mandate(tool_policy_msg)
 
         dangerous_status = "ON" if args.dangerous else "OFF"
         dangerous_details = ("В этой сессии разрешены опасные инструменты: code_editor, shell_exec. shell_exec всегда требует подтверждение пользователя перед выполнением."
@@ -831,10 +835,13 @@ def main():
         broken_tools_info = tm.get_broken_tools_info() or ""
         broken_tools_msg = sm.load_prompt(session_path, "broken_tools", BROKEN_TOOLS_INFO=broken_tools_info) if broken_tools_info else ""
 
-        resume_context_msg = ""
+        resume_session_msg = ""
         if resume_last_answer:
-            resume_context_msg = sm.load_prompt(session_path, "resume_context",
-                                                 RESUME_LAST_ANSWER=resume_last_answer)
+            brief = sm.build_resume_brief(session_path)
+            resume_session_msg = sm.load_prompt(session_path, "resume_session", **brief)
+            if not resume_session_msg:
+                resume_session_msg = sm.load_prompt(session_path, "resume_context",
+                                                    RESUME_LAST_ANSWER=resume_last_answer)
 
         messages = [
             {"role": "system", "content": system_time_msg},
@@ -847,8 +854,8 @@ def main():
         if broken_tools_msg:
             messages.append({"role": "system", "content": broken_tools_msg})
 
-        if resume_context_msg:
-            messages.append({"role": "system", "content": resume_context_msg})
+        if resume_session_msg:
+            messages.append({"role": "system", "content": resume_session_msg})
 
         ask_ollama_textual(
             model=args.model,
@@ -860,6 +867,7 @@ def main():
             initial_prompt=(args.prompt or args.prompt_pos or ""),
             proofread=args.proofread,
             proofreader_fn=run_proofreader_turn,
+            resume_session=bool(resume_last_answer),
         )
         return
 
@@ -967,6 +975,8 @@ def main():
                 except KeyboardInterrupt:
                     out("\n[bold red]Interrupted[/bold red]")
                     raise SystemExit(0)
+
+                sm.save_messages_snapshot(session_path, messages, model=model, num_ctx=num_ctx)
 
                 last_assistant_message = ""
                 for m in reversed(messages[turn_start_idx:]):

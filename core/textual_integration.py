@@ -19,6 +19,7 @@ import threading
 import time
 import json
 import re
+import uuid
 import requests
 from typing import Optional, List, Dict, Callable
 
@@ -345,6 +346,7 @@ def ask_ollama_textual(
     initial_prompt: str = "",
     proofread: bool = False,
     proofreader_fn=None,
+    resume_session: bool = False,
 ) -> List[Dict]:
     sm = SessionManager()
     tm = ToolManager()
@@ -488,7 +490,22 @@ def ask_ollama_textual(
         except Exception:
             _update_stats(status="Ready")
 
-    def _stream_turn(user_text):
+    def _append_turn_guidance(resume_turn=False):
+        """Перед ходом добавляет памятку по инструментам.
+
+        При возобновлении сессии из памятки и политики инструментов вырезаются
+        строки про обязательную проверку skills/experience — никакой «отменяющей»
+        памятки не добавляется, эти инструкции просто не отправляются модели.
+        """
+        tool_reminder_msg = sm.load_prompt(session_path, "tool_reminder",
+                                           PROMPTS_DIR=os.path.join(session_path, 'prompts'))
+        if tool_reminder_msg:
+            if resume_session:
+                tool_reminder_msg = SessionManager.strip_skills_mandate(tool_reminder_msg)
+            if tool_reminder_msg.strip():
+                messages.append({"role": "system", "content": tool_reminder_msg})
+
+    def _stream_turn(user_text, resume_turn=False):
         nonlocal _stream_buf
         stream_active.set()
         _refresh_vram()
@@ -1029,7 +1046,7 @@ def ask_ollama_textual(
 
                 _add_tool(tool_name, json.dumps(tool_args, ensure_ascii=False)[:60], status="running")
 
-                sm.log_tool_call(session_path, tool_name, tool_args, "STARTED", status="running")
+                sm.log_tool_call(session_path, tool_name, tool_args, "STARTED", status="running", call_id=tc_id)
 
                 progress_callback = None
                 if tool_name == "curl":
@@ -1084,7 +1101,10 @@ def ask_ollama_textual(
                             "name": tool_name,
                             "content": compact_msg
                         })
-                        sm.update_context(session_path, "tool", compact_msg)
+                        sm.update_context(session_path, "tool", compact_msg,
+                                          tool_call_id=tc_id, name=tool_name)
+                        sm.log_tool_call(session_path, tool_name, tool_args, result,
+                                         status="aborted", call_id=tc_id)
                         _update_tool(tool_name, status="aborted", size_kb=0)
                         _append_tool_result(tool_name, compact_msg[:500])
                         continue
@@ -1118,24 +1138,37 @@ def ask_ollama_textual(
                 res_tokens = len(str(compact_msg)) // 4
                 tool_tokens += res_tokens
 
-                sm.log_tool_call(session_path, tool_name, tool_args, tool_result, status="completed")
+                sm.log_tool_call(session_path, tool_name, tool_args, tool_result, status="completed", call_id=tc_id)
 
+                media_extra = None
                 if tool_name == "vision" and isinstance(tool_result, dict) and tool_result.get("image_data"):
                     vision_prompt = tool_result.get("prompt", "Опиши что ты видишь на этом изображении")
+                    media_ref = sm.save_media(session_path, tool_result["image_data"], kind="image")
                     messages.append({
                         "role": "user",
                         "content": vision_prompt,
                         "images": [tool_result["image_data"]]
                     })
+                    media_extra = {
+                        "media_kind": "image",
+                        "images": [{"media_ref": media_ref}] if media_ref else [{"media_dropped": True}],
+                    }
                 elif tool_name == "audio" and isinstance(tool_result, dict) and tool_result.get("audio_data"):
                     audio_prompt = tool_result.get("prompt", "Опиши, что ты слышишь в этом аудио")
+                    mime = tool_result.get("mime_type", "audio/wav")
+                    media_ref = sm.save_media(session_path, tool_result["audio_data"], mime=mime, kind="audio")
                     messages.append({
                         "role": "user",
                         "content": audio_prompt,
                         "audios": [tool_result["audio_data"]],
                         "media_kind": "audio",
-                        "mime_type": tool_result.get("mime_type", "audio/wav"),
+                        "mime_type": mime,
                     })
+                    media_extra = {
+                        "media_kind": "audio",
+                        "mime_type": mime,
+                        "audios": [{"media_ref": media_ref}] if media_ref else [{"media_dropped": True}],
+                    }
                 else:
                     tool_message = {
                         "role": "tool",
@@ -1147,17 +1180,20 @@ def ask_ollama_textual(
                         tool_message["name"] = tool_name
                     messages.append(tool_message)
 
-                sm.update_context(session_path, "tool", compact_msg)
+                sm.update_context(session_path, "tool", compact_msg,
+                                  tool_call_id=tc_id, name=tool_name)
+                if media_extra:
+                    prompt = (tool_result.get("prompt") or "").strip() if isinstance(tool_result, dict) else ""
+                    sm.update_context(session_path, "user", prompt or f"[{tool_name} media]",
+                                      extra=media_extra)
 
-                sm.log_step(session_path, f"tool_{tool_name}_{int(time.time())}", tc, {"result": tool_result}, {})
+                sm.log_step(session_path, f"tool_{tool_name}_{tc_id or int(time.time())}",
+                            tc, {"result": tool_result}, {})
 
                 _update_tool(tool_name, status="completed", size_kb=size_kb)
                 _append_tool_result(tool_name, compact_msg[:500])
 
-            tool_reminder_msg = sm.load_prompt(session_path, "tool_reminder",
-                                                PROMPTS_DIR=os.path.join(session_path, 'prompts'))
-            if tool_reminder_msg:
-                messages.append({"role": "system", "content": tool_reminder_msg})
+            _append_turn_guidance(resume_turn)
 
             _update_stats(status="Resuming generation...")
 
@@ -1178,7 +1214,12 @@ def ask_ollama_textual(
             "ttft": ttft_val,
             "duration": time.time() - start_time,
         }
-        sm.log_step(session_path, f"step_textual_{int(time.time())}", {}, {"response": full_response, "thinking": full_thinking}, metrics)
+        sm.log_step(session_path, f"step_textual_{int(time.time())}_{uuid.uuid4().hex[:6]}",
+                    {}, {"response": full_response, "thinking": full_thinking}, metrics)
+
+        # Канонический снапшот входного массива сообщений — источник для
+        # точного восстановления сессии (см. SessionManager.load_messages_snapshot).
+        sm.save_messages_snapshot(session_path, messages, model=model, num_ctx=num_ctx)
 
         stream_active.clear()
         _call_from_thread(app.flush_tool_buffer)
@@ -1313,10 +1354,7 @@ def ask_ollama_textual(
         _ollama_chat_url = f"{ollama_base_url_updated}/api/chat"
         _verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
 
-        tool_reminder_msg = sm.load_prompt(session_path, "tool_reminder",
-                                            PROMPTS_DIR=os.path.join(session_path, 'prompts'))
-        if tool_reminder_msg:
-            messages.append({"role": "system", "content": tool_reminder_msg})
+        _append_turn_guidance()
 
         messages.append({"role": "user", "content": text})
         sm.update_context(session_path, "user", text)
