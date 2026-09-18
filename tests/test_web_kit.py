@@ -14,6 +14,7 @@ Smoke-тест единого веб-добывателя (`tools/web.py`) и le
 Запуск: venv/bin/python -u tests/test_web_kit.py
 """
 
+import base64
 import hashlib
 import http.server
 import json
@@ -94,6 +95,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        self.do_GET()
+
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/page":
@@ -111,6 +115,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/badparam":
             self._send(b'{"error":true,"reason":"bad param"}',
                        "application/json", status=400)
+        elif path == "/api/echo":
+            # API: GET → 405, POST с JSON-телом → 200 (как Ollama /api/generate).
+            if self.command != "POST":
+                self._send(b'{"error":"method not allowed"}', "application/json", status=405)
+            else:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw = self.rfile.read(length) if length else b""
+                try:
+                    data = json.loads(raw or b"{}")
+                except Exception:
+                    data = {}
+                self._send(json.dumps({"ok": True, "method": "POST", "received": data}).encode(),
+                           "application/json")
         elif path == "/drop":
             # 400, пока присутствует параметр "bad" (сервер называет его).
             if "bad=" in self.path:
@@ -216,6 +233,16 @@ def main() -> int:
         check("html_stub_rejected",
               "HTML" in out and not os.path.exists(stub_path), out[:250])
 
+        # Маркер локального файла: web сам кодирует файл в base64 (не через модель).
+        marker_path = os.path.join(session, "payload.bin")
+        with open(marker_path, "wb") as f:
+            f.write(b"X" * 1000)
+        want_b64 = base64.b64encode(b"X" * 1000).decode()
+        out = web_tool.execute(action="json", url=f"{base}/api/echo", method="POST",
+                               jq=".received.images[0]",
+                               json_body={"images": [{"$file_base64": marker_path}]})
+        check("file_base64_marker", want_b64 in out, out[:200])
+
         # Проверка хеша: верный sha принимается, неверный — файл удаляется.
         want = hashlib.sha256(DATA_JSON.encode("utf-8")).hexdigest()
         sha_path = os.path.join(session, "json_by_sha.json")
@@ -262,6 +289,20 @@ def main() -> int:
         # HTTP 400: тело ответа сервера пробрасывается модели
         out = web_tool.execute(action="json", url=f"{base}/badparam")
         check("http_error_body", "Ответ сервера" in out and "bad param" in out, out[:250])
+
+        # Веб-API в неопасном режиме: GET → 405, POST с JSON-телом → 200.
+        out = web_tool.execute(action="json", url=f"{base}/api/echo")
+        check("api_get_405", "HTTP 405" in out, out[:200])
+        out = web_tool.execute(action="json", url=f"{base}/api/echo",
+                               method="POST", jq=".received",
+                               json_body={"model": "test", "prompt": "hi"})
+        check("api_post_json", '"prompt": "hi"' in out, out[:300])
+        # Через legacy curl тоже (и resume не ломает вызов).
+        out = curl_tool.execute(url=f"{base}/api/echo", method="POST",
+                                jq_filter=".ok", json_body={"a": 1})
+        check("curl_post_json", "true" in out, out[:300])
+        out = curl_tool.execute(url=f"{base}/data.json", resume=True)
+        check("curl_resume_accepted", "TypeError" not in out and "Example/Zone" in out, out[:200])
 
         # Беззнаковая правка кодирования: первый запрос 400, повтор декодированным — 200
         out = web_tool.execute(action="json", url=f"{base}/encoded?period=2026%2F09")

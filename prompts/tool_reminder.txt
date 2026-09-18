@@ -10,4 +10,5 @@ TOOL_USAGE_REMINDER:
    - Рекомендуемый путь: `<session_path>/downloads/<filename>` (папка создаётся автоматически)
    - НЕ используй `shell_exec curl` — это системный инструмент curl для HTTP запросов.
 6. Порядок: Сначала изучи (list/read), потом планируй, потом меняй.
+6a. БЕЗОПАСНЫЙ РЕЖИМ (dangerous mode OFF): НЕ пытайся выполнять shell-команды. Смотри `file_system action=help` и используй безопасные read-only операции (например, base64 файла → `file_system action=inspect command=fs.base64 path=…`, тип → `fs.file_type`). Система сама подскажет безопасный эквивалент при запрете.
 7. Системные промпты: Редактируй файлы в {{PROMPTS_DIR}}/ для настройки своего поведения в этой сессии.

@@ -42,7 +42,22 @@ status: stable
 ## Параметры
 `url`, `query`, `extract`, `css`, `jq` (алиас `jq_filter`), `output_path`,
 `headers`, `timeout_sec`, `max_bytes`, `follow_redirects`, `max_items`,
-`session_path`.
+`session_path`, `resume`, `expected_sha256`, `method`, `json_body`/`body`.
+
+### Локальные файлы в теле запроса
+Чтобы отправить файл в API без ручного base64, в `json_body` пишется маркер
+`{"$file_base64": "/путь/к/файлу"}` — `web` сам читает и кодирует его
+(`_resolve_file_markers`). Так байты **не проходят через модель**.
+Пример (Ollama): `messages:[{"role":"user","content":"…","images":[{"$file_base64":"/…/photo.jpg"}]}]`.
+→ `entities/safe_ops.md`
+
+## Работа с веб-API (в т.ч. в простом режиме)
+`web` поддерживает HTTP-методы `GET`/`POST`/`PUT`/`PATCH`/`DELETE` и тело
+запроса: `method=POST`, `json_body={…}` (объект) или `body` (строка). Это
+позволяет обращаться к API, которые не работают по GET (например Ollama
+`/api/generate`, `/api/chat`, `/api/show`) — **без dangerous mode**: сеть/API
+не относятся к опасным локальным операциям. GET-запросы без тела по-прежнему
+идут через aria2c (докачка/файлы), запросы с телом — обычным HTTP-путём.
 
 ## Умное поведение (харнес)
 Каждый ответ заканчивается блоком:

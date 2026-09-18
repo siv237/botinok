@@ -5,6 +5,11 @@ import importlib
 import traceback
 from datetime import datetime
 
+try:
+    from tools import safe_ops as _safe_ops
+except Exception:  # pragma: no cover
+    _safe_ops = None
+
 TOOLS_LOG = os.path.expanduser("~/.botinok/logs/tools.log")
 
 DANGEROUS_FILESYSTEM_ACTIONS = ("delete", "move", "copy", "mkdir", "chmod", "symlink", "touch")
@@ -116,6 +121,12 @@ class ToolManager:
                             "action": {"type": "string", "enum": ["auto", "open", "extract", "json", "download", "downloads", "search", "help"],
                                        "description": "Что сделать (по умолчанию auto). downloads — память загрузок (что/куда/целое)"},
                             "url": {"type": "string", "description": "URL http/https (для auto/open/extract/json/download)"},
+                            "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP-метод (по умолчанию GET). Для API, требующих POST (например Ollama /api/generate), задай method=POST"},
+                            "json_body": {"type": "object", "description": ("Тело запроса как JSON-объект (POST/PUT/PATCH) — для веб-API. "
+                                           "Чтобы передать локальный файл без ручного base64, используй маркер "
+                                           "{\"$file_base64\":\"/путь/к/файлу\"} — web сам прочитает и закодирует его "
+                                           "(например в messages[].images для Ollama)")},
+                            "body": {"type": "string", "description": "Тело запроса строкой (если не JSON)"},
                             "query": {"type": "string", "description": "Поисковый запрос (для action=search)"},
                             "extract": {"type": "array", "items": {"type": "string", "enum": ["links", "images", "headings", "meta", "tables", "all"]},
                                         "description": "Что извлекать (action=extract), по умолчанию all"},
@@ -177,22 +188,30 @@ class ToolManager:
                 "type": "function",
                 "function": {
                     "name": "file_system",
-                    "description": "Инструмент для работы с файловой системой. Безопасные команды (list, search, grep, read, info, inspect) работают всегда. Опасные команды (delete, move, copy, mkdir, chmod, symlink, touch) требуют dangerous_mode и подтверждения при работе вне сессии.",
+                    "description": ("Файлы и система. Безопасные read-only действия работают всегда (везде): "
+                                    "list/search/grep/read/info/find и inspect (fs.base64, fs.file_type, fs.stat, fs.count, "
+                                    "fs.hash, fs.listing, fs.readlink, sys.*, proc.*, svc.*, net.*, git.*, image.meta, "
+                                    "text.base64_decode). Подробности и примеры: action=help. "
+                                    "Файловые мутации (delete/move/copy/mkdir/chmod/symlink/touch) разрешены внутри папки сессии "
+                                    "(вне — dangerous_mode)."),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["list", "search", "grep", "read", "info", "inspect", "find", "delete", "move", "copy", "mkdir", "chmod", "symlink", "touch"],
-                                "description": "list,search,grep,read,info,inspect,find - безопасные. delete,move,copy,mkdir,chmod,symlink,touch - требуют dangerous_mode"
+                                "enum": ["help", "list", "search", "grep", "read", "info", "inspect", "find", "delete", "move", "copy", "mkdir", "chmod", "symlink", "touch"],
+                                "description": "help — каталог безопасных возможностей. Безопасные: list,search,grep,read,info,inspect,find. Мутации: delete,move,copy,mkdir,chmod,symlink,touch (внутри сессии без dangerous_mode)"
                             },
                             "path": {"type": "string", "description": "Исходный путь (для всех команд)"},
                             "dest": {"type": "string", "description": "Целевой путь (для move, copy, symlink)"},
                             "mode": {"type": "string", "description": "Права доступа в octal или символьном виде (для chmod, mkdir)"},
+                            "command": {"type": "string", "description": "Подкоманда для action=inspect, напр. fs.base64, fs.file_type, fs.hash, net.ports, git.log, image.meta. Полный список: action=help"},
+                            "algo": {"type": "string", "description": "Алгоритм для fs.hash: md5|sha1|sha256|sha512"},
                             "pattern": {"type": "string"},
                             "recursive": {"type": "boolean"},
-                            "content_query": {"type": "string"},
+                            "content_query": {"type": "string", "description": "Строка для поиска; также имя для net.dns/dev.which, ref для git.grep, base64 для text.base64_decode"},
                             "max_results": {"type": "integer"},
+                            "max_bytes": {"type": "integer", "description": "Лимит вывода (для чтения/base64/ls)"},
                             "offset": {"type": "integer"},
                             "limit": {"type": "integer"}
                         },
@@ -289,17 +308,22 @@ class ToolManager:
                 "type": "function",
                 "function": {
                     "name": "curl",
-                    "description": "Legacy-алиас web (HTTP GET/JSON/файлы). Поддерживает jq_filter. Для новых задач используй web action=json/download.",
+                    "description": "Legacy-алиас web (HTTP-запросы, JSON, файлы). Поддерживает jq_filter, методы и тело запроса. Для новых задач используй web.",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "url": {"type": "string", "description": "URL для GET запроса (http/https)"},
-                            "headers": {"type": "array", "items": {"type": "string"}, "description": "HTTP заголовки (опционально)"},
+                            "url": {"type": "string", "description": "URL (http/https)"},
+                            "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP-метод (по умолчанию GET)"},
+                            "body": {"type": "string", "description": "Тело запроса (строка); для JSON лучше json_body"},
+                            "json_body": {"type": "object", "description": "Тело запроса как JSON-объект (для API: POST/PUT)"},
+                            "headers": {"type": "array", "items": {"type": "string"}, "description": "HTTP заголовки, формат 'Key: Value'"},
                             "timeout_sec": {"type": "integer", "description": "Таймаут в секундах (по умолчанию 30)"},
-                            "max_bytes": {"type": "integer", "description": "Максимальный размер ответа (по умолчанию 256000)"},
+                            "max_bytes": {"type": "integer", "description": "Максимальный размер ответа"},
                             "follow_redirects": {"type": "boolean", "description": "Следовать за редиректами (по умолчанию true)"},
                             "jq_filter": {"type": "string", "description": "Фильтр jq для обработки JSON. Примеры: .userId | .items[] | {name:.name}. ВАЖНО: без кавычек вокруг фильтра"},
-                            "output_path": {"type": "string", "description": "Путь для сохранения ответа в файл (опционально, только внутри папки сессии без dangerous_mode)"}
+                            "output_path": {"type": "string", "description": "Путь для сохранения ответа в файл (опционально, только внутри папки сессии без dangerous_mode)"},
+                            "resume": {"type": "boolean", "description": "Докачать/перекачать файл (aria2c)"},
+                            "expected_sha256": {"type": "string", "description": "Ожидаемый sha256 скачанного файла"}
                         },
                         "required": ["url"]
                     }
@@ -515,8 +539,17 @@ class ToolManager:
         if not self.dangerous_mode:
             action = args.get("action") if isinstance(args, dict) else None
             if name == "shell_exec" and (action or "run") in DANGEROUS_SHELL_ACTIONS:
-                return (f"Error: shell_exec action '{action or 'run'}' requires dangerous mode "
-                        "(пользователь может разрешить переключение)")
+                msg = (f"Error: shell_exec action '{action or 'run'}' requires dangerous mode "
+                       "(пользователь может разрешить переключение).")
+                if _safe_ops is not None:
+                    suggestion = _safe_ops.suggest_for_shell(
+                        (args or {}).get("command", "") if isinstance(args, dict) else "")
+                    if suggestion:
+                        msg += (f"\nБезопасный эквивалент без dangerous mode: {suggestion}"
+                                f"\nПолный список: file_system action=help")
+                    else:
+                        msg += f"\n{_safe_ops.catalog_short()}"
+                return msg
             if (name in ("code_editor", "file_system")
                     and action in (DANGEROUS_EDITOR_ACTIONS + DANGEROUS_FILESYSTEM_ACTIONS)
                     and not allowed_in_session(name, args, session_path)):
