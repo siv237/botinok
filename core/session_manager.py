@@ -116,40 +116,64 @@ class SessionManager:
         except Exception:
             pass
 
+    @staticmethod
+    def _clean_answer(text: str) -> str:
+        """Убирает из текста сессии YAML-метаданные и разделители ходов."""
+        if not text:
+            return ""
+        s = str(text)
+        s = re.sub(r"```yaml\s*\ntype:\s*BOTINOK_SESSION_METADATA.*?```", "", s, flags=re.S)
+        s = re.sub(r"#{3,}\s*\n#\s*NEW TURN:.*?\n#{3,}\s*\n", "", s, flags=re.S)
+        s = re.sub(r"^[ \t]*---[ \t]*$", "", s, flags=re.M)
+        return s.strip()
+
+    @staticmethod
+    def _last_final_assistant(history: list) -> str:
+        """Последний *завершённый* ответ ассистента (без tool_calls)."""
+        for e in reversed(history):
+            if e.get("role") != "assistant" or e.get("tool_calls"):
+                continue
+            content = str(e.get("content") or "").strip()
+            if content:
+                return content
+        # Фолбэк: любой непустой ответ (в т.ч. промежуточный).
+        for e in reversed(history):
+            if e.get("role") == "assistant":
+                content = str(e.get("content") or "").strip()
+                if content:
+                    return content
+        return ""
+
     def load_last_assistant_answer(self, session_path: str, max_chars: int = 6000) -> str:
-        """Пытается достать последний ответ ассистента для продолжения сессии.
+        """Пытается достать последний завершённый ответ ассистента.
 
         Приоритет:
-        1) конец response.md
-        2) последний assistant в context.json
+        1) context.json — последний assistant без tool_calls (реальный финал);
+        2) конец response.md (очищенный от YAML-метаданных турнов).
         """
-        response_path = os.path.join(session_path, "response.md")
-        try:
-            if os.path.exists(response_path):
-                with open(response_path, "r", encoding="utf-8", errors="ignore") as f:
-                    data = f.read()
-                if data:
-                    data = data.strip()
-                    if len(data) > max_chars:
-                        data = data[-max_chars:]
-                    return data
-        except Exception:
-            pass
-
         context_path = os.path.join(session_path, "context.json")
         try:
             if os.path.exists(context_path):
                 with open(context_path, "r", encoding="utf-8", errors="ignore") as f:
                     ctx = json.load(f)
                 hist = ctx.get("history", []) if isinstance(ctx, dict) else []
-                for entry in reversed(hist):
-                    if isinstance(entry, dict) and entry.get("role") == "assistant":
-                        content = entry.get("content") or ""
-                        content = str(content).strip()
-                        if content:
-                            if len(content) > max_chars:
-                                content = content[-max_chars:]
-                            return content
+                content = self._clean_answer(self._last_final_assistant(hist))
+                if content:
+                    if len(content) > max_chars:
+                        content = content[-max_chars:]
+                    return content
+        except Exception:
+            pass
+
+        response_path = os.path.join(session_path, "response.md")
+        try:
+            if os.path.exists(response_path):
+                with open(response_path, "r", encoding="utf-8", errors="ignore") as f:
+                    data = self._clean_answer(f.read())
+                if data:
+                    if len(data) > max_chars:
+                        data = data[-max_chars:]
+                    return data
         except Exception:
             pass
 
@@ -905,17 +929,21 @@ class SessionManager:
         now = now or datetime.now()
         elapsed = (now - last_dt).total_seconds() if last_dt else None
 
-        last_role = history[-1].get("role") if history else None
+        # Ход считается завершённым только если последняя запись — финальный
+        # ответ ассистента без tool_calls. Иначе сессия прервана (в т.ч. если
+        # последняя запись — assistant с tool_calls, tool или user).
+        last_entry = history[-1] if history else {}
+        last_is_final = (last_entry.get("role") == "assistant"
+                         and not last_entry.get("tool_calls")
+                         and str(last_entry.get("content", "")).strip())
         state = ("завершена (последний ход закрыт)"
-                 if last_role == "assistant" else "прервана на середине хода")
+                 if last_is_final else "прервана на середине хода")
 
         first_user = next((str(e.get("content", "")) for e in history
                            if e.get("role") == "user" and str(e.get("content", "")).strip()), "")
         last_user = next((str(e.get("content", "")) for e in reversed(history)
                           if e.get("role") == "user" and str(e.get("content", "")).strip()), "")
-        last_assistant = next((str(e.get("content", "")) for e in reversed(history)
-                               if e.get("role") == "assistant"
-                               and str(e.get("content", "")).strip()), "")
+        last_assistant = self._last_final_assistant(history)
 
         call_ids = [tc.get("id") for e in history if e.get("role") == "assistant"
                     for tc in (e.get("tool_calls") or []) if isinstance(tc, dict)]
@@ -938,10 +966,63 @@ class SessionManager:
             "ELAPSED": self._human_duration(elapsed),
             "ORIGINAL_TASK": _clip(first_user),
             "LAST_USER_PROMPT": _clip(last_user),
-            "LAST_ASSISTANT_ANSWER": _clip(last_assistant),
+            # Последний финальный ответ даём целиком (до 4000), иначе агент
+            # начинает перечитывать свой отчёт из файлов вместо продолжения.
+            "LAST_ASSISTANT_ANSWER": _clip(last_assistant, 4000),
             "HISTORY_LEN": len(history),
             "TOOL_CALLS": len([c for c in call_ids if c]),
             "TOOL_CALLS_MISSING": missing,
+        }
+
+    def restore_session(self, session_path: str) -> dict:
+        """Формализованное точное восстановление контекста сессии.
+
+        Источник истины — канонический снапшот `messages.json` (exact=True).
+        Если его нет (старая сессия) — реконструкция из `context.json`
+        (exact=False, derived). Возвращает сам массив сообщений, поэтому
+        вызывающий может отличить точный результат от наметки.
+        """
+        snap_path = os.path.join(session_path, "messages.json")
+        payload = None
+        if os.path.exists(snap_path):
+            try:
+                with open(snap_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+            except Exception:
+                payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("messages"), list):
+            messages = self.load_messages_snapshot(session_path) or []
+            saved_at = payload.get("saved_at") or ""
+            # Снапшот пишется в конце хода: прерванный ход в него не попадает.
+            # Помечаем, что context.json ушёл вперёд, чтобы не считать снапшот
+            # полным на момент прерывания.
+            last_ctx_ts = ""
+            try:
+                with open(os.path.join(session_path, "context.json"), "r",
+                          encoding="utf-8") as f:
+                    hist = json.load(f).get("history", [])
+                if hist:
+                    last_ctx_ts = str(hist[-1].get("timestamp") or "")
+            except Exception:
+                pass
+            return {
+                "source": "messages.json",
+                "exact": True,
+                "model": payload.get("model"),
+                "context_limit": payload.get("context_limit"),
+                "saved_at": payload.get("saved_at"),
+                "stale": bool(saved_at and last_ctx_ts and last_ctx_ts > saved_at),
+                "last_context_timestamp": last_ctx_ts or None,
+                "messages": messages,
+            }
+        messages = self.load_context_messages(session_path)
+        return {
+            "source": "context.json",
+            "exact": False,
+            "model": None,
+            "context_limit": None,
+            "saved_at": None,
+            "messages": messages,
         }
 
     def audit_context(self, session_path: str) -> dict:

@@ -14,7 +14,7 @@ status: stable
 1. **Создание**: `create_session(name)` → директория `sessions/<ts>_<name>/` с подпапками и копией промптов; стартовый `context.json`.
 2. **Выбор/возобновление**: при запуске можно выбрать существующую сессию (интерактивная таблица с курсорной навигацией, фильтрацией по вводу, относительным временем) или создать новую. Сессия создаётся только после успешного выбора.
 3. **Работа**: поток диалога — пользовательский запрос → модель (thinking → tool-calls → результат) → ответ. Всё логируется (thinking.md, response.md, tools.log, context.json).
-4. **Продолжение**: `load_last_assistant_answer()`/`load_first_user_prompt()` показывают контекст; `resume_context.txt` описывает продолжение.
+4. **Продолжение**: `prompts/resume_session.txt` + `build_resume_brief()` (статус, elapsed, последний финальный ответ); на resume инструкции про обязательную проверку навыков не отправляются. Точное восстановление — `session_memory action=restore` (EXACT из `messages.json`). → `concepts/session_resume.md`
 5. **Переполнение**: при лимитах — протокол `SESSION_PROTOCOL`. → `concepts/context_management.md`
 
 ## Подробности

@@ -24,6 +24,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.session_manager import SessionManager  # noqa: E402
+from tools.session_memory import session_memory_tool  # noqa: E402
 
 PNG = base64.b64encode(b"\x89PNG\r\n\x1a\nFAKE-IMAGE-BYTES").decode("ascii")
 
@@ -167,6 +168,78 @@ def test_old_session_roundtrip_without_ids_or_snapshot():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_resume_brief_state_and_last_final_answer():
+    """Резюме: прерванный ход распознаётся, а последний ответ берётся финальный."""
+    sm = SessionManager()
+    root = _new_session(tempfile.mkdtemp(prefix="botinok_test_"))
+    try:
+        history = [
+            {"role": "user", "content": "задача"},
+            {"role": "assistant", "content": "ФИНАЛЬНЫЙ ОТЧЁТ"},
+            {"role": "user", "content": "ещё"},
+            # прерванный ход: assistant с tool_calls и без текста
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "shell_exec", "arguments": {"action": "run"}}}]},
+        ]
+        with open(os.path.join(root, "context.json"), "w", encoding="utf-8") as f:
+            json.dump({"session_id": "r", "created_at": "now", "history": history}, f)
+
+        b = sm.build_resume_brief(root)
+        assert b["RESUME_STATE"].startswith("прервана"), b["RESUME_STATE"]
+        assert b["LAST_ASSISTANT_ANSWER"] == "ФИНАЛЬНЫЙ ОТЧЁТ", b["LAST_ASSISTANT_ANSWER"]
+        assert sm.load_last_assistant_answer(root) == "ФИНАЛЬНЫЙ ОТЧЁТ"
+
+        # Добавляем финальный ответ — ход считается завершённым.
+        history.append({"role": "assistant", "content": "готово"})
+        with open(os.path.join(root, "context.json"), "w", encoding="utf-8") as f:
+            json.dump({"session_id": "r", "created_at": "now", "history": history}, f)
+        b2 = sm.build_resume_brief(root)
+        assert b2["RESUME_STATE"].startswith("завершена"), b2["RESUME_STATE"]
+        assert b2["LAST_ASSISTANT_ANSWER"] == "готово", b2["LAST_ASSISTANT_ANSWER"]
+
+        # YAML-метаданные турнов вырезаются из ответа.
+        cleaned = SessionManager._clean_answer(
+            "```yaml\ntype: BOTINOK_SESSION_METADATA\nstatus: START\n```\n\nтекст")
+        assert "BOTINOK_SESSION_METADATA" not in cleaned and "текст" in cleaned
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_exact_restore_and_provenance():
+    """restore: EXACT из messages.json, DERIVED из context.json, HIT для поиска."""
+    sm = SessionManager()
+    root = _new_session(tempfile.mkdtemp(prefix="botinok_test_"))
+    try:
+        # 1. Без снапшота — derived из context.json.
+        sm.update_context(root, "user", "задача")
+        sm.update_context(root, "assistant", "ответ")
+        out = json.loads(session_memory_tool(
+            action="restore", session_path=root, format="json"))
+        assert out["exact"] is False and out["source"] == "context.json", out
+        assert out["_confidence"] == "DERIVED", out
+
+        # 2. Со снапшотом — exact.
+        msgs = [{"role": "user", "content": "задача"}, {"role": "assistant", "content": "ответ"}]
+        sm.save_messages_snapshot(root, msgs, model="m", num_ctx=8192)
+        out2 = json.loads(session_memory_tool(
+            action="restore", session_path=root, format="json"))
+        assert out2["exact"] is True and out2["source"] == "messages.json", out2
+        assert out2["_confidence"] == "EXACT", out2
+        assert out2["messages"] == msgs, out2["messages"]
+
+        # 3. Неизвестное действие — строгая неоднозначность, без подмены.
+        amb = json.loads(session_memory_tool(action="блабла", session_path=root))
+        assert amb.get("ambiguous") is True and "candidates" in amb, amb
+
+        # 4. Поиск помечается как HINT.
+        srch = json.loads(session_memory_tool(
+            action="search", query="ответ", session_path=root, format="json"))
+        assert srch["_confidence"] == "HINT", srch
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     failures = []
     for name, fn in [
@@ -174,6 +247,8 @@ def main():
         ("messages_snapshot_roundtrip_with_media", test_messages_snapshot_roundtrip_with_media),
         ("tools_log_call_id_and_step_collision", test_tools_log_call_id_and_step_collision),
         ("old_session_roundtrip_without_ids_or_snapshot", test_old_session_roundtrip_without_ids_or_snapshot),
+        ("resume_brief_state_and_last_final_answer", test_resume_brief_state_and_last_final_answer),
+        ("exact_restore_and_provenance", test_exact_restore_and_provenance),
     ]:
         try:
             fn()
