@@ -170,16 +170,13 @@ class SessionParser:
         self._load_data()
     
     def _load_data(self):
-        """Загружает context.json и tools.log"""
-        context_path = os.path.join(self.session_path, "context.json")
-        if os.path.exists(context_path):
-            try:
-                with open(context_path, "r", encoding="utf-8", errors="ignore") as f:
-                    self.context_data = json.load(f)
-            except Exception:
-                self.context_data = {"history": []}
-        else:
-            self.context_data = {"history": []}
+        """Загружает context.json и tools.log (мягко, без потери истории)."""
+        try:
+            from core.session_manager import SessionManager
+            history = SessionManager().load_history_entries(self.session_path) or []
+        except Exception:
+            history = []
+        self.context_data = {"history": history}
         
         tools_log_path = os.path.join(self.session_path, "tools.log")
         if os.path.exists(tools_log_path):

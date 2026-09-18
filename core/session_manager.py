@@ -41,6 +41,10 @@ class SessionManager:
             self.config['Storage'] = {'SessionsDir': '~/.botinok/sessions', 'StepsSubDir': 'steps'}
             
         self.base_path = self.config.get('Storage', 'SessionsDir', fallback='sessions')
+        # Явное переопределение (тесты/скрипты), чтобы не сорить в рабочих сессиях.
+        env_dir = os.getenv("BOTINOK_SESSIONS_DIR")
+        if env_dir:
+            self.base_path = env_dir
         # Разворачиваем ~ и $HOME для текущего пользователя
         self.base_path = os.path.expanduser(self.base_path)
         self.base_path = os.path.expandvars(self.base_path)
@@ -493,12 +497,99 @@ class SessionManager:
                 continue
         return None, None
 
-    def load_history_entries(self, session_path):
-        """Надёжно получить историю: context.json → context.json.bak → messages.json."""
+    @staticmethod
+    def _salvage_history(path):
+        """Мягко вычитать максимум записей из обрезанного/битого JSON.
+
+        Ничего не перезаписывает: идёт по массиву "history" и парсит каждый
+        завершённый объект `{...}` по балансу скобок. Обрыв файла означает лишь
+        потерю последней незакрытой записи, предыдущие сохраняются.
+        """
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+        except Exception:
+            return []
+        key = text.find('"history"')
+        if key == -1:
+            return []
+        start_arr = text.find("[", key)
+        if start_arr == -1:
+            return []
+        entries = []
+        depth = 0
+        start = None
+        in_str = False
+        esc = False
+        for i in range(start_arr + 1, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                if depth > 0:
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        try:
+                            obj = json.loads(text[start:i + 1])
+                            if isinstance(obj, dict):
+                                entries.append(obj)
+                        except Exception:
+                            pass
+                        start = None
+            elif ch == "]" and depth == 0:
+                break
+        return entries
+
+    @staticmethod
+    def _merge_history(*histories):
+        """Склеить истории без потерь: сохраняет порядок, убирает точные дубли."""
+        seen = set()
+        merged = []
+        for hist in histories:
+            for e in (hist or []):
+                if not isinstance(e, dict):
+                    continue
+                key = (
+                    str(e.get("timestamp") or ""),
+                    str(e.get("role") or ""),
+                    str(e.get("tool_call_id") or ""),
+                    str(e.get("content") or "")[:300],
+                    len(e.get("tool_calls") or []),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(e)
+        return merged
+
+    def _read_history_soft(self, session_path):
+        """Мягкое чтение истории: context.json → salvage → .bak → messages.json.
+
+        Ничего не удаляет и не перезаписывает. Возвращает максимум, что удалось
+        прочитать, объединяя источники без потери записей.
+        """
         context_path = os.path.join(session_path, "context.json")
         data, _src = self._read_json_with_backup(context_path)
-        if isinstance(data, dict) and data.get("history"):
-            return data["history"]
+        parts = []
+        if isinstance(data, dict) and isinstance(data.get("history"), list):
+            parts.append(data["history"])
+        if os.path.exists(context_path):
+            parts.append(self._salvage_history(context_path))
+        hist = self._merge_history(*parts)
+        if hist:
+            return hist
         try:
             msgs = self.load_messages_snapshot(session_path)
             if msgs:
@@ -507,26 +598,23 @@ class SessionManager:
             pass
         return []
 
+    def load_history_entries(self, session_path):
+        """Надёжно получить историю: context.json → salvage → .bak → messages.json."""
+        return self._read_history_soft(session_path)
+
     def update_context(self, session_path, role, content, thinking="", tool_calls=None,
                        tool_call_id=None, name=None, extra=None):
         context_path = os.path.join(session_path, "context.json")
         try:
             context, _src = self._read_json_with_backup(context_path)
             if not isinstance(context, dict):
-                # context.json (и .bak) повреждены — засеваем историю из
-                # канонического снапшота messages.json, чтобы не потерять диалог.
-                seeded = []
-                try:
-                    seeded = self.load_messages_snapshot(session_path) or []
-                except Exception:
-                    seeded = []
-                context = {"history": list(seeded)}
-                try:
-                    if os.path.exists(context_path):
-                        os.replace(context_path,
-                                   context_path + f".corrupt-{int(time.time())}")
-                except Exception:
-                    pass
+                context = {}
+            if not isinstance(context.get("history"), list):
+                # МЯГКОЕ восстановление: вычитываем максимум из самого файла
+                # (обрезанный JSON → завершённые записи) и, при необходимости,
+                # из снапшота. Исходный файл НЕ трогаем и НЕ переименовываем,
+                # историю НЕ обнуляем — только дописываем поверх прочитанного.
+                context["history"] = self._read_history_soft(session_path)
 
             entry = {
                 "timestamp": datetime.now().isoformat(),
@@ -779,13 +867,9 @@ class SessionManager:
         if snapshot is not None:
             return snapshot
 
-        context_path = os.path.join(session_path, "context.json")
-        try:
-            with open(context_path, "r", encoding="utf-8") as f:
-                context = json.load(f)
-        except Exception:
+        history = self._read_history_soft(session_path)
+        if not history:
             return []
-        history = context.get("history", []) if isinstance(context, dict) else []
         tools_log = self.load_tools_log(session_path)
         messages = self.reconstruct_messages(history, tools_log=tools_log)
         # Рехидратация медиа-ссылок в data-url/base64 для API.
@@ -963,13 +1047,7 @@ class SessionManager:
 
     def build_resume_brief(self, session_path: str, now: Optional[datetime] = None) -> dict:
         """Собирает компактную сводку для промпта восстановления сессии."""
-        context_path = os.path.join(session_path, "context.json")
-        history = []
-        try:
-            with open(context_path, "r", encoding="utf-8") as f:
-                history = json.load(f).get("history", [])
-        except Exception:
-            history = []
+        history = self._read_history_soft(session_path)
 
         def _parse(ts):
             try:
@@ -1061,14 +1139,9 @@ class SessionManager:
             # Помечаем, что context.json ушёл вперёд, чтобы не считать снапшот
             # полным на момент прерывания.
             last_ctx_ts = ""
-            try:
-                with open(os.path.join(session_path, "context.json"), "r",
-                          encoding="utf-8") as f:
-                    hist = json.load(f).get("history", [])
-                if hist:
-                    last_ctx_ts = str(hist[-1].get("timestamp") or "")
-            except Exception:
-                pass
+            hist = self._read_history_soft(session_path)
+            if hist:
+                last_ctx_ts = str(hist[-1].get("timestamp") or "")
             return {
                 "source": "messages.json",
                 "exact": True,
@@ -1091,12 +1164,7 @@ class SessionManager:
 
     def audit_context(self, session_path: str) -> dict:
         """Проверка восстановимости: сколько tool-вызовов без пары/результата."""
-        context_path = os.path.join(session_path, "context.json")
-        try:
-            with open(context_path, "r", encoding="utf-8") as f:
-                history = json.load(f).get("history", [])
-        except Exception:
-            history = []
+        history = self._read_history_soft(session_path)
         call_ids = []
         for e in history:
             if e.get("role") == "assistant":

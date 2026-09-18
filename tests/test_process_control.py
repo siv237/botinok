@@ -69,6 +69,35 @@ def main() -> int:
     check("no_leftover_after_stop", after == 0, f"before={before} after={after}")
     pc.unregister(tree)
 
+    # 3. Мягкая остановка (путь Esc): run() прерывается, но посторонний
+    #    зарегистрированный процесс НЕ убивается (сессия не должна умирать).
+    pc.clear_stop()
+    marker2 = "31.779"
+    bystander = subprocess.Popen(["sleep", marker2], start_new_session=True)
+    pc.register(bystander)
+    time.sleep(0.2)
+
+    def soft_stopper():
+        time.sleep(0.3)
+        pc.signal_stop()
+
+    threading.Thread(target=soft_stopper, daemon=True).start()
+    t0 = time.time()
+    cp3 = pc.run(["sleep", "30"], timeout=60, capture_output=True, text=True)
+    dt3 = time.time() - t0
+    check("signal_stop_interrupts_run", dt3 < 5, f"{dt3:.2f}s")
+    alive = bystander.poll() is None
+    check("signal_stop_does_not_kill_bystander", alive, f"poll={bystander.poll()}")
+    try:
+        bystander.terminate()
+        bystander.wait(timeout=3)
+    except Exception:
+        try:
+            bystander.kill()
+        except Exception:
+            pass
+    pc.unregister(bystander)
+
     pc.clear_stop()
     print("=" * 70)
     if FAILURES:

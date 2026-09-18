@@ -28,8 +28,10 @@ def main() -> int:
     print("=" * 70)
     print("Session recovery smoke-test")
     print("=" * 70)
-    sm = SessionManager()
+    # Изоляция: сессии теста пишутся в tmp, а не в рабочие ~/.botinok/sessions.
     tmp = tempfile.mkdtemp(prefix="botinok_recovery_")
+    os.environ["BOTINOK_SESSIONS_DIR"] = tmp
+    sm = SessionManager()
 
     # 1. Атомарная запись + бэкап: после 2 записей появляется .bak
     session = sm.create_session("recovery-test")
