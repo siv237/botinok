@@ -202,6 +202,16 @@ async def main_async() -> int:
         check("restore2_inline", await _wait_inline(app) and await _session_id(app) == sid2)
         check("press_expand3", _press(app.inline_shell_widget, "inline_shell_expand"))
         check("expand3_modal", await _wait_modal(app))
+        # Пока процесс идёт, кнопка — «Прервать»: SIGINT, модалка остаётся.
+        check("press_modal_interrupt", _press(app.screen_stack[-1], "shell_close"))
+        for _ in range(50):
+            await _nap(0.1)
+            if not reg.get(sid2).is_running():
+                break
+        await _nap(0.3)
+        check("modal_interrupt_stops", not reg.get(sid2).is_running())
+        check("modal_still_open", isinstance(app.screen_stack[-1], ShellScreen))
+        # Теперь кнопка — «Закрыть»: снимает модалку и завершает сессию.
         check("press_modal_close", _press(app.screen_stack[-1], "shell_close"))
         await _nap(0.8)
         check("modal_close_pops", not isinstance(app.screen_stack[-1], ShellScreen),

@@ -109,10 +109,10 @@ def _terminal_title(session, frame: int = 0) -> str:
         running = rc is None
     if running:
         spin = _SPINNER_FRAMES[frame % len(_SPINNER_FRAMES)]
-        head = f"[yellow]{spin}[/yellow] [b]{name}[/b] · [green]идёт {dur}[/green]"
+        head = f"[yellow]{spin}[/yellow] [b]{name}[/b] · [green]выполняется {dur}[/green]"
     elif rc is not None:
         head = (f"[green]✔[/green] [b]{name}[/b] · "
-                f"[green]завершено за {dur}[/green] (rc={rc})")
+                f"[green]завершено[/green] за {dur} (rc={rc})")
     else:
         head = f"[red]■[/red] [b]{name}[/b] · остановлено {dur}"
     tail = f" · cwd: {cwd}" if cwd else ""
@@ -178,11 +178,24 @@ class ShellScreen(ModalScreen):
         color: $text-muted;
         padding: 0 1;
     }
+    #shell_cmd.show {
+        background: cyan;
+        color: black;
+        text-style: bold;
+    }
+    ShellScreen.cmd-open #shell_title {
+        display: none;
+    }
+    #shell_bottom {
+        height: 3;
+    }
     #shell_input {
         height: 3;
+        width: 1fr;
     }
     #shell_buttons {
         height: 3;
+        width: auto;
         align: right middle;
     }
     #shell_buttons Button {
@@ -219,13 +232,14 @@ class ShellScreen(ModalScreen):
             yield RichLog(id="shell_log", markup=False, highlight=False,
                           wrap=False, auto_scroll=True, min_width=60)
             yield Static("[dim]Enter — отправить · Ctrl+Q — свернуть · Ctrl+C — прервать · "
-                         "клик по заголовку — команда[/dim]",
+                         "клик по заголовку/команде — свернуть команду[/dim]",
                          id="shell_hint")
-            yield Input(placeholder="ввод в терминал...", id="shell_input")
-            with Horizontal(id="shell_buttons"):
-                yield Button("В окно", id="shell_inline", variant="primary")
-                yield Button("Свернуть", id="shell_minimize", variant="default")
-                yield Button("Закрыть", id="shell_close", variant="error")
+            with Horizontal(id="shell_bottom"):
+                yield Input(placeholder="ввод в терминал...", id="shell_input")
+                with Horizontal(id="shell_buttons"):
+                    yield Button("В окно", id="shell_inline", variant="primary")
+                    yield Button("Свернуть", id="shell_minimize", variant="default")
+                    yield Button("Закрыть", id="shell_close", variant="error")
 
     def on_mount(self) -> None:
         # Подписываемся на свежие порции сырого вывода PTY.
@@ -243,6 +257,7 @@ class ShellScreen(ModalScreen):
             self.query_one("#shell_input", Input).focus()
         except Exception:
             pass
+        self._sync_action_button()
         # Периодическая проверка состояния: статус + счётчик + анимация спиннера.
         self._tick_timer = self.set_interval(0.15, self._tick_state)
 
@@ -255,6 +270,7 @@ class ShellScreen(ModalScreen):
             return
         self._spin += 1
         title.update(_terminal_title(self.session, self._spin))
+        self._sync_action_button()
         # Один раз дописываем в лог явный маркер завершения.
         if not self._done_written and _is_finished(self.session):
             self._done_written = True
@@ -263,6 +279,25 @@ class ShellScreen(ModalScreen):
                     _terminal_done_text(self.session))
             except Exception:
                 pass
+
+    def _is_running(self) -> bool:
+        try:
+            return self.session.is_running()
+        except Exception:
+            return getattr(self.session, "returncode", None) is None
+
+    def _sync_action_button(self) -> None:
+        """«Прервать» пока процесс идёт, «Закрыть» после завершения."""
+        try:
+            btn = self.query_one("#shell_close", Button)
+        except Exception:
+            return
+        running = self._is_running()
+        try:
+            btn.label = "Прервать" if running else "Закрыть"
+            btn.variant = "warning" if running else "error"
+        except Exception:
+            pass
 
     # -------------------------------------------------------------- вывод
 
@@ -333,8 +368,9 @@ class ShellScreen(ModalScreen):
     # ---------------------------------------------------- команда целиком
 
     def on_click(self, event) -> None:
-        """Клик по заголовку — показать/скрыть развёрнутую команду."""
-        if getattr(getattr(event, "widget", None), "id", "") == "shell_title":
+        """Клик по заголовку/команде — показать/скрыть развёрнутую команду."""
+        wid = getattr(getattr(event, "widget", None), "id", "")
+        if wid in ("shell_title", "shell_cmd"):
             event.stop()
             self._toggle_cmd()
 
@@ -353,8 +389,10 @@ class ShellScreen(ModalScreen):
         try:
             if self._cmd_shown:
                 cmd_w.add_class("show")
+                self.add_class("cmd-open")
             else:
                 cmd_w.remove_class("show")
+                self.remove_class("cmd-open")
         except Exception:
             pass
 
@@ -546,7 +584,12 @@ class ShellScreen(ModalScreen):
             self._minimize()
         elif bid == "shell_close":
             event.stop()
-            self._terminate()
+            if self._is_running():
+                # Пока процесс идёт — кнопка «Прервать»: SIGINT, окно остаётся.
+                self.session.send_key("ctrl-c")
+                self._sync_action_button()
+            else:
+                self._terminate()
 
     # ------------------------------------------------------------ клавиши
 
@@ -627,13 +670,14 @@ class ShellInline(Vertical):
         yield RichLog(id="inline_shell_log", markup=False, highlight=False,
                       wrap=False, auto_scroll=True, min_width=40)
         yield Static("[dim]Enter — отправить · Ctrl+C — прервать · Ctrl+Q — свернуть · "
-                     "клик по заголовку — команда[/dim]",
+                     "клик по заголовку/команде — свернуть команду[/dim]",
                      id="inline_shell_hint")
-        yield Input(placeholder="ввод в терминал...", id="inline_shell_input")
-        with Horizontal(id="inline_shell_buttons"):
-            yield Button("Развернуть", id="inline_shell_expand", variant="primary")
-            yield Button("Свернуть", id="inline_shell_minimize", variant="default")
-            yield Button("Закрыть", id="inline_shell_close", variant="error")
+        with Horizontal(id="inline_shell_bottom"):
+            yield Input(placeholder="ввод в терминал...", id="inline_shell_input")
+            with Horizontal(id="inline_shell_buttons"):
+                yield Button("Развернуть", id="inline_shell_expand", variant="primary")
+                yield Button("Свернуть", id="inline_shell_minimize", variant="default")
+                yield Button("Закрыть", id="inline_shell_close", variant="error")
 
     def on_mount(self) -> None:
         self._on_chunk = self._handle_chunk
@@ -649,6 +693,7 @@ class ShellInline(Vertical):
             self.query_one("#inline_shell_input", Input).focus()
         except Exception:
             pass
+        self._sync_action_button()
         self._tick_timer = self.set_interval(0.15, self._tick_state)
 
     def set_session(self, session) -> None:
@@ -701,6 +746,7 @@ class ShellInline(Vertical):
             return
         self._spin += 1
         title.update(_terminal_title(self.session, self._spin))
+        self._sync_action_button()
         # Один раз дописываем в лог явный маркер завершения.
         if not self._done_written and _is_finished(self.session):
             self._done_written = True
@@ -710,11 +756,31 @@ class ShellInline(Vertical):
             except Exception:
                 pass
 
+    def _is_running(self) -> bool:
+        try:
+            return self.session.is_running()
+        except Exception:
+            return getattr(self.session, "returncode", None) is None
+
+    def _sync_action_button(self) -> None:
+        """«Прервать» пока процесс идёт, «Закрыть» после завершения."""
+        try:
+            btn = self.query_one("#inline_shell_close", Button)
+        except Exception:
+            return
+        running = self._is_running()
+        try:
+            btn.label = "Прервать" if running else "Закрыть"
+            btn.variant = "warning" if running else "error"
+        except Exception:
+            pass
+
     # ---------------------------------------------------- команда целиком
 
     def on_click(self, event) -> None:
-        """Клик по заголовку — показать/скрыть развёрнутую команду."""
-        if getattr(getattr(event, "widget", None), "id", "") == "inline_shell_title":
+        """Клик по заголовку/команде — показать/скрыть развёрнутую команду."""
+        wid = getattr(getattr(event, "widget", None), "id", "")
+        if wid in ("inline_shell_title", "inline_shell_cmd"):
             event.stop()
             self._toggle_cmd()
 
@@ -733,8 +799,10 @@ class ShellInline(Vertical):
         try:
             if self._cmd_shown:
                 cmd_w.add_class("show")
+                self.add_class("cmd-open")
             else:
                 cmd_w.remove_class("show")
+                self.remove_class("cmd-open")
         except Exception:
             pass
 
@@ -860,7 +928,12 @@ class ShellInline(Vertical):
             self._minimize()
         elif bid == "inline_shell_close":
             event.stop()
-            self._terminate()
+            if self._is_running():
+                # Пока процесс идёт — кнопка «Прервать»: SIGINT, панель остаётся.
+                self.session.send_key("ctrl-c")
+                self._sync_action_button()
+            else:
+                self._terminate()
 
     def on_key(self, event) -> None:
         key = getattr(event, "key", "") or ""
