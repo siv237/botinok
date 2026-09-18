@@ -15,6 +15,7 @@ from core.textual_history_viewer import view_history
 from core.textual_integration import ask_ollama_textual
 
 import subprocess
+import shutil
 
 def _get_version_info():
     """Получает версию из файла .version (если установлен) или из git."""
@@ -158,6 +159,32 @@ def _check_remote_version():
         return None, str(e)
 
 
+# Системные бинарники, которые нужны инструментам (web/downloader и др.).
+_SYSTEM_TOOLS = (
+    ("curl", "curl"),
+    ("lynx", "lynx"),
+    ("jq", "jq"),
+    ("aria2c", "aria2"),
+    ("file", "file"),
+    ("git", "git"),
+)
+
+
+def _missing_system_tools() -> list:
+    """Список отсутствующих системных инструментов (binary, пакет)."""
+    return [(binary, pkg) for binary, pkg in _SYSTEM_TOOLS if shutil.which(binary) is None]
+
+
+def _system_deps_warning() -> str:
+    missing = _missing_system_tools()
+    if not missing:
+        return ""
+    items = ", ".join(f"{b} (пакет {p})" for b, p in missing)
+    return ("\n[!] Не хватает системных зависимостей: " + items +
+            "\n    Установи их и/или повторно запусти install.sh "
+            "(sudo bash install.sh) — он доставит aria2/file.")
+
+
 def _perform_update():
     """Выполняет git pull для обновления и при необходимости обновляет зависимости Python."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -201,9 +228,10 @@ def _perform_update():
                         capture_output=True, text=True, cwd=script_dir, timeout=120
                     )
                     pip_output = pip_result.stdout if pip_result.returncode == 0 else pip_result.stderr
-                    return True, f"{pull_result.stdout}\n[Обнаружено изменение requirements.txt]\nОбновление зависимостей:\n{pip_output}"
+                    return True, (f"{pull_result.stdout}\n[Обнаружено изменение requirements.txt]"
+                                  f"\nОбновление зависимостей:\n{pip_output}{_system_deps_warning()}")
         
-        return True, pull_result.stdout
+        return True, pull_result.stdout + _system_deps_warning()
     except Exception as e:
         return False, str(e)
 
