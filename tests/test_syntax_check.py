@@ -61,6 +61,9 @@ def test_detection() -> None:
     check("sniff json", detect_kinds(p)[0]["kind"] == "json", detect_kinds(p))
     p = _w(d, "noext_yaml", "key: value\nlist:\n  - a\n")
     check("sniff yaml", detect_kinds(p)[0]["kind"] == "yaml", detect_kinds(p))
+    p = _w(d, "app.log", "2026-09-19 10:00:01 INFO start\n2026-09-19 10:00:04 ERROR timeout\n")
+    check("log not yaml", detect_kinds(p)[0]["kind"] == "text", detect_kinds(p))
+    check("log unsupported", check_syntax(path=p)["status"] == "unsupported", check_syntax(path=p))
     check("normalize py", normalize_kind("PY") == "python" and normalize_kind("sh") == "bash")
 
 

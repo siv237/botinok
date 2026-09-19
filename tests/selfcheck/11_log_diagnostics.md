@@ -39,7 +39,7 @@
 ## Критерии приёмки (проверь сам)
 
 - [ ] Для поиска использован `grep` с regex `ERROR|WARN` (одним запросом).
-- [ ] ERROR = 8, WARN = 3.
+- [ ] ERROR = 7, WARN = 3 (итого 10 строк уровня ERROR/WARN).
 - [ ] Самый частый тип: `timeout calling db` — 4 раза, строки 4, 5, 9, 13.
 - [ ] Уникальных типов ошибок = 3 (`timeout calling db`, `connection refused`,
       `disk full`).
@@ -51,8 +51,8 @@
 ## Отчёт по задаче 11
 - PASS/FAIL:
 - Критерии:
-  - [ ] grep "ERROR|WARN" → N строк (доказательство)
-  - [ ] ERROR=8 WARN=3; top=timeout calling db (4: строки 4,5,9,13)
+  - [ ] grep "ERROR|WARN" → 10 строк (доказательство)
+  - [ ] ERROR=7 WARN=3; top=timeout calling db (4: строки 4,5,9,13)
 - Использованные инструменты:
 - Ошибки/тупики:
 ```

@@ -25,6 +25,7 @@ EXT_KINDS: Dict[str, str] = {
     "js": "javascript", "mjs": "javascript", "cjs": "javascript", "jsx": "javascript",
     "ts": "typescript", "tsx": "typescript",
     "md": "markdown", "txt": "text",
+    "log": "text", "ini": "text", "cfg": "text", "conf": "text",
 }
 
 # Pygments lexer name (lowercase) → kind
