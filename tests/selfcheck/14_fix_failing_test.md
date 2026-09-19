@@ -20,7 +20,7 @@ def median(values):
     n = len(values)
     mid = n // 2
     if n % 2 == 0:
-        return (values[mid - 1] + values[mid]) / 2
+        return (values[mid - 1] + values[mid]) // 2
     return values[mid]
 
 
@@ -48,7 +48,8 @@ print("OK")
 
 ## Задание
 
-1. Запусти `project/test_stats.py` через `shell_exec`.
+1. Запусти `project/test_stats.py` через `shell_exec` (используй `python3`,
+   если `python` недоступен в PATH).
 2. Найди падающее утверждение, по трассировке определи причину.
 3. Почини **минимально** (не переписывая модуль целиком), перезапусти до зелёного.
 4. Объясни корневую причину и что именно изменил.
