@@ -584,3 +584,56 @@ TypeError: execute() got an unexpected keyword argument 'resume'`.
   логируется.
 - Тест `tests/test_empty_completion.py`.
 - Страницы: `concepts/streaming_tui.md`.
+
+## [2026-09-19] feat | edit-кит: code_editor по парадигме web/session_memory
+Повод: живая сессия `20260919_090557_visual_run` — 32 `replace` подряд по
+49 КБ-файлу почти без перечитываний, 2× «old_text не найден», потеря заголовка
+из-за правки без diff, `TypeError` на лишнем аргументе `limit`.
+- `tools/code_editor.py` переписан: каркас `_meta/_provenance/_confidence/
+  _advice/_next_actions/help`; fuzzy-матчинг + `nearest`; `apply` = несколько
+  замен атомарно (`edits`); `undo` из чекпоинтов (`.edit_backups/`); unified
+  `diff`; атомарная запись; сохранение BOM/CRLF/кодировки; отказ на бинарь;
+  стейл-контроль (серверный хэш + `expected_sha256`); пагинированное чтение;
+  прощающий ввод (алиасы, игнор неизвестных аргументов).
+- `DANGEROUS_EDITOR_ACTIONS` += `undo`; схема и описание инструмента обновлены.
+- `_compact_tool_message` (botinok.py, textual_integration.py) скрывает `edits`.
+- `prompts/tool_reminder.txt` — apply/undo/diff.
+- Тест `tests/test_code_editor.py` (все проверки пройдены); `tests/test_dangerous_mode.py` — без регрессий.
+- Страницы: `entities/tools/code-editor.md`, `concepts/edit_kit.md`, `index.md`.
+
+## [2026-09-19] fix | edit-кит: правки после ревью
+- **Fuzzy переписан на построчное сравнение**: не страдает от auto-junk на
+  частых символах, дешёвый; лимиты на строки/длину фрагмента/число сравнений +
+  ранний выход при неоднозначности. Раньше полный char-level `ratio()` на 100
+  строк мог идти минутами.
+- **Чтение**: файл читается целиком (до `max_bytes`), пагинация `offset/limit`
+  работает на всём файле (раньше — только первые 200 КБ); корректный подсчёт
+  строк (без фантомной строки от trailing `\n`), нет инвертированного диапазона
+  в конце файла; UTF-8 на границе больше не декодируется как cp1251.
+- **EOL**: поддерживаются LF/CRLF/CR; смешанные нормализуются с пометкой
+  `eol_normalized` (не молча).
+- **`undo`**: проверяет `after_sha256` чекпоинта (sidecar), при внешнем
+  изменении — `stale`; принудительно — `force=true`.
+- **Алиасы действий** нормализуются в гейтах (`editor_action_of`), закрыт обход
+  подтверждения dangerous mode через `save/edit/patch/revert/restore`.
+- Вынесен общий `_commit` (убрано дублирование write/replace); удалён мёртвый
+  `has_bom`.
+- Тест `tests/test_code_editor.py` расширен (пагинация, EOL, границы fuzzy,
+  undo-stale/force, alias-gate); регрессии зелёные.
+- Страницы: `entities/tools/code-editor.md`.
+
+## [2026-09-19] fix | file_system: grep по файлу и regex
+Повод: живая сессия `20260919_090557_visual_run` — grep систематически возвращал
+«Совпадений не найдено», из-за чего модель уходила в полные чтения файлов.
+- **Причина 1:** `_grep_files` строил glob `path/*`; при `path` = файл файлов не
+  находилось → всегда «не найдено». Теперь `path` может быть файлом.
+- **Причина 2:** `content_query` искался как литеральная подстрока, а модель
+  передавала regex (`^## `, `3\.8`, `a|b`). Теперь grep — regex
+  (регистронезависимо) с fallback на текст при некорректном regex;
+  `inspect grep.contains` остаётся литеральным, `grep.regex` — regex.
+- **Причина 3:** модель передавала запрос в `pattern` → «content_query
+  обязателен». Прощающий ввод: если `content_query` пуст, запросом становится
+  `pattern`; `search` с `content_query` теперь ищет по содержимому.
+- Схема/докстринг обновлены; вывод grep — с числом совпадений и подсказкой.
+- Тест `tests/test_file_system_grep.py` (16 проверок), регрессии зелёные.
+- Страницы: `entities/tools/file-system.md`.

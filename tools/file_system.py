@@ -46,8 +46,9 @@ def file_system_tool(
     
     Actions:
     - list: Список файлов и директорий
-    - search: Поиск файлов по имени/паттерну
-    - grep: Поиск текста внутри файлов
+    - search: Поиск файлов по маске имени (pattern); если задан content_query — поиск по содержимому
+    - grep: Поиск по содержимому. content_query — regex (регистронезависимо),
+      path может быть файлом или каталогом, pattern — маска имён (по умолчанию *)
     - read: Чтение содержимого файла с поддержкой пагинации
     - info: Получение метаданных о файле
     - inspect: Набор read-only команд для аналитики (fs/du/grep/log/sys/proc/service/journal)
@@ -67,9 +68,17 @@ def file_system_tool(
         if action == "list":
             return _list_dir(path, sort=sort, reverse=reverse, max_results=max_results)
         elif action == "search":
+            # Поиск по имени (маска pattern); если задан content_query — поиск по содержимому.
+            if content_query:
+                return _grep_query(path, pattern, content_query, recursive, max_results, use_regex=True)
             return _search_files(path, pattern, recursive, max_results)
         elif action == "grep":
-            return _grep_files(path, pattern, content_query, recursive, max_results)
+            # content_query — regex; прощающий ввод: если пусто, берём pattern как запрос.
+            query = content_query
+            mask = pattern
+            if not query and pattern and pattern != "*":
+                query, mask = pattern, "*"
+            return _grep_query(path, mask, query or "", recursive, max_results, use_regex=True)
         elif action == "read":
             return _read_file(path, offset, limit, max_bytes=max_bytes)
         elif action == "info":
@@ -172,28 +181,76 @@ def _search_files(path: str, pattern: str, recursive: bool, max_results: int) ->
     
     return "\n".join(output)
 
-def _grep_files(path: str, pattern: str, query: str, recursive: bool, max_results: int) -> str:
+def _grep_targets(path: str, pattern: str, recursive: bool) -> List[str]:
+    """Файлы для grep: если path — файл, берём его; если каталог — по маске pattern."""
+    if os.path.isfile(path):
+        return [path]
+    if not os.path.isdir(path):
+        return []
+    pat = pattern or "*"
+    search_path = os.path.join(path, "**", pat) if recursive else os.path.join(path, pat)
+    return [f for f in glob.glob(search_path, recursive=recursive) if os.path.isfile(f)]
+
+
+def _compile_grep(query: str, use_regex: bool):
+    """Возвращает (regex, fell_back_to_literal)."""
+    if use_regex:
+        try:
+            return re.compile(query, re.IGNORECASE), False
+        except re.error:
+            pass
+    return re.compile(re.escape(query), re.IGNORECASE), use_regex
+
+
+def _grep_query(path: str, pattern: str, query: str, recursive: bool,
+                max_results: int, use_regex: bool = True) -> str:
     if not query:
-        return "Ошибка: Параметр content_query обязателен для grep"
-    
-    search_path = os.path.join(path, "**", pattern) if recursive else os.path.join(path, pattern)
-    files = [f for f in glob.glob(search_path, recursive=recursive) if os.path.isfile(f)]
-    
-    matches = []
+        return ("Ошибка: для grep нужен content_query (текст или regex). "
+                "Маска файлов — pattern; поиск по ИМЕНИ файла — action=search.")
+    files = _grep_targets(path, pattern, recursive)
+    if not files:
+        if not os.path.exists(path):
+            return f"Совпадений не найдено: путь не существует ({path})"
+        return (f"Совпадений не найдено: нет файлов по маске "
+                f"(path={path}, pattern={pattern or '*'}, recursive={recursive})")
+    rx, fell_back = _compile_grep(query, use_regex)
+    matches: List[str] = []
     for file_path in files:
         if len(matches) >= max_results:
             break
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 for line_num, line in enumerate(f, 1):
-                    if query.lower() in line.lower():
-                        matches.append(f"{file_path}:{line_num}: {line.strip()}")
+                    if rx.search(line):
+                        s = line.strip()
+                        if len(s) > 300:
+                            s = s[:300] + "...[TRUNCATED_LINE]"
+                        matches.append(f"{file_path}:{line_num}: {s}")
                         if len(matches) >= max_results:
                             break
         except Exception:
             continue
-            
-    return "\n".join(matches) if matches else "Совпадений не найдено"
+    if not matches:
+        mode = "regex" if (use_regex and not fell_back) else "текст"
+        extra = " (regex некорректен — искал как текст)" if fell_back else ""
+        return (f"Совпадений не найдено: {mode}{extra} {query!r} "
+                f"в {len(files)} файл(ах)")
+    header = f"Найдено совпадений: {len(matches)}"
+    if fell_back:
+        header += " (regex некорректен — искал как текст, спецсимволы экранируй)"
+    elif len(matches) >= max_results:
+        header += f" (показаны первые {max_results}; увеличь max_results)"
+    return header + ":\n" + "\n".join(matches)
+
+
+def _grep_files(path: str, pattern: str, query: str, recursive: bool, max_results: int) -> str:
+    """Литеральный поиск подстроки (без regex)."""
+    return _grep_query(path, pattern, query, recursive, max_results, use_regex=False)
+
+
+def _grep_regex(path: str, pattern: str, regex: str, recursive: bool, max_results: int) -> str:
+    """Поиск по regex (регистронезависимо; при ошибке — как текст)."""
+    return _grep_query(path, pattern, regex, recursive, max_results, use_regex=True)
 
 def _read_file(path: str, offset: int, limit: int, max_bytes: int = 256_000) -> str:
     if not os.path.isfile(path):
@@ -642,37 +699,6 @@ def _tail_file(path: str, n: int, max_bytes: int) -> str:
         return header + content
     except Exception as e:
         return f"Ошибка tail: {str(e)}"
-
-
-def _grep_regex(path: str, pattern: str, regex: str, recursive: bool, max_results: int) -> str:
-    if not regex:
-        return "Ошибка: content_query обязателен для grep.regex"
-    try:
-        rx = re.compile(regex, re.IGNORECASE)
-    except Exception as e:
-        return f"Ошибка regex: {str(e)}"
-
-    search_path = os.path.join(path, "**", pattern) if recursive else os.path.join(path, pattern)
-    files = [f for f in glob.glob(search_path, recursive=recursive) if os.path.isfile(f)]
-
-    matches = []
-    for file_path in files:
-        if len(matches) >= max_results:
-            break
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                for line_num, line in enumerate(f, 1):
-                    if rx.search(line):
-                        s = line.strip()
-                        if len(s) > 300:
-                            s = s[:300] + "...[TRUNCATED_LINE]"
-                        matches.append(f"{file_path}:{line_num}: {s}")
-                        if len(matches) >= max_results:
-                            break
-        except Exception:
-            continue
-
-    return "\n".join(matches) if matches else "Совпадений не найдено"
 
 
 def _is_within_session(target_path: str, session_path: Optional[str]) -> bool:

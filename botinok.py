@@ -364,7 +364,7 @@ def _compact_tool_message(tool_name: str, tool_args: dict, result: str, artifact
         safe_args = tool_args
         if tool_name == "code_editor" and isinstance(tool_args, dict):
             safe_args = dict(tool_args)
-            for k in ("content", "old_text", "new_text"):
+            for k in ("content", "old_text", "new_text", "edits"):
                 if k in safe_args and safe_args[k] is not None:
                     try:
                         safe_args[k] = f"<omitted:{len(str(safe_args[k]))} chars>"
