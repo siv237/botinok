@@ -13,7 +13,7 @@ except Exception:  # pragma: no cover
 TOOLS_LOG = os.path.expanduser("~/.botinok/logs/tools.log")
 
 DANGEROUS_FILESYSTEM_ACTIONS = ("delete", "move", "copy", "mkdir", "chmod", "symlink", "touch")
-DANGEROUS_EDITOR_ACTIONS = ("write", "replace", "apply")
+DANGEROUS_EDITOR_ACTIONS = ("write", "replace", "apply", "undo")
 DANGEROUS_SHELL_ACTIONS = ("run", "send", "send_key", "kill", "wait")
 
 
@@ -35,6 +35,20 @@ def path_within(base, path) -> bool:
         return False
 
 
+def editor_action_of(args):
+    """Канонический action code_editor (алиасы save/edit/patch/... → write/...).
+
+    Гейты безопасности обязаны сравнивать канонический action, иначе алиас
+    обходил бы подтверждение dangerous mode.
+    """
+    action = args.get("action") if isinstance(args, dict) else None
+    try:
+        from tools.code_editor import normalize_action
+        return normalize_action(action)
+    except Exception:
+        return action
+
+
 def allowed_in_session(name, args, session_path) -> bool:
     """Опасное действие целиком внутри папки сессии — dangerous mode не нужен.
 
@@ -44,7 +58,7 @@ def allowed_in_session(name, args, session_path) -> bool:
     if not isinstance(args, dict) or not session_path:
         return False
     if name == "code_editor":
-        if args.get("action") in DANGEROUS_EDITOR_ACTIONS:
+        if editor_action_of(args) in DANGEROUS_EDITOR_ACTIONS:
             return path_within(session_path, args.get("path"))
         return True
     if name == "file_system":
@@ -207,9 +221,9 @@ class ToolManager:
                             "mode": {"type": "string", "description": "Права доступа в octal или символьном виде (для chmod, mkdir)"},
                             "command": {"type": "string", "description": "Подкоманда для action=inspect, напр. fs.base64, fs.file_type, fs.hash, net.ports, git.log, image.meta. Полный список: action=help"},
                             "algo": {"type": "string", "description": "Алгоритм для fs.hash: md5|sha1|sha256|sha512"},
-                            "pattern": {"type": "string"},
-                            "recursive": {"type": "boolean"},
-                            "content_query": {"type": "string", "description": "Строка для поиска; также имя для net.dns/dev.which, ref для git.grep, base64 для text.base64_decode"},
+                            "pattern": {"type": "string", "description": "Маска ИМЕНИ файла (glob, напр. *.py) для search/grep; по умолчанию *"},
+                            "recursive": {"type": "boolean", "description": "Рекурсивно по подкаталогам (search/grep/inspect)"},
+                            "content_query": {"type": "string", "description": "grep — regex по содержимому (регистронезависимо; path может быть файлом или каталогом; спецсимволы экранируй). search — если задан, ищет по содержимому. Также имя для net.dns/dev.which, ref для git.grep, base64 для text.base64_decode"},
                             "max_results": {"type": "integer"},
                             "max_bytes": {"type": "integer", "description": "Лимит вывода (для чтения/base64/ls)"},
                             "offset": {"type": "integer"},
@@ -231,17 +245,31 @@ class ToolManager:
                 "type": "function",
                 "function": {
                     "name": "code_editor",
-                    "description": "Редактирование файлов (dangerous mode)",
+                    "description": ("Единый редактор файлов. action=read — чтение с пагинацией (offset/limit, line_numbers), "
+                                    "возвращает sha256 и мету; action=write — полная запись (content, атомарно, сохраняет кодировку/EOL); "
+                                    "action=replace — одна замена (old_text→new_text, replace_all); "
+                                    "action=apply — несколько замен за вызов атомарно (edits=[{old_text,new_text}]); "
+                                    "action=undo — откат последней правки из чекпоинта; action=help — справка. "
+                                    "Инструмент прощает дрейф отступов и переводов строк (fuzzy) и сообщает ближайшее совпадение, "
+                                    "если точного нет. Возвращает unified diff; устаревший файл (изменён вне сессии) отклоняется. "
+                                    "Запись вне папки сессии требует dangerous mode."),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "action": {"type": "string", "enum": ["read", "write", "replace", "apply"], "description": "Действие: read — чтение, write — запись (требует content), replace/apply — замена текста (требуют old_text и new_text)"},
-                            "path": {"type": "string", "description": "Путь к файлу"},
-                            "content": {"type": "string", "description": "Содержимое для записи (только для action=write)"},
-                            "old_text": {"type": "string", "description": "Текст для замены (только для action=replace/apply)"},
-                            "new_text": {"type": "string", "description": "Новый текст (только для action=replace/apply)"},
+                            "action": {"type": "string", "enum": ["read", "write", "replace", "apply", "undo", "help"], "description": "Действие"},
+                            "path": {"type": "string", "description": "Путь к файлу (в сессии относительный резолвится в session_path/project/)"},
+                            "content": {"type": "string", "description": "Содержимое для action=write"},
+                            "old_text": {"type": "string", "description": "Текст для замены (action=replace)"},
+                            "new_text": {"type": "string", "description": "Новый текст (action=replace); пустая строка = удаление"},
+                            "edits": {"type": "array", "items": {"type": "object", "properties": {"old_text": {"type": "string"}, "new_text": {"type": "string"}, "replace_all": {"type": "boolean"}}}, "description": "Список замен для action=apply (атомарно)"},
+                            "replace_all": {"type": "boolean", "description": "Заменить все вхождения old_text (по умолчанию false)"},
                             "create": {"type": "boolean", "description": "Создавать файл если не существует (по умолчанию false)"},
-                            "expected_sha256": {"type": "string", "description": "Ожидаемый SHA256 файла для проверки перед записью"}
+                            "expected_sha256": {"type": "string", "description": "Ожидаемый SHA256 файла для проверки перед записью"},
+                            "offset": {"type": "integer", "description": "Строка начала чтения (action=read, с 0)"},
+                            "limit": {"type": "integer", "description": "Сколько строк читать (action=read; 0 = все)"},
+                            "line_numbers": {"type": "boolean", "description": "Показывать номера строк при чтении"},
+                            "checkpoint": {"type": "string", "description": "Путь чекпоинта для action=undo (иначе последний)"},
+                            "force": {"type": "boolean", "description": "Для action=undo: откатить даже если файл изменился после правки"}
                         },
                         "required": ["action", "path"]
                     }
@@ -538,6 +566,7 @@ class ToolManager:
         # Опасные действия в простом режиме: разрешены только внутри папки сессии.
         if not self.dangerous_mode:
             action = args.get("action") if isinstance(args, dict) else None
+            gate_action = editor_action_of(args) if name == "code_editor" else action
             if name == "shell_exec" and (action or "run") in DANGEROUS_SHELL_ACTIONS:
                 msg = (f"Error: shell_exec action '{action or 'run'}' requires dangerous mode "
                        "(пользователь может разрешить переключение).")
@@ -551,9 +580,9 @@ class ToolManager:
                         msg += f"\n{_safe_ops.catalog_short()}"
                 return msg
             if (name in ("code_editor", "file_system")
-                    and action in (DANGEROUS_EDITOR_ACTIONS + DANGEROUS_FILESYSTEM_ACTIONS)
+                    and gate_action in (DANGEROUS_EDITOR_ACTIONS + DANGEROUS_FILESYSTEM_ACTIONS)
                     and not allowed_in_session(name, args, session_path)):
-                return (f"Error: {name} action '{action}' outside session requires dangerous mode "
+                return (f"Error: {name} action '{gate_action}' outside session requires dangerous mode "
                         "(пользователь может разрешить переключение)")
             if name in ("curl", "web") and isinstance(args, dict) and args.get("output_path") \
                     and not allowed_in_session(name, args, session_path):

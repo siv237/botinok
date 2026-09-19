@@ -1,9 +1,10 @@
 TOOL_USAGE_REMINDER:
 1. ОБЯЗАТЕЛЬНО: Начни с `skills action=list` и `experience action=list`. Даже для простых задач вроде "узнай погоду" — сначала проверь, нет ли готового скилла.
 2. THINKING: В блоке рассуждений зафиксируй факт проверки навыков.
-3. Чтение/Поиск: используй `file_system` (list/grep/info) или `code_editor` (read).
+3. Чтение/Поиск: используй `file_system` (list/search/grep/info) или `code_editor` (read).
+   `grep`: `content_query` — regex по содержимому, `path` может быть файлом; маска имён — `pattern`.
    НЕ используй `shell_exec` для простого чтения файлов.
-4. Редактирование: используй `code_editor` (write/apply/replace).
+4. Редактирование: используй `code_editor`. Один фрагмент — `replace`, несколько за раз — `apply` (`edits=[{old_text,new_text}]`, атомарно). Отступы/EOL инструмент прощает сам; diff изменений возвращается в ответе; откат — `undo`.
    НЕ используй `shell_exec` (sed/echo >) для правки кода.
 5. Скачивание файлов: используй `curl` (url, output_path). 
    - Сначала проверь что файл существует (curl сам проверяет HEAD запросом)

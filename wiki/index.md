@@ -29,7 +29,7 @@
 | safe_ops | [entities/safe_ops.md](entities/safe_ops.md) | Каталог безопасных read-only операций + подсказки эквивалента |
 | process_control | [entities/process_control.md](entities/process_control.md) | Реестр процессов и мгновенная остановка по Esc (killpg дерева) |
 | file_system | [entities/tools/file-system.md](entities/tools/file-system.md) | FS: навигация, поиск, grep, инспекция; мутации — dangerous |
-| code_editor | [entities/tools/code-editor.md](entities/tools/code-editor.md) | Редактирование файлов (read/write/replace/apply); запись вне сессии — dangerous |
+| code_editor | [entities/tools/code-editor.md](entities/tools/code-editor.md) | Edit-кит: read/write/replace/apply/undo, fuzzy, diff, чекпоинты; запись вне сессии — dangerous |
 | shell_exec | [entities/tools/shell-exec.md](entities/tools/shell-exec.md) | PTY-сессия команд (run/read/search/send/wait/kill), dangerous, встроенный терминал |
 | web_search | [entities/tools/web-search.md](entities/tools/web-search.md) | legacy-обёртка web (поиск) |
 | open_url | [entities/tools/open-url.md](entities/tools/open-url.md) | legacy-обёртка web (текст страницы) |
@@ -52,6 +52,7 @@
 - [concepts/function_calling.md](concepts/function_calling.md) — механика tool-calls в потоке агента
 - [concepts/dangerous_mode.md](concepts/dangerous_mode.md) — безопасность: dangerous mode и подтверждения
 - [concepts/web_kit.md](concepts/web_kit.md) — единый веб-кит: один добыватель, харнес подсказок, контекстная дисциплина
+- [concepts/edit_kit.md](concepts/edit_kit.md) — edit-кит: редактор с каркасом-советником, fuzzy, атомарность, чекпоинты
 - [concepts/streaming_tui.md](concepts/streaming_tui.md) — стриминг, TTFT/TPS, VRAM, плавность UI
 - [concepts/terminal_unicode_width.md](concepts/terminal_unicode_width.md) — ширина Unicode в терминале: почему «плывут» панели и как лечим
 - [concepts/embedded_terminal.md](concepts/embedded_terminal.md) — встроенный терминал: PTY-сессии, свернуть/вернуть, общий доступ человека и агента

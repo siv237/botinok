@@ -27,6 +27,7 @@ from core.session_manager import SessionManager
 from core.tool_manager import (
     ToolManager,
     allowed_in_session,
+    editor_action_of,
     DANGEROUS_FILESYSTEM_ACTIONS as DANGEROUS_FS_ACTIONS,
     DANGEROUS_EDITOR_ACTIONS,
     DANGEROUS_SHELL_ACTIONS,
@@ -196,7 +197,7 @@ def _compact_tool_message(tool_name, tool_args, result, artifact_path):
         safe_args = tool_args
         if tool_name == "code_editor" and isinstance(tool_args, dict):
             safe_args = dict(tool_args)
-            for k in ("content", "old_text", "new_text"):
+            for k in ("content", "old_text", "new_text", "edits"):
                 if k in safe_args and safe_args[k] is not None:
                     try:
                         safe_args[k] = f"<omitted:{len(str(safe_args[k]))} chars>"
@@ -1251,7 +1252,7 @@ def ask_ollama_textual(
                 # мутации file_system и запись curl в файл.
                 is_dangerous_tool = (
                     (tool_name == "shell_exec" and (action or "run") in DANGEROUS_SHELL_ACTIONS)
-                    or (tool_name == "code_editor" and action in DANGEROUS_EDITOR_ACTIONS)
+                    or (tool_name == "code_editor" and editor_action_of(tool_args) in DANGEROUS_EDITOR_ACTIONS)
                     or (tool_name == "file_system" and action in DANGEROUS_FS_ACTIONS)
                     or (tool_name in ("curl", "web") and bool(tool_args.get("output_path")))
                     or (tool_name == "web" and action == "download")
