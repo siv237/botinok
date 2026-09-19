@@ -142,6 +142,30 @@ def _terminal_done_text(session) -> Text:
     return Text(f"─── остановлено · {dur} ───", style="bold yellow")
 
 
+def maybe_stop_from_terminal(widget, event) -> bool:
+    """Esc в терминале при идущем ходе — остановка агента, а не байт в PTY.
+
+    Возвращает True, если событие обработано (остановка). Иначе False — Esc
+    можно прокидывать дальше (в PTY). Нужна, чтобы фокус на встроенном
+    терминале не «проглатывал» Esc и не мешал прервать генерацию.
+    """
+    if (getattr(event, "key", "") or "") != "escape":
+        return False
+    app = getattr(widget, "app", None)
+    try:
+        if app is not None and getattr(app, "turn_in_progress", None) and app.turn_in_progress():
+            app.request_stop()
+            try:
+                app._log_stop_once()
+            except Exception:
+                pass
+            event.stop()
+            return True
+    except Exception:
+        pass
+    return False
+
+
 class ShellScreen(ModalScreen):
     """Модальный экран «встроенный терминал».
 
@@ -613,6 +637,11 @@ class ShellScreen(ModalScreen):
             self._send_ctrl_c()
             return
 
+        # Esc при идущем ходе — остановка агента, а НЕ байт в PTY. Иначе, когда
+        # фокус на терминале, Esc проглатывался и не прерывал генерацию.
+        if maybe_stop_from_terminal(self, event):
+            return
+
         # Стрелки/pgup/pgdown прокидываем в терминал, только если фокус на логе.
         target = getattr(event, "target", None)
         target_id = ""
@@ -976,6 +1005,10 @@ class ShellInline(Vertical):
         if key == "ctrl+c":
             event.stop()
             self.session.send_key("ctrl-c")
+            return
+
+        # Esc при идущем ходе — остановка агента, а НЕ байт в PTY (см. ShellScreen).
+        if maybe_stop_from_terminal(self, event):
             return
 
         # Стрелки/pgup/pgdown прокидываем в терминал, если фокус на логе.

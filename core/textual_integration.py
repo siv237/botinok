@@ -211,6 +211,24 @@ def _is_transient_http(code: int) -> bool:
     return int(code) in TRANSIENT_HTTP_CODES
 
 
+def _call_ui_result(app, fn, *args, **kwargs):
+    """Вызвать fn в UI-потоке и вернуть результат.
+
+    Textual `call_from_thread` возвращает результат НАПРЯМУЮ (не Future),
+    поэтому `.result()` здесь недопустим: он бросает AttributeError уже ПОСЛЕ
+    выполнения колбэка, а fallback повторно выполняет fn на уже изменённом
+    состоянии (так терялась очередь мыслей: забор очищал очередь, а повторный
+    вызов возвращал пусто).
+    """
+    try:
+        return app.call_from_thread(fn, *args, **kwargs)
+    except Exception:
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            return None
+
+
 
 
 def _ensure_chat_only_system_message(messages: list) -> None:
@@ -448,6 +466,44 @@ def _abort_stream(response) -> None:
         pass
 
 
+def _post_stream_interruptible(app, do_request, poll: float = 0.2):
+    """Выполнить HTTP-запрос стрима в отдельном потоке, прерываемо по Esc.
+
+    Блокирующий `requests.post(stream=True)` ждёт заголовки ответа и не
+    реагирует на флаг остановки: если сервер «завис», Esc не возвращал
+    управление, пока запрос не отвалится по таймауту. Здесь запрос идёт в
+    отдельном потоке, а воркер ждёт его с проверкой `_stop_requested`.
+
+    Возвращает (response, None) при успехе, (None, "stopped") при Esc.
+    Исключения пробрасываются.
+    """
+    box = {}
+    done = threading.Event()
+
+    def _run():
+        try:
+            box["resp"] = do_request()
+        except Exception as e:
+            box["err"] = e
+        finally:
+            done.set()
+            # Если нас остановили, а ответ всё же пришёл — закрываем, чтобы не
+            # оставлять висящее соединение.
+            if getattr(app, "_stop_requested", False) and box.get("resp") is not None:
+                try:
+                    box["resp"].close()
+                except Exception:
+                    pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    while not done.wait(poll):
+        if getattr(app, "_stop_requested", False):
+            return None, "stopped"
+    if "err" in box:
+        raise box["err"]
+    return box.get("resp"), None
+
+
 def ask_ollama_textual(
     model: str,
     messages: List[Dict],
@@ -500,13 +556,7 @@ def ask_ollama_textual(
                 pass
 
     def _call_from_thread_result(fn, *args, **kwargs):
-        try:
-            return app.call_from_thread(fn, *args, **kwargs).result()
-        except Exception:
-            try:
-                return fn(*args, **kwargs)
-            except Exception:
-                return None
+        return _call_ui_result(app, fn, *args, **kwargs)
 
     def _update_stats(**kwargs):
         s = dict(app.stats_data)
@@ -775,22 +825,28 @@ def ask_ollama_textual(
                 # Аудио доставляется только через /v1 (input_audio) — перенаправляем ход
                 # с аудио на openai-путь даже при backend=ollama.
                 if is_openai_backend(sm) or _has_audio_message(prepared):
-                    response = chat_stream_request(
-                        sm,
-                        payload,
-                        timeout=current_timeout,
-                        verify_ssl=current_verify_ssl,
-                    )
+                    _do_request = lambda: chat_stream_request(  # noqa: E731
+                        sm, payload, timeout=current_timeout,
+                        verify_ssl=current_verify_ssl)
                 else:
-                    response = requests.post(
+                    _do_request = lambda: requests.post(  # noqa: E731
                         current_ollama_chat_url, json=payload, stream=True,
-                        timeout=current_timeout, verify=current_verify_ssl,
-                    )
+                        timeout=current_timeout, verify=current_verify_ssl)
+                # Запрос идёт в отдельном потоке: даже если сервер завис и не
+                # отдал заголовки, Esc возвращает управление сразу.
+                response, _req_status = _post_stream_interruptible(app, _do_request)
             except Exception as e:
                 if _try_hold(f"Ошибка связи с {server_label}: {e}"):
                     continue
                 _persist_connection_failure(
                     f"Не удалось подключиться к {server_label} ({e}).", user_text)
+                break
+
+            if _req_status == "stopped":
+                # Esc во время ожидания ответа сервера — выходим немедленно.
+                stopped_by_user = True
+                _finalize_turn("", "")
+                _update_stats(status="Ready")
                 break
 
             if response.status_code != 200:
@@ -861,7 +917,8 @@ def ask_ollama_textual(
             _thinking_buf.clear()
             _call_from_thread(app.start_assistant_turn)
 
-            sm.update_context(session_path, "user", user_text)
+            if user_text:
+                sm.update_context(session_path, "user", user_text)
 
             stream_queue = queue.Queue()
 
@@ -876,6 +933,22 @@ def ask_ollama_textual(
             reader_thread = threading.Thread(target=_stream_reader, daemon=True)
             reader_thread.start()
 
+            # Независимый сторож: увидел Esc — сразу рвёт соединение с сервером,
+            # не дожидаясь дренажа очереди. Это гарантия, что остановка сработает
+            # даже при непрерывном потоке чанков.
+            stop_watchdog = threading.Event()
+            aborting_by_stop = threading.Event()
+
+            def _watch_stop():
+                while not stop_watchdog.is_set():
+                    if getattr(app, "_stop_requested", False):
+                        aborting_by_stop.set()
+                        _abort_stream(response)
+                        return
+                    time.sleep(0.1)
+
+            threading.Thread(target=_watch_stop, daemon=True).start()
+
             stream_done = False
             stream_error = None
             waiting_status_set = False
@@ -884,6 +957,15 @@ def ask_ollama_textual(
 
             while not stream_done:
                 while True:
+                    # Esc должен рвать стрим НЕМЕДЛЕННО, даже если чанки идут
+                    # непрерывным потоком и внутренняя очередь не пустеет.
+                    # Раньше проверка была только между пачками — при плотном
+                    # потоке она могла не срабатывать (Esc «не прерывал»).
+                    if getattr(app, "_stop_requested", False):
+                        _abort_stream(response)
+                        stream_done = True
+                        stopped_by_user = True
+                        break
                     try:
                         kind, item = stream_queue.get_nowait()
                     except queue.Empty:
@@ -1497,6 +1579,20 @@ def ask_ollama_textual(
                 _finalize_turn("", "")
                 _update_stats(status="Ready")
                 break
+
+            # Мысли пользователя, накопленные во время работы: отдаём их модели
+            # ОДНИМ блоком на границе раунда, не прерывая генерацию. Никаких
+            # указаний «прерви/продолжай» — модель решает сама по контексту.
+            try:
+                _thoughts = _call_from_thread_result(app.take_queued_thoughts) or ""
+            except Exception:
+                _thoughts = ""
+            if _thoughts:
+                _wrapped = f"(во время работы)\n{_thoughts}"
+                messages.append({"role": "user", "content": _wrapped})
+                sm.update_context(session_path, "user", _wrapped)
+                _call_from_thread(app.deliver_thought_block, _thoughts)
+                _write_log("[dim]💭 Мысли переданы модели[/dim]")
 
             _append_turn_guidance(resume_turn)
 
