@@ -170,6 +170,49 @@ def _ollama_error_indicates_no_tools(error_msg: str) -> bool:
     return "does not support tools" in msg or "doesn't support tools" in msg or "not support tools" in msg
 
 
+def _server_label(sm) -> str:
+    """Человекочитаемое имя РЕАЛЬНОГО сервера модели (а не всегда «Ollama»)."""
+    try:
+        base = sm.config.get('Ollama', 'BaseUrl', fallback='').strip().rstrip('/')
+    except Exception:
+        base = ""
+    try:
+        if is_openai_backend(sm):
+            return f"OpenAI-совместимый сервер ({base})" if base else "OpenAI-совместимый сервер"
+    except Exception:
+        pass
+    return f"Ollama ({base})" if base else "Ollama"
+
+
+def _extract_api_error(data) -> str:
+    """Достаёт осмысленный текст ошибки из ответа любого из бэкендов."""
+    if not isinstance(data, dict):
+        return str(data)
+    err = data.get("error")
+    if isinstance(err, dict):
+        for k in ("message", "type", "code"):
+            if err.get(k):
+                return str(err[k])
+        return json.dumps(err, ensure_ascii=False)
+    if err:
+        return str(err)
+    detail = data.get("detail")
+    if detail:
+        return str(detail)
+    return "Unknown Error"
+
+
+# HTTP-коды, при которых имеет смысл держать сессию и ждать сервер
+# (перегрузка, загрузка модели, временная недоступность), а не сдаваться.
+TRANSIENT_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+def _is_transient_http(code: int) -> bool:
+    return int(code) in TRANSIENT_HTTP_CODES
+
+
+
+
 def _ensure_chat_only_system_message(messages: list) -> None:
     if not messages:
         return
@@ -432,7 +475,8 @@ def ask_ollama_textual(
 
     app = BotinokTextualApp(session_path=session_path, version=version,
                             initial_prompt=initial_prompt)
-    app.set_model_info(model, dangerous=dangerous_mode)
+    app.set_model_info(model, dangerous=dangerous_mode,
+                       server="openai" if is_openai_backend(sm) else "ollama")
 
     # Регистрируем приложение глобально: инструменты (shell_exec) вызываются из
     # рабочего потока, где ContextVar active_app не наследуется. Без этой
@@ -598,6 +642,7 @@ def ask_ollama_textual(
         current_ollama_chat_url = _ollama_chat_url
         current_verify_ssl = _verify_ssl
         current_timeout = _request_timeout
+        server_label = _server_label(sm)
 
         if current_model in MODELS_NO_TOOLS:
             _ensure_chat_only_system_message(messages)
@@ -612,7 +657,42 @@ def ask_ollama_textual(
         stopped_by_user = False
         turn_prompt = user_text
         http_retries = 0
-        max_http_retries = 2
+        error_logged = False
+        retry_waited = 0.0
+        # «Держим сессию зубами»: при сбоях API не сдаёмся после пары попыток,
+        # а ждём сервер с растущей паузой в пределах бюджета времени.
+        retry_budget = sm.config.getint('Ollama', 'RetryBudgetSec', fallback=86400)
+        max_backoff = sm.config.getint('Ollama', 'MaxRetryBackoffSec', fallback=60)
+        retry_deadline = time.time() + max(30, retry_budget)
+
+        def _try_hold(reason: str) -> bool:
+            """Попытка удержания сессии при сбое API.
+
+            Ошибка печатается один раз, а дальше рядом с ней растёт счётчик
+            попыток и времени ожидания (в панели), без спама в лог.
+            True — повторить запрос; False — бюджет исчерпан или Esc.
+            """
+            nonlocal http_retries, error_logged, retry_waited
+            if getattr(app, "_stop_requested", False):
+                return False
+            if time.time() >= retry_deadline:
+                return False
+            http_retries += 1
+            if not error_logged:
+                _write_log(f"[red]{reason}[/red]")
+                error_logged = True
+            delay = min(max_backoff, 2 ** min(http_retries, 6))
+            _update_stats(retries=http_retries, retry_wait=retry_waited,
+                          status="Connecting...")
+            end = time.time() + delay
+            while time.time() < end:
+                if getattr(app, "_stop_requested", False):
+                    return False
+                time.sleep(0.2)
+                retry_waited += 0.2
+                _update_stats(retry_wait=retry_waited)
+            return True
+
         changed_project_files = []
         start_time = time.time()
         elapsed = 0.0
@@ -707,14 +787,10 @@ def ask_ollama_textual(
                         timeout=current_timeout, verify=current_verify_ssl,
                     )
             except Exception as e:
-                _write_log(f"[red]Connection Error: {e}[/red]")
-                _update_stats(status="Connection Error")
-                if http_retries < max_http_retries:
-                    http_retries += 1
-                    time.sleep(2)
+                if _try_hold(f"Ошибка связи с {server_label}: {e}"):
                     continue
                 _persist_connection_failure(
-                    f"Не удалось подключиться к API ({e}).", user_text)
+                    f"Не удалось подключиться к {server_label} ({e}).", user_text)
                 break
 
             if response.status_code != 200:
@@ -723,7 +799,7 @@ def ask_ollama_textual(
                 try:
                     data = response.json()
                     if isinstance(data, dict):
-                        error_msg = data.get("error", error_msg)
+                        error_msg = _extract_api_error(data)
                         error_text = json.dumps(data, ensure_ascii=False, indent=2)
                     else:
                         error_text = str(data)
@@ -744,25 +820,26 @@ def ask_ollama_textual(
                     _update_stats(status="Chat-only mode (no tools)")
                     continue
 
-                _write_log(f"[red]Ollama Error {response.status_code}: {error_msg}[/red]")
-                _update_stats(status="Ollama Error")
+                if _is_transient_http(response.status_code) and _try_hold(
+                        f"{server_label} вернул {response.status_code}: {error_msg}"):
+                    continue
+
+                if not error_logged:
+                    _write_log(f"[red]{server_label} вернул {response.status_code}: {error_msg}[/red]")
+                    error_logged = True
 
                 ts = int(time.time())
                 try:
                     sm.save_artifact(
                         session_path,
-                        f"ollama_http_error_{response.status_code}_{ts}.txt",
+                        f"api_http_error_{response.status_code}_{ts}.txt",
                         (error_text or "")[:200_000],
                     )
                 except Exception:
                     pass
 
-                if http_retries < max_http_retries:
-                    http_retries += 1
-                    time.sleep(3)
-                    continue
                 _persist_connection_failure(
-                    f"API вернул ошибку {response.status_code}: {error_msg}", user_text)
+                    f"{server_label} вернул ошибку {response.status_code}: {error_msg}", user_text)
                 break
 
             full_response = ""
@@ -950,20 +1027,10 @@ def ask_ollama_textual(
                     break
 
             if stream_error:
-                _write_log(f"[red]Ollama stream error: {stream_error}[/red]")
-                _update_stats(status="Stream Error")
                 _abort_stream(response)
-                # Обрыв соединения с API в середине ответа. Раньше здесь был
-                # просто break: частичный ответ терялся, в истории оставался
-                # «висящий» user без assistant, и агент вёл себя так, будто
-                # сессия перезапущена. Теперь повторяем запрос (Ollama
-                # stateless — просто пересылаем messages), а при исчерпании
-                # попыток сохраняем прерванный ход, чтобы контекст не рвался.
-                if http_retries < max_http_retries:
-                    http_retries += 1
-                    _write_log(f"[yellow]Повтор запроса после обрыва "
-                               f"({http_retries}/{max_http_retries})…[/yellow]")
-                    time.sleep(2)
+                # Обрыв соединения с API в середине ответа. Держим сессию:
+                # ждём сервер с растущей паузой; ошибка печатается один раз.
+                if _try_hold(f"Обрыв потока {server_label}: {stream_error}"):
                     continue
                 if full_response.strip() or full_thinking.strip():
                     sm.update_context(session_path, "assistant", full_response,
@@ -978,8 +1045,12 @@ def ask_ollama_textual(
                     _finalize_turn("", "")
                 break
 
-            # Успешный стрим — сбрасываем счётчик сетевых ретраев хода.
+            # Успешный стрим — сбрасываем счётчики сетевых сбоев хода.
             http_retries = 0
+            error_logged = False
+            retry_waited = 0.0
+            retry_deadline = time.time() + max(30, retry_budget)
+            _update_stats(retries=0, retry_wait=0.0)
 
             elapsed = time.time() - start_time
             ttft_val = first_token_time - start_time if first_token_time else elapsed

@@ -19,6 +19,7 @@ botinok.py                        # CLI / главный цикл агента, 
 │   ├── config_wizard.py          # мастер настройки
 │   ├── textual_app.py / textual_integration.py / textual_history_viewer.py  # Textual TUI
 │   ├── shell_session.py / shell_screen.py  # фоновая PTY-сессия и встроенный терминал
+│   ├── net_meter.py              # сырой учёт трафика модели (АПИ отдано/принято)
 │   └── image_ascii.py            # ASCII-арт из картинок
 ├── tools/*.py                    # 14 инструментов (+ алиас, function calling)
 ├── prompts/*.txt                 # системные промпты (копируются в сессию)
@@ -34,7 +35,7 @@ botinok.py                        # CLI / главный цикл агента, 
 - **Инструменты (function calling)** — 14 инструментов, lazy-загрузка через `ToolManager`, безопасные/опасные действия. → `entities/tool_manager.md`, `concepts/function_calling.md`
 - **Dangerous mode** — `code_editor`/`shell_exec` и мутирующие действия FS включаются только явно (`--dangerous`). → `concepts/dangerous_mode.md`
 - **Два бэкенда** — нативный Ollama `/api/chat` и OpenAI-совместимые API через адаптер. → `entities/ollama_backend.md`, `entities/openai_compat.md`
-- **UI** — переход с Rich Live на Textual TUI (плавный стриминг, спойлеры, FPS). → `entities/textual_ui.md`, `comparisons/rich_vs_textual.md`
+- **UI** — переход с Rich Live на Textual TUI (плавный стриминг, спойлеры, FPS); панель «Производительность» — живые метрики по-русски, профили сервера, детектор зависаний, трафик модели. → `entities/textual_ui.md`, `concepts/streaming_tui.md`, `entities/net_meter.md`
 - **Встроенный терминал** — `shell_exec` выполняет команду в фоновой PTY-сессии, не держа агента; в TUI есть окно терминала с кнопками «Свернуть/Закрыть» и панелью свёрнутых сессий. → `concepts/embedded_terminal.md`, `entities/shell_session.md`, `entities/shell_screen.md`
 - **Промпты** — вынесены в `prompts/`, копируются в сессию, редактируемы под задачу. → `sources/prompts_readme.md`
 - **Опыт и навыки** — база «позитивного/негативного» опыта и система skills. → `concepts/experience_learning.md`, `concepts/skills_system.md`
