@@ -23,6 +23,7 @@ import threading
 from datetime import datetime
 from core.text_width import normalize_cells, cell_truncate
 from core.shell_screen import format_shell_command
+from core.file_kinds import syntax_renderable
 
 try:
     from core import process_control as _pc
@@ -194,14 +195,19 @@ class ConfirmInline(Vertical):
                 return cmd
         return None
 
-    def _args_block(self) -> str:
-        """Тело для показа: команда (развёрнутая) либо pretty-JSON аргументов."""
+    def _args_block(self):
+        """Тело для показа: команда (развёрнутая) либо pretty-JSON аргументов.
+
+        Возвращает Rich-renderable с подсветкой синтаксиса (bash/json) либо
+        обычную строку, если язык неизвестен.
+        """
         cmd = self._command()
         if cmd is not None:
-            return format_shell_command(cmd)
+            return syntax_renderable(format_shell_command(cmd), "bash")
         if isinstance(self._args, dict):
             try:
-                return json.dumps(self._args, ensure_ascii=False, indent=2)[:4000]
+                return syntax_renderable(
+                    json.dumps(self._args, ensure_ascii=False, indent=2)[:4000], "json")
             except Exception:
                 pass
         return str(self.args_display or "")[:4000]
@@ -424,7 +430,8 @@ class BotinokTextualApp(App):
     #inline_confirm ConfirmInline { height: auto; }
     #inline_confirm_body { height: auto; padding: 0 1; }
     #inline_confirm_cmd_scroll { height: auto; max-height: 12; overflow-y: auto; }
-    #inline_confirm_cmd { height: auto; background: #0f0f0f; color: #d0d0d0; padding: 0 1; }
+    #inline_confirm_cmd { height: auto; background: #0f0f0f; color: #d0d0d0; padding: 0 1;
+                         border: round #5f87af; }
     #inline_confirm_options { height: auto; max-height: 10; border: none;
                               padding: 0; background: transparent; width: 1fr; }
     #inline_confirm_options:focus { border: none; }
@@ -443,9 +450,10 @@ class BotinokTextualApp(App):
                                     background: #0f0f0f; color: #d0d0d0;
                                     padding: 0 1; border: none; }
     #inline_shell_cmd.show, #shell_cmd.show { display: block; }
-    /* Раскрытая команда окрашена как «сокращённая» строка (title). */
-    #inline_shell_cmd.show, #shell_cmd.show { background: cyan; color: black;
-                                              text-style: bold; }
+    /* Раскрытая команда отделена рамкой (без цветного фона), чтобы визуально
+       отличать её от результата под ней. */
+    #inline_shell_cmd.show, #shell_cmd.show { background: #0f0f0f; color: #d0d0d0;
+                                              border: round #5f87af; }
     /* Когда команда раскрыта — сокращённая (title) не показывается. */
     ShellInline.cmd-open #inline_shell_title { display: none; }
     ShellScreen.cmd-open #shell_title { display: none; }
@@ -1523,6 +1531,26 @@ class BotinokTextualApp(App):
             pass
         return f"🔧 {name}"
 
+    def _tool_call_code(self, name: str, args):
+        """(code, kind) для подсветки тела вызова; (None, None) если нечего."""
+        try:
+            if name == "shell_exec" and isinstance(args, dict) \
+                    and isinstance(args.get("command"), str):
+                return format_shell_command(args["command"]), "bash"
+            if isinstance(args, dict):
+                return json.dumps(args, ensure_ascii=False, indent=2), "json"
+        except Exception:
+            pass
+        return None, None
+
+    def _tool_call_widgets(self, name: str, args):
+        """Заголовок + подсвеченное тело вызова для спойлера истории сессии."""
+        widgets = [Static(f"🔧 {name}", markup=False)]
+        code, kind = self._tool_call_code(name, args)
+        if code:
+            widgets.append(Static(syntax_renderable(code, kind), markup=False))
+        return widgets
+
     def _render_history_entry(self, entry: dict) -> None:
         role = entry.get("role", "")
         content = entry.get("content", "")
@@ -1560,8 +1588,7 @@ class BotinokTextualApp(App):
                         args = {}
                     args_json = json.dumps(args, ensure_ascii=False)
                     title = self._spoiler_title(name, args_json)
-                    self._mount_spoiler(title, Static(self._format_tool_call(name, args),
-                                                      markup=False))
+                    self._mount_spoiler(title, *self._tool_call_widgets(name, args))
         elif role == "tool":
             title = self._spoiler_title("Tool result", str(content)[:200])
             self._mount_spoiler(title, Static(f"[dim]{self._rich_escape(str(content)[:1000])}[/dim]"))

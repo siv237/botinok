@@ -67,10 +67,14 @@ async def main_async() -> int:
               f"border={opts.styles.border_top[0]!r}")
         # Команда в подтверждении развёрнута на строки (видно, что будет выполнено).
         cmd_w = app.inline_confirm_widget.query_one("#inline_confirm_cmd", Static)
-        cmd_text = str(cmd_w.content)
+        # Тело — Rich-renderable (Syntax) с подсветкой; текст лежит в .code.
+        content = cmd_w.content
+        cmd_text = getattr(content, "code", str(content))
         check("confirm_command_formatted",
               "for h in" in cmd_text and len(cmd_text.splitlines()) >= 5,
               f"cmd={cmd_text!r}")
+        check("confirm_command_highlighted", content.__class__.__name__ == "Syntax",
+              f"cls={type(content).__name__}")
 
         # 2. Клавиша n — отказ, элемент убран, событие установлено.
         app.inline_confirm_widget.on_key(_Key("n"))

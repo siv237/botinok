@@ -92,9 +92,13 @@ async def main_async() -> int:
         await pilot.click("#inline_shell_title")
         await asyncio.sleep(0.3)
         check("click_shows", cmd_w.has_class("show"))
-        text = str(cmd_w.content)
+        # Тело — Rich-renderable (rich.syntax.Syntax) с подсветкой; исходный
+        # текст лежит в .code, иначе (fallback без лексера) это обычная строка.
+        content = cmd_w.content
+        text = getattr(content, "code", str(content))
         check("click_content_formatted", "for h in" in text and len(text.splitlines()) >= 6,
-              f"text={text[:200]!r}")
+              f"text={str(text)[:200]!r}")
+        check("click_content_highlighted", content.__class__.__name__ == "Syntax", f"cls={type(content).__name__}")
         # После раскрытия «сокращённая» (title) скрыта — сворачиваем кликом по команде.
         await pilot.click("#inline_shell_cmd")
         await asyncio.sleep(0.3)
