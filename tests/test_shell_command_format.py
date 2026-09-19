@@ -104,12 +104,32 @@ async def main_async() -> int:
         await asyncio.sleep(0.3)
         check("second_click_hides", not cmd_w.has_class("show"))
 
-        sess = ShellSessionRegistry.instance().get(sid)
-        if sess is not None:
-            try:
-                sess.close()
-            except Exception:
-                pass
+        # 4. Переиспользование панели новой сессией: раскрытая команда обязана
+        #    обновиться (раньше заголовок/вывод менялись, а блок команды — нет).
+        await pilot.click("#inline_shell_title")  # снова раскрыть команду
+        await asyncio.sleep(0.2)
+        check("cmd_shown_for_reuse", cmd_w.has_class("show"))
+        CMD2 = 'echo SECOND ; ls /tmp'
+        r2 = json.loads(shell_exec(command=CMD2, interactive=True, tail_lines=5))
+        sid2 = r2["session_id"]
+        for _ in range(40):
+            await asyncio.sleep(0.1)
+            w = app.inline_shell_widget
+            if w is not None and (getattr(w.session, "command", "") or "") == CMD2:
+                break
+        await asyncio.sleep(0.3)
+        content2 = app.inline_shell_widget.query_one("#inline_shell_cmd", Static).content
+        text2 = getattr(content2, "code", str(content2))
+        check("reused_cmd_refreshed", "SECOND" in text2 and "hwmon" not in text2,
+              f"text={text2!r}")
+
+        for s in (ShellSessionRegistry.instance().get(sid),
+                  ShellSessionRegistry.instance().get(sid2)):
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
         TextualAppRegistry.clear()
 
     print("=" * 70)

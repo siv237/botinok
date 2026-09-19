@@ -664,6 +664,7 @@ class ShellInline(Vertical):
         self._spin = 0
         self._done_written = False
         self._cmd_shown = False
+        self._cmd_source = None
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ UI
@@ -751,6 +752,9 @@ class ShellInline(Vertical):
         self._spin += 1
         title.update(_terminal_title(self.session, self._spin))
         self._sync_action_button()
+        # Панель переиспользуется между сессиями — держим раскрытую команду
+        # актуальной (иначе при новой сессии остаётся старая команда).
+        self._refresh_cmd_block()
         # Один раз дописываем в лог явный маркер завершения.
         if not self._done_written and _is_finished(self.session):
             self._done_written = True
@@ -788,19 +792,38 @@ class ShellInline(Vertical):
             event.stop()
             self._toggle_cmd()
 
-    def _toggle_cmd(self) -> None:
+    def _cmd_raw(self) -> str:
+        return getattr(self.session, "command", "") or getattr(self.session, "name", "")
+
+    def _refresh_cmd_block(self, force: bool = False) -> None:
+        """Перерисовать раскрытый блок команды под текущую сессию.
+
+        Панель переиспользуется (`set_session`), поэтому при смене команды
+        раскрытый блок нужно обновить — иначе заголовок и вывод уже новые,
+        а команда в рамке остаётся старой.
+        """
+        if not self._cmd_shown:
+            return
+        raw = self._cmd_raw()
+        if not force and raw == self._cmd_source:
+            return
+        self._cmd_source = raw
         try:
             cmd_w = self.query_one("#inline_shell_cmd", Static)
+            cmd_w.update(syntax_renderable(format_shell_command(raw), "bash"))
+        except Exception:
+            pass
+
+    def _toggle_cmd(self) -> None:
+        try:
+            self.query_one("#inline_shell_cmd", Static)
         except Exception:
             return
         self._cmd_shown = not self._cmd_shown
         if self._cmd_shown:
-            raw = getattr(self.session, "command", "") or getattr(self.session, "name", "")
-            try:
-                cmd_w.update(syntax_renderable(format_shell_command(raw), "bash"))
-            except Exception:
-                pass
+            self._refresh_cmd_block(force=True)
         try:
+            cmd_w = self.query_one("#inline_shell_cmd", Static)
             if self._cmd_shown:
                 cmd_w.add_class("show")
                 self.add_class("cmd-open")
