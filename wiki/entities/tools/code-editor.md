@@ -22,6 +22,8 @@ status: stable
 - `apply` — несколько замен за вызов: `edits=[{old_text,new_text,replace_all}]`,
   **атомарно** (всё или ничего).
 - `undo` — откат последней правки из чекпоинта (`checkpoint` либо последний).
+- `check` — проверка синтаксиса без запуска кода (`kind=` для выбора языка);
+  при неоднозначном типе возвращает `candidates`.
 - `help` — справка.
 - Прощающий ввод: алиасы (`edit→replace`, `patch→apply`, `revert/restore→undo`,
   `cat→read`), строковые числа, неизвестные аргументы игнорируются с пометкой
@@ -60,6 +62,12 @@ status: stable
 ## Обратная связь
 - JSON-ответ с `changed`, `before/after_sha256`, `bytes_before/after` и
   **unified `diff`** (обрезается по объёму).
+- **Проверка синтаксиса**: после `write`/`replace`/`apply` автоматически
+  запускается `core/syntax_check.py` (поле `syntax`); результат сообщается
+  модели **в `_advice`** как подсказка (✅ OK / ⚠️ строка N — …), а не как
+  требование исправить. Код не исполняется. Тип определяется
+  `core/file_kinds.py` (shebang/magic → расширение/Pygments → сниффер).
+  Поддержаны python/json/yaml/toml/xml (stdlib) и bash/js/ts/html (tree-sitter).
 - Каркас: `_meta`, `_provenance`, `_confidence` (EXACT/DERIVED/HINT),
   `_advice`, `_next_actions`. Совместим с `_compact_tool_message` (поля
   `path`/`changed`); крупные аргументы (`content`/`edits`) в UI скрываются.
