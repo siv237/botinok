@@ -29,6 +29,8 @@ import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.path_utils import resolve_session_path
+
 MAX_BYTES_DEFAULT = 20_000_000
 READ_MAX_BYTES = 200_000
 DIFF_MAX_CHARS = 20_000
@@ -583,11 +585,11 @@ def code_editor(
 
     try:
         root = os.path.abspath(session_path) if session_path else _project_root()
+        resolved = resolve_session_path(path, session_path)
         if dangerous_mode:
-            safe_path = os.path.realpath(path) if os.path.isabs(path) \
-                else os.path.realpath(os.path.join(root, path))
+            safe_path = resolved
         else:
-            safe_path = _safe_path(path, root=root)
+            safe_path = _safe_path(resolved, root=root)
     except Exception as e:
         return _error(action, path, "path_denied", str(e),
                       "Запись/чтение вне папки сессии требует dangerous mode.")

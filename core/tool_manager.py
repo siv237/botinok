@@ -5,6 +5,8 @@ import importlib
 import traceback
 from datetime import datetime
 
+from core.path_utils import resolve_session_path
+
 try:
     from tools import safe_ops as _safe_ops
 except Exception:  # pragma: no cover
@@ -59,20 +61,20 @@ def allowed_in_session(name, args, session_path) -> bool:
         return False
     if name == "code_editor":
         if editor_action_of(args) in DANGEROUS_EDITOR_ACTIONS:
-            return path_within(session_path, args.get("path"))
+            return path_within(session_path, resolve_session_path(args.get("path"), session_path))
         return True
     if name == "file_system":
         action = args.get("action")
         if action in DANGEROUS_FILESYSTEM_ACTIONS:
-            if not path_within(session_path, args.get("path")):
+            if not path_within(session_path, resolve_session_path(args.get("path"), session_path)):
                 return False
             if action in ("move", "copy", "symlink"):
-                return path_within(session_path, args.get("dest"))
+                return path_within(session_path, resolve_session_path(args.get("dest"), session_path))
             return True
         return True
     if name in ("curl", "web"):
         out = args.get("output_path")
-        return True if not out else path_within(session_path, out)
+        return True if not out else path_within(session_path, resolve_session_path(out, session_path))
     # shell_exec всегда опасен и не привязан к папке сессии.
     return False
 
