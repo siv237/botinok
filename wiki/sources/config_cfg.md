@@ -16,6 +16,7 @@ status: stable
 - `defaultmodel = qwen3.5:9b`
 - `defaultcontext = 16384`
 - `requesttimeout = 300`
+- `retrybudgetsec = 86400` · `maxretrybackoffsec = 60` — удержание сессии при сбоях API (ждать сервер до суток; максимальная пауза между попытками)
 - `temperature = 0.1` · `top_p = 0.9` · `top_k = 40` · `repeat_penalty = 1.1` · `num_predict = 4096`
 - (в коде также: `backend` — значение `ollama`/`openai`, `verify_ssl`)
 

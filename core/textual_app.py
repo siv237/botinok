@@ -24,6 +24,7 @@ from datetime import datetime
 from core.text_width import normalize_cells, cell_truncate
 from core.shell_screen import format_shell_command
 from core.file_kinds import syntax_renderable
+import core.net_meter as net_meter
 
 try:
     from core import process_control as _pc
@@ -526,11 +527,12 @@ class BotinokTextualApp(App):
         self.is_proofreader = False
         self.current_prompt = ""
         self.stats_data = {
-            "status": "Ready", "elapsed": 0.0, "no_chunks": 0.0,
+            "status": "Готов к работе", "elapsed": 0.0, "no_chunks": 0.0,
             "ttft": "...", "thinking_tokens": 0, "response_tokens": 0,
             "stream_tool_tokens": 0, "final_tool_tokens": 0, "tps": 0.0,
             "vram": "...", "session_ctx": 0, "session_ctx_max": 8192,
             "last_req_ctx": 0, "last_req_ctx_max": 8192,
+            "server": "ollama", "retries": 0, "retry_wait": 0.0,
         }
         self.active_tools: List[dict] = []
         self._tools_expanded: set = set()  # ключи раскрытых узлов Tools Activity
@@ -539,6 +541,16 @@ class BotinokTextualApp(App):
         self._tools_placeholder: Optional[Static] = None
         self._start_time = time.time()
         self._last_chunk_time = 0.0
+        # Живые метрики текущего потока: когда начался поток, когда пришёл
+        # первый фрагмент и когда сменилась фаза (для таймеров на панели).
+        self._stream_started_at = 0.0
+        self._first_token_at: Optional[float] = None
+        # Активное время потока (сумма интервалов между данными, без пауз):
+        # скорость считается по нему, чтобы простой не занижал среднюю.
+        self._stream_active_time = 0.0
+        self._prev_chunk_at: Optional[float] = None
+        self._phase_status = ""
+        self._phase_started_at = time.time()
         self._stream_content = ""
         self._stream_thinking = ""
         self._last_tool_content = ""
@@ -707,11 +719,17 @@ class BotinokTextualApp(App):
         yield self.input_widget
 
     def on_mount(self) -> None:
+        # Перехват трафика модели включаем до первых запросов (в т.ч. до
+        # фоновой проверки памяти, которая стартует ниже).
+        try:
+            net_meter.install()
+        except Exception:
+            pass
         self.load_history()
         # Заголовки панелей и колонки таблицы инструментов — нативные средства Textual.
         try:
-            self.query_one("#stats").border_title = "Performance"
-            self.query_one("#tools").border_title = "Tools Activity"
+            self.query_one("#stats").border_title = "Производительность"
+            self.query_one("#tools").border_title = "Инструменты"
         except Exception:
             pass
         try:
@@ -745,8 +763,11 @@ class BotinokTextualApp(App):
         self._footer_dirty = True
         self._submit_text(prompt)
 
-    def set_model_info(self, model: str, dangerous: bool = False, proofreader: bool = False):
+    def set_model_info(self, model: str, dangerous: bool = False, proofreader: bool = False,
+                       server: Optional[str] = None):
         self.model_name = model
+        if server:
+            self.stats_data["server"] = server
         self.dangerous_mode = dangerous
         if dangerous:
             # Режим включён вручную — отказ от переключения больше не актуален.
@@ -761,22 +782,93 @@ class BotinokTextualApp(App):
         self.update_stats_display()
 
     def report_chunk(self) -> None:
-        self._last_chunk_time = time.time()
+        now = time.time()
+        # Копим ТОЛЬКО активное время: пауза (долгий разрыв между данными)
+        # в знаменатель скорости не попадает и не занижает среднюю.
+        if self._prev_chunk_at is not None:
+            gap = now - self._prev_chunk_at
+            if 0 < gap <= 1.0:
+                self._stream_active_time += gap
+        self._prev_chunk_at = now
+        self._last_chunk_time = now
+
+    _IDLE_STATUSES = ("Готов к работе", "Ready", "Ответ готов", "Done", "",
+                      "Ошибка связи", "Ошибка сервера", "Обрыв потока")
+
+    def _task_active(self) -> bool:
+        """Идёт ли работа прямо сейчас (для живого таймера и детектора зависаний)."""
+        try:
+            if self.is_streaming:
+                return True
+            if any(t.get("status") == "running" for t in self.active_tools):
+                return True
+            return self.stats_data.get("status", "") not in self._IDLE_STATUSES
+        except Exception:
+            return False
+
+    @staticmethod
+    def _ru_status(status: str, printing: bool = False) -> str:
+        """Технический статус → понятная русская фраза для пользователя."""
+        s = (status or "").strip()
+        table = {
+            "Ready": "Готов к работе",
+            "Готов к работе": "Готов к работе",
+            "Generating...": "Модель печатает ответ…" if printing else "Модель думает…",
+            "Waiting for tool call...": "Жду ответа модели…",
+            "Calling Tools...": "Выполняю команды…",
+            "Processing tool calls...": "Обрабатываю вызовы…",
+            "Resuming generation...": "Продолжаю генерацию…",
+            "Checking Memory...": "Проверяю память…",
+            "Unloading Models...": "Освобождаю память…",
+            "Forced VRAM Cleanup...": "Чищу видеопамять…",
+            "Connecting...": "Подключаюсь к модели…",
+            "Tool-mode parsing...": "Разбираю вызов инструмента…",
+            "Streaming Tool JSON...": "Готовлю команду…",
+            "Done": "Ответ готов",
+            "Chat-only mode (no tools)": "Режим без инструментов",
+            "Connection Error": "Нет связи с сервером",
+            "Ollama Error": "Ошибка сервера",
+            "Stream Error": "Обрыв потока",
+            "Proofreader is thinking...": "Корректор проверяет…",
+        }
+        return table.get(s, s)
+
+    @staticmethod
+    def _fmt_bytes_raw(n) -> str:
+        """Сырой объём в байтах с разрядами: каждый байт двигает число."""
+        try:
+            return f"{int(n):,}".replace(",", " ") + " Б"
+        except Exception:
+            return "0 Б"
+
+    @staticmethod
+    def _fmt_secs(secs) -> str:
+        secs = int(max(0, secs or 0))
+        if secs < 60:
+            return f"{secs} с"
+        if secs < 3600:
+            return f"{secs // 60} мин {secs % 60:02d} с"
+        return f"{secs // 3600} ч {(secs % 3600) // 60:02d} мин"
 
     def _tick_stats(self) -> None:
         now = time.time()
         # Раз в 30 секунд обновляем относительное время у вопросов в Diagnostic Log.
         if now - self._diag_last_refresh > 30:
             self._footer_dirty = True
-        active = ("Generating...", "Connecting...", "Processing tool calls...", "Checking Memory...")
-        if self.stats_data["status"] in active:
-            self.stats_data["elapsed"] = now - self._start_time
-            self._stats_dirty = True
+        # Панель обязана «жить» всегда, пока задача не завершена: таймеры,
+        # скорость и признаки зависания пересчитываются 10 раз в секунду.
+        # Форсируем перерисовку каждый тик (текст маленький, это дёшево).
+        self._stats_dirty = True
+        status = self.stats_data.get("status", "")
+        if status != self._phase_status:
+            self._phase_status = status
+            self._phase_started_at = now
         if self._last_chunk_time > 0:
-            new_val = now - self._last_chunk_time
-            if abs(new_val - self.stats_data["no_chunks"]) > 0.1:
-                self.stats_data["no_chunks"] = new_val
-                self._stats_dirty = True
+            self.stats_data["no_chunks"] = now - self._last_chunk_time
+        # Длительность хода растёт, пока задача активна (стрим, инструменты,
+        # фазы подключения/памяти). В покое таймер стоит на месте.
+        if self._task_active():
+            self.stats_data["elapsed"] = now - self._start_time
         if self.chat:
             # Отслеживаем изменение позиции: если scroll_y уменьшился — это
             # намеренный скролл вверх (колесо/клавиши), сразу отключаем прилипание.
@@ -1269,43 +1361,122 @@ class BotinokTextualApp(App):
         if not self.stats_rows:
             return
         s = self.stats_data
-        active_statuses = [
-            "Generating...", "Waiting for tool call...", "Calling Tools...",
-            "Resuming generation...", "Checking Memory...", "Unloading Models...",
-            "Forced VRAM Cleanup...", "Connecting...", "Tool-mode parsing..."
-        ]
-        activity = ""
-        if s["status"] in active_statuses or "Tool:" in s["status"]:
-            sp = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-            activity = f" [bold magenta]{sp[int(time.time()*5) % len(sp)]}[/bold magenta]"
+        now = time.time()
+        server = s.get("server", "ollama")
+        full = (server != "openai")  # профиль Ollama (расширенный набор метрик)
 
-        L = 14  # ширина колонки подписей (моноширинный шрифт)
+        activity = ""
+        if self._task_active():
+            sp = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            activity = f" [bold magenta]{sp[int(now*5) % len(sp)]}[/bold magenta]"
+
+        # Живые значения текущего потока: считаем по уже пришедшему тексту,
+        # поэтому они растут прямо во время генерации, а не только в конце.
+        thinking_len = len(getattr(self, "_stream_thinking", "") or "")
+        response_len = len(getattr(self, "_stream_content", "") or "")
+        tool_len = len(getattr(self, "_last_tool_content", "") or "")
+        printing = response_len > 0
+
+        if self._first_token_at:
+            first_val = f"{self._first_token_at - self._stream_started_at:.1f} с"
+        elif self._task_active() and self._stream_started_at:
+            first_val = f"Жду… ({self._fmt_secs(now - self._stream_started_at)})"
+        else:
+            first_val = "—"
+
+        speed_val = 0.0
+        if self._stream_active_time > 0:
+            speed_val = (thinking_len + response_len + tool_len) / max(self._stream_active_time, 0.1)
+
+        # Молчание модели: сколько секунд нет новых данных.
+        if self._last_chunk_time > 0:
+            silence = now - self._last_chunk_time
+        elif self._task_active() and self._stream_started_at:
+            silence = now - self._stream_started_at
+        else:
+            silence = 0.0
+        if silence >= 30:
+            sil_cs, sil_word = "red", "долго молчит"
+        elif silence >= 10:
+            sil_cs, sil_word = "yellow", "подозрительно"
+        else:
+            sil_cs, sil_word = "green", "норма"
+
+        L = 18  # ширина колонки подписей (моноширинный шрифт)
         def row(label: str, value: str) -> str:
             return f"[cyan]{label:<{L}}[/cyan]{value}"
+
+        status_ru = self._ru_status(s.get("status", ""), printing=printing)
         lines = [
-            row("Status:", f"[bold]{s['status']}[/bold]{activity}"),
-            row("Elapsed:", f"{s['elapsed']:.1f}s"),
-            row("No chunks:", f"{s['no_chunks']:.1f}s"),
-            row("TTFT:", f"[bold yellow]{s['ttft']}[/bold yellow]"),
-            row("Thinking:", f"[bold yellow]{s['thinking_tokens']}[/bold yellow]"),
-            row("Response:", f"[bold green]{s['response_tokens']}[/bold green]"),
-            row("Stream Tool:", f"[bold magenta]{s['stream_tool_tokens']}[/bold magenta]"),
-            row("Final Tool:", f"[bold magenta]{s['final_tool_tokens']}[/bold magenta]"),
-            row("TPS:", f"[bold green]{s['tps']:.2f}[/bold green]"),
-            row("VRAM:", f"[bold yellow]{normalize_cells(s['vram'])}[/bold yellow]"),
+            row("Сервер:", "OpenAI-совместимый" if not full else "Ollama (локальный)"),
+            row("Что сейчас:", f"[bold]{status_ru}[/bold]{activity}"),
+            row("Всего прошло:", self._fmt_secs(s.get("elapsed", 0))),
+            row("Этап:", self._fmt_secs(now - self._phase_started_at)),
             "",
+            row("Размышляет:", f"[bold yellow]{thinking_len} Б[/bold yellow]"),
+            row("Написал ответ:", f"[bold green]{response_len} Б[/bold green]"),
         ]
+        if full:
+            lines.append(row("Готовит команду:", f"[bold magenta]{tool_len} Б[/bold magenta]"))
+        lines += [
+            row("Скорость:", f"[bold green]{speed_val:.1f} Б/с[/bold green]"),
+            row("Первый ответ:", f"[bold yellow]{first_val}[/bold yellow]"),
+            row("Модель молчит:", f"[{sil_cs}]{silence:.1f} с — {sil_word}[/{sil_cs}]"),
+        ]
+
+        # Работающий инструмент: растущий счётчик времени (детектор зависаний).
+        running_tools = [t for t in self.active_tools if t.get("status") == "running"]
+        tool_hang = False
+        if running_tools:
+            t = max(running_tools, key=lambda x: now - x.get("start_time", now))
+            tdur = now - t.get("start_time", now)
+            if tdur >= 300:
+                tcs, tword = "red", "слишком долго"
+            elif tdur >= 60:
+                tcs, tword = "yellow", "долго"
+            else:
+                tcs, tword = "green", "работает"
+            tool_hang = tdur >= 300
+            lines.append(row("Инструмент:", f"[{tcs}]{normalize_cells(t.get('name', ''))}, "
+                                            f"{self._fmt_secs(tdur)} ({tword})[/{tcs}]"))
+        if s.get("retries", 0) or s.get("retry_wait", 0):
+            lines.append(row("Ждём сервер:", f"[bold red]{int(s.get('retry_wait', 0))} с[/bold red]"
+                                             f"   (попыток: {s.get('retries', 0)})"))
+        lines.append("")
+
+        # Видеопамять — только у Ollama; OpenAI её не сообщает, поэтому строку
+        # не показываем, чтобы не вводить в заблуждение.
+        if full:
+            vram = normalize_cells(s.get("vram", "..."))
+            if vram and vram not in ("No models loaded", "..."):
+                lines.append(row("Видеопамять:", f"[bold yellow]{vram}[/bold yellow]"))
+            else:
+                lines.append(row("Видеопамять:", "[dim]нет данных[/dim]"))
+
         ctx_max = s.get("session_ctx_max", 8192)
         ctx_used = s.get("session_ctx", 0)
         ctx_pct = (ctx_used / ctx_max * 100) if ctx_max else 0
         cs = "green" if ctx_pct < 70 else "yellow" if ctx_pct < 90 else "red"
-        lines.append(row("SessionCtx:", f"[{cs}]{ctx_used}/{ctx_max} ({ctx_pct:.1f}%)[/{cs}]"))
-        lr_ctx = s.get("last_req_ctx", 0)
-        lr_pct = (lr_ctx / ctx_max * 100) if ctx_max else 0
-        lr_cs = "green" if lr_pct < 70 else "yellow" if lr_pct < 90 else "red"
-        lines.append(row("LastReqCtx:", f"[{lr_cs}]{lr_ctx}/{ctx_max} ({lr_pct:.1f}%)[/{lr_cs}]"))
+        lines.append(row("Диалог занял:", f"[{cs}]{ctx_used}/{ctx_max} ({ctx_pct:.1f}%)[/{cs}]"))
+        lines.append(row("Объём запроса:", f"{s.get('last_req_ctx', 0)} токенов"))
         lines.append("")
-        lines.append("[bold cyan]Context Window Fill:[/bold cyan]")
+
+        # Сырой обмен с моделью: «АПИ отдано» / «АПИ принято» (за запрос и всего).
+        snap = net_meter.snapshot()
+        rate = net_meter.recv_rate()
+        lines.append(row("АПИ отдано:", self._fmt_bytes_raw(snap['sent_turn'])))
+        lines.append(row("АПИ принято:", self._fmt_bytes_raw(snap['recv_turn'])))
+        lines.append(row("АПИ отдано всего:", self._fmt_bytes_raw(snap['sent_total'])))
+        lines.append(row("АПИ принято всего:", self._fmt_bytes_raw(snap['recv_total'])))
+        lines.append(row("Скорость приёма:", f"{int(rate)} Б/с"))
+        lines.append(row("Обращений:", f"{snap['req_turn']}   (всего {snap['req_total']})"))
+        lines.append("")
+        lines.append("[bold cyan]Заполнено памяти диалога:[/bold cyan]")
+
+        if silence >= 30 or tool_hang:
+            lines.append("[bold red]⚠ Похоже, зависло. Нажмите Esc, чтобы остановить "
+                         "и продолжить с места.[/bold red]")
+
         self.stats_rows.update("\n".join(lines))
         if self.ctx_bar:
             try:
@@ -1620,6 +1791,10 @@ class BotinokTextualApp(App):
     def start_assistant_turn(self) -> None:
         self._flush_tool_spoilers()
         self._last_chunk_time = 0.0
+        self._stream_started_at = time.time()
+        self._first_token_at = None
+        self._stream_active_time = 0.0
+        self._prev_chunk_at = None
         self.stream_static = Static("", markup=True)
         self.chat.mount(self.stream_static)
         self._stream_content = ""
@@ -1743,6 +1918,8 @@ class BotinokTextualApp(App):
 
     def append_assistant_chunk(self, content: str = "", thinking: str = "",
                                 tool_stream_json: str = "") -> None:
+        if (content or thinking) and self._first_token_at is None:
+            self._first_token_at = time.time()
         if thinking:
             self._stream_thinking += thinking
         if content:
@@ -1824,20 +2001,10 @@ class BotinokTextualApp(App):
         self._tools_dirty = True
         self.update_stats_display()
 
-    def update_stats(self, status: str, elapsed: float, no_chunks: float, ttft,
-                     thinking_tokens: int, response_tokens: int, stream_tool_tokens: int,
-                     final_tool_tokens: int, tps: float, vram: str,
-                     session_ctx: int, session_ctx_max: int,
-                     last_req_ctx: int, last_req_ctx_max: int) -> None:
-        self.stats_data = {
-            "status": status, "elapsed": elapsed, "no_chunks": no_chunks,
-            "ttft": ttft, "thinking_tokens": thinking_tokens,
-            "response_tokens": response_tokens,
-            "stream_tool_tokens": stream_tool_tokens,
-            "final_tool_tokens": final_tool_tokens, "tps": tps, "vram": vram,
-            "session_ctx": session_ctx, "session_ctx_max": session_ctx_max,
-            "last_req_ctx": last_req_ctx, "last_req_ctx_max": last_req_ctx_max,
-        }
+    def update_stats(self, **data) -> None:
+        # Принимаем весь набор полей из stats_data плюс любые дополнения
+        # (server, retries и т.п.) без жёсткой сигнатуры.
+        self.stats_data.update(data)
         self._stats_dirty = True
         self.update_stats_display()
 
@@ -1982,5 +2149,17 @@ class BotinokTextualApp(App):
         if not self.on_submit:
             return
         self._start_time = time.time()
+        self._phase_started_at = time.time()
+        self._stream_started_at = 0.0
+        self._first_token_at = None
+        self._stream_active_time = 0.0
+        self._prev_chunk_at = None
+        # Счётчики «за текущий запрос» обнуляем; сессионные остаются.
+        self.stats_data["retries"] = 0
+        self.stats_data["retry_wait"] = 0.0
+        try:
+            net_meter.reset_turn()
+        except Exception:
+            pass
         self.append_user_message(user_input)
         self.on_submit(user_input)

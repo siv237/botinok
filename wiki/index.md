@@ -16,6 +16,7 @@
 - [entities/tool_manager.md](entities/tool_manager.md) — `core/tool_manager.py`, реестр и загрузка инструментов
 - [entities/botinok_cli.md](entities/botinok_cli.md) — `botinok.py` / `botinok`, CLI, флаги, режимы
 - [entities/textual_ui.md](entities/textual_ui.md) — Textual TUI (`textual_app.py`, `textual_integration.py`, `textual_history_viewer.py`)
+- [entities/net_meter.md](entities/net_meter.md) — `core/net_meter.py`: сырой учёт трафика модели («АПИ отдано/принято»)
 - [entities/shell_session.md](entities/shell_session.md) — `core/shell_session.py`: PTY-сессия команды и реестры
 - [entities/shell_screen.md](entities/shell_screen.md) — `core/shell_screen.py`: встроенный терминал в TUI (свернуть/закрыть)
 - [entities/session_directory.md](entities/session_directory.md) — структура директории сессии
@@ -53,7 +54,7 @@
 - [concepts/dangerous_mode.md](concepts/dangerous_mode.md) — безопасность: dangerous mode и подтверждения
 - [concepts/web_kit.md](concepts/web_kit.md) — единый веб-кит: один добыватель, харнес подсказок, контекстная дисциплина
 - [concepts/edit_kit.md](concepts/edit_kit.md) — edit-кит: редактор с каркасом-советником, fuzzy, атомарность, чекпоинты
-- [concepts/streaming_tui.md](concepts/streaming_tui.md) — стриминг, TTFT/TPS, VRAM, плавность UI
+- [concepts/streaming_tui.md](concepts/streaming_tui.md) — стриминг, панель «Производительность» (живые метрики, профили сервера, зависания, трафик), плавность UI
 - [concepts/terminal_unicode_width.md](concepts/terminal_unicode_width.md) — ширина Unicode в терминале: почему «плывут» панели и как лечим
 - [concepts/embedded_terminal.md](concepts/embedded_terminal.md) — встроенный терминал: PTY-сессии, свернуть/вернуть, общий доступ человека и агента
 - [concepts/skills_system.md](concepts/skills_system.md) — система навыков (personal/project, ClawHub)
