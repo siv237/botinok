@@ -32,6 +32,7 @@ from core.tool_manager import (
     DANGEROUS_EDITOR_ACTIONS,
     DANGEROUS_SHELL_ACTIONS,
 )
+from core.path_utils import resolve_session_path
 from core.openai_compat import is_openai_backend, chat_stream_request, chat_once
 from core.textual_app import BotinokTextualApp
 
@@ -1243,9 +1244,8 @@ def ask_ollama_textual(
                 effective_session_path = session_path
                 if tool_name == "code_editor" and isinstance(tool_args, dict):
                     raw_path = tool_args.get("path", "")
-                    if raw_path and not os.path.isabs(raw_path):
-                        project_dir = os.path.join(session_path, "project")
-                        tool_args["path"] = os.path.realpath(os.path.join(project_dir, raw_path))
+                    if raw_path:
+                        tool_args["path"] = resolve_session_path(raw_path, session_path)
 
                 action = tool_args.get("action") if isinstance(tool_args, dict) else None
                 # Опасные действия: shell_exec (run/send/...), запись code_editor,

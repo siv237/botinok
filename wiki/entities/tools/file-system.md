@@ -42,7 +42,10 @@ status: stable
 ## Безопасность
 Проверка пути на выход за пределы сессии (`_is_within_session`); мутации внутри
 сессии разрешены без dangerous mode; вне — гейт в `ToolManager.call_tool` и
-запрос переключения/подтверждения в TUI. → `concepts/dangerous_mode.md`, `entities/tool_manager.md`
+запрос переключения/подтверждения в TUI. Относительные `path`/`dest`
+резолвятся в `<session>/project/` через `core.path_utils.resolve_session_path`
+(ведущий `project/` не дублируется); гейт `allowed_in_session` использует тот же
+резолвер. → `concepts/dangerous_mode.md`, `entities/tool_manager.md`
 
 ## Связи
 Зарегистрирован в `ToolManager._tool_registry` как `file_system`. Журнал вызовов — `tools.log` сессии. → `entities/session_directory.md`

@@ -68,9 +68,11 @@ status: stable
 - `read` — всегда; мутации (`write`/`replace`/`apply`/`undo`) внутри
   `session_path` — без dangerous mode; **вне сессии** — требуется dangerous mode.
   → `concepts/dangerous_mode.md`
-- Путь резолвится `_safe_path` (`realpath`, ограничение корнем); при
-  `dangerous_mode=True` ограничение снимается. Политика «внутри/вне» —
-  `allowed_in_session` (`core/tool_manager.py`).
+- Путь резолвится `_safe_path` (`realpath`, ограничение корнем); относительный
+  путь приводится к `<session>/project/` через `core.path_utils.resolve_session_path`
+  (ведущий `project/` не дублируется). При `dangerous_mode=True` ограничение
+  снимается. Политика «внутри/вне» — `allowed_in_session`
+  (`core/tool_manager.py`).
 
 ## Тесты
 `tests/test_code_editor.py` — write/read, exact/fuzzy/ambiguous, apply-атомарность,

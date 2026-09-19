@@ -637,3 +637,16 @@ TypeError: execute() got an unexpected keyword argument 'resume'`.
 - Схема/докстринг обновлены; вывод grep — с числом совпадений и подсказкой.
 - Тест `tests/test_file_system_grep.py` (16 проверок), регрессии зелёные.
 - Страницы: `entities/tools/file-system.md`.
+
+## [2026-09-19] fix | резолв путей сессии: устранена ловушка project/project
+Повод: самотест 01 в сессии `20260919_145122` — модель передала относительный
+`project/notes.txt`, TUI приклеил `<session>/project/` и получился
+`project/project/notes.txt` (3 потерянных вызова, удаление вложенного каталога).
+- Введён `core/path_utils.resolve_session_path`: относительный путь →
+  `<session>/project/`, ведущий `project/` не дублируется; абсолютный — realpath.
+- Применён в TUI (`core/textual_integration.py`), в `code_editor` и `file_system`.
+- Гейт `allowed_in_session` резолвит `path`/`dest`/`output_path` тем же
+  резолвером (относительные in-session мутации больше не блокируются).
+- Тест `tests/test_path_resolution.py` (20 проверок); регрессии зелёные.
+- Страницы: `entities/tools/code-editor.md`, `entities/tools/file-system.md`,
+  `tests/selfcheck/README.md`.

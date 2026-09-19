@@ -12,6 +12,8 @@ import time
 from datetime import datetime
 from typing import List, Optional, Dict, Union, Tuple
 
+from core.path_utils import resolve_session_path
+
 try:
     from tools import safe_ops as _safe
 except Exception:  # pragma: no cover
@@ -62,6 +64,9 @@ def file_system_tool(
     - symlink: Создание символической ссылки
     - touch: Создание пустого файла или обновление времени модификации
     """
+    path = resolve_session_path(path, session_path) if path else path
+    if dest:
+        dest = resolve_session_path(dest, session_path)
     try:
         if action == "help":
             return _safe.catalog() if _safe else "Справка недоступна"
