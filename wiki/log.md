@@ -650,3 +650,19 @@ TypeError: execute() got an unexpected keyword argument 'resume'`.
 - Тест `tests/test_path_resolution.py` (20 проверок); регрессии зелёные.
 - Страницы: `entities/tools/code-editor.md`, `entities/tools/file-system.md`,
   `tests/selfcheck/README.md`.
+
+## [2026-09-19] feat | code_editor: проверка синтаксиса + реестр типов файлов
+Мотив: в safe-режиме модель не может запускать код и не получала обратной связи
+о корректности созданного кода (задачи 10/13 самотестов).
+- `core/file_kinds.py` — каскад определения типа: shebang/magic (EXACT) →
+  расширение (`mimetypes`+Pygments, DERIVED) → сниффер по содержимому (HINT);
+  возвращает ранжированных кандидатов (при неоднозначности — выбор `kind=`).
+- `core/syntax_check.py` — проверка без запуска кода: python/json/toml/yaml/xml
+  через stdlib, bash/js/ts/html через tree-sitter (`tree-sitter-language-pack`).
+- `code_editor`: action=check (read-only) + **автопроверка после
+  write/replace/apply**; результат в поле `syntax` и в `_advice`
+  (✅ OK / ⚠️ строка N) — информационно, без требования исправлять.
+- Зависимость `tree-sitter-language-pack>=1.20` в requirements.txt (install.sh и
+  апдейтер botinok.py подхватят при обновлении).
+- Тест `tests/test_syntax_check.py`; регрессии зелёные.
+- Страницы: `entities/tools/code-editor.md`, `index.md`.

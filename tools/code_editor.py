@@ -30,6 +30,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.path_utils import resolve_session_path
+from core.syntax_check import check_syntax, SUPPORTED_KINDS
 
 MAX_BYTES_DEFAULT = 20_000_000
 READ_MAX_BYTES = 200_000
@@ -50,9 +51,10 @@ EDITOR_ACTION_ALIASES = {
     "patch": "apply",
     "edit": "replace", "str_replace": "replace",
     "revert": "undo", "restore": "undo",
+    "lint": "check", "syntax": "check", "validate": "check",
     "?": "help", "actions": "help",
 }
-EDITOR_ACTIONS = ("read", "write", "replace", "apply", "undo", "help")
+EDITOR_ACTIONS = ("read", "write", "replace", "apply", "undo", "check", "help")
 
 _KNOWN_STATE: Dict[str, str] = {}
 _LAST_CHECKPOINT: Dict[str, str] = {}
@@ -458,6 +460,13 @@ def _commit(root: str, safe_path: str, action: str, before: bytes, before_sha: O
     return data_out
 
 
+def _syntax_diag(path: str) -> Dict[str, Any]:
+    try:
+        return check_syntax(path=path)
+    except Exception as e:
+        return {"status": "unavailable", "reason": str(e), "errors": []}
+
+
 def _render_read(path: str, body: str, total_lines: int, start_line: int, end_line: int,
                  sha: str, encoding: str, eol_label: str, truncated: bool, cont_offset: int) -> str:
     header = (f"--- {path}\n"
@@ -477,12 +486,17 @@ def _next_actions(action: str, path: str, data: Dict) -> List[str]:
     if action == "read":
         return [f'code_editor action=replace path={p} old_text="…" new_text="…"',
                 f'code_editor action=apply path={p} edits=[{{"old_text":"…","new_text":"…"}}]',
-                f'code_editor action=help']
+                f'code_editor action=check path={p}',
+                'code_editor action=help']
     if action in ("write", "replace", "apply", "undo"):
-        out = [f'code_editor action=read path={p}']
+        out = [f'code_editor action=check path={p}',
+               f'code_editor action=read path={p}']
         if data.get("checkpoint"):
             out.append(f'code_editor action=undo path={p}')
         return out
+    if action == "check":
+        return [f'code_editor action=check path={p} kind=<candidate>',
+                f'code_editor action=read path={p}']
     return ['code_editor action=help']
 
 
@@ -493,12 +507,40 @@ def _advise(action: str, data: Dict) -> str:
         return "Для правки используй replace (один фрагмент) или apply (несколько за раз, атомарно)."
     if action in ("write", "replace", "apply"):
         if data.get("changed"):
+            diag = data.get("syntax") or {}
+            status = diag.get("status")
+            kind = diag.get("kind")
+            if status == "error":
+                err = (diag.get("errors") or [{}])[0]
+                note = (f" ⚠️ Синтаксис {kind}: строка {err.get('line')} — {err.get('message')} "
+                        f"(подсказка; правка применена).")
+            elif status == "ok":
+                note = f" ✅ Синтаксис {kind}: OK."
+            elif status == "unsupported":
+                note = f" (проверка синтаксиса для {kind or 'этого типа'} не поддерживается.)"
+            else:
+                note = ""
             extra = " Перевод строк был смешан и нормализован." if data.get("eol_normalized") else ""
-            return "Готово. Проверь diff; при необходимости откати через undo или продолжи replace/apply." + extra
+            return ("Готово. Проверь diff; при необходимости откати через undo или продолжи "
+                    "replace/apply." + extra + note)
         return "Изменений нет: содержимое совпало с текущим."
+    if action == "check":
+        status = (data.get("syntax") or {}).get("status")
+        if status == "error":
+            err = (data.get("syntax") or {}).get("errors", [{}])[0]
+            return f"Синтаксис сломан: строка {err.get('line')} — {err.get('message')} (информационно)."
+        if status == "ok":
+            return "Синтаксис корректен (информационно)."
+        if status == "ambiguous":
+            return "Тип файла неоднозначен — посмотри candidates и при необходимости повтори с kind=<вариант>."
+        if status == "unsupported":
+            return "Для этого типа проверка синтаксиса не поддерживается (см. supported)."
+        if status == "skipped":
+            return "Файл не текстовый — проверка синтаксиса пропущена."
+        return "Проверка не выполнена."
     if action == "undo":
         return "Чекпоинт восстановлен. Перечитай файл, если продолжишь правки."
-    return "Действия: read, write, replace, apply, undo, help."
+    return "Действия: read, write, replace, apply, undo, check, help."
 
 
 def _result(action: str, path: str, data: Dict, provenance: str, advice: str,
@@ -539,10 +581,15 @@ def _help_text() -> str:
         "      — несколько замен за вызов, атомарно (всё или ничего).\n"
         "  code_editor action=undo path=… [checkpoint=…] [force=true]\n"
         "      — откат последней правки из чекпоинта.\n"
+        "  code_editor action=check path=… [kind=…]\n"
+        "      — проверка синтаксиса без запуска кода (python/json/yaml/toml/xml/bash/js/ts/html).\n"
         "  code_editor action=help — эта справка.\n"
         "\n"
         "Особенности:\n"
         "  • diff изменений возвращается в ответе — проверяй, что изменил именно то;\n"
+        "  • после write/replace/apply синтаксис проверяется автоматически: результат в поле syntax\n"
+        "    и в _advice (это подсказка — при желании исправь, но правка уже применена);\n"
+        "  • при неоднозначном типе файла вернутся candidates — выбери kind=;\n"
         "  • устаревший файл (изменён вне сессии) отклоняется с подсказкой перечитать;\n"
         "  • перед каждой мутацией создаётся чекпоинт (path в ответе, откат — undo);\n"
         "  • крупные файлы читай пагинированно (offset/limit).\n"
@@ -565,6 +612,7 @@ def code_editor(
     line_numbers: bool = False,
     checkpoint: Optional[str] = None,
     force: bool = False,
+    kind: Optional[str] = None,
     session_path: Optional[str] = None,
     dangerous_mode: bool = False,
     **kwargs: Any,
@@ -608,6 +656,9 @@ def code_editor(
 
         if action == "undo":
             return _do_undo(safe_path, path, root, checkpoint, force, ignored)
+
+        if action == "check":
+            return _do_check(safe_path, path, kind, ignored)
 
         exists = os.path.exists(safe_path)
         if not exists and not create and action != "write":
@@ -654,6 +705,7 @@ def code_editor(
             data_out = _commit(root, safe_path, action, before, before_sha,
                                before_text, new_text_full, data, mixed,
                                {"ignored_args": ignored})
+            data_out["syntax"] = _syntax_diag(safe_path)
             return _result(action, safe_path, data_out, "exact",
                            _advise(action, data_out), _next_actions(action, safe_path, data_out))
 
@@ -715,6 +767,7 @@ def code_editor(
             data_out = _commit(root, safe_path, action, before, before_sha,
                                before_text, working, data, mixed,
                                {"applied": applied, "ignored_args": ignored})
+            data_out["syntax"] = _syntax_diag(safe_path)
             return _result(action, safe_path, data_out, "exact",
                            _advise(action, data_out), _next_actions(action, safe_path, data_out))
 
@@ -778,6 +831,26 @@ def _do_read(safe_path: str, path: str, offset: int, limit: Any,
     if ignored:
         result += f"\n(проигнорированы неизвестные аргументы: {', '.join(ignored)})"
     return result
+
+
+def _do_check(safe_path: str, path: str, kind: Optional[str], ignored: List[str]) -> str:
+    if not os.path.isfile(safe_path):
+        return _error("check", path, "not_found", f"файл не найден: {path}",
+                      "Проверь путь через file_system action=list.")
+    try:
+        res = check_syntax(path=safe_path, kind=kind)
+    except Exception as e:
+        res = {"status": "unavailable", "reason": str(e), "errors": []}
+    data_out = {
+        "ok": res.get("status") != "error",
+        "action": "check",
+        "path": safe_path,
+        "syntax": res,
+        "supported": list(SUPPORTED_KINDS),
+        "ignored_args": ignored,
+    }
+    return _result("check", safe_path, data_out, "exact",
+                   _advise("check", data_out), _next_actions("check", safe_path, data_out))
 
 
 def _do_undo(safe_path: str, path: str, root: str, checkpoint: Optional[str],

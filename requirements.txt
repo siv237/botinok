@@ -5,3 +5,4 @@ selectolax>=0.3.21
 httpx>=0.27.0
 textual
 shfmt-py
+tree-sitter-language-pack>=1.20

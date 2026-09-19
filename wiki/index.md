@@ -29,7 +29,7 @@
 | safe_ops | [entities/safe_ops.md](entities/safe_ops.md) | Каталог безопасных read-only операций + подсказки эквивалента |
 | process_control | [entities/process_control.md](entities/process_control.md) | Реестр процессов и мгновенная остановка по Esc (killpg дерева) |
 | file_system | [entities/tools/file-system.md](entities/tools/file-system.md) | FS: навигация, поиск, grep, инспекция; мутации — dangerous |
-| code_editor | [entities/tools/code-editor.md](entities/tools/code-editor.md) | Edit-кит: read/write/replace/apply/undo, fuzzy, diff, чекпоинты; запись вне сессии — dangerous |
+| code_editor | [entities/tools/code-editor.md](entities/tools/code-editor.md) | Edit-кит: read/write/replace/apply/undo/check, fuzzy, diff, синтаксис-проверка, чекпоинты; запись вне сессии — dangerous |
 | shell_exec | [entities/tools/shell-exec.md](entities/tools/shell-exec.md) | PTY-сессия команд (run/read/search/send/wait/kill), dangerous, встроенный терминал |
 | web_search | [entities/tools/web-search.md](entities/tools/web-search.md) | legacy-обёртка web (поиск) |
 | open_url | [entities/tools/open-url.md](entities/tools/open-url.md) | legacy-обёртка web (текст страницы) |

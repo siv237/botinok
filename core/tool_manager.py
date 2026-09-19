@@ -251,14 +251,16 @@ class ToolManager:
                                     "возвращает sha256 и мету; action=write — полная запись (content, атомарно, сохраняет кодировку/EOL); "
                                     "action=replace — одна замена (old_text→new_text, replace_all); "
                                     "action=apply — несколько замен за вызов атомарно (edits=[{old_text,new_text}]); "
-                                    "action=undo — откат последней правки из чекпоинта; action=help — справка. "
+                                    "action=undo — откат последней правки из чекпоинта; "
+                                    "action=check — проверка синтаксиса без запуска кода (python/json/yaml/toml/xml/bash/js/ts/html), "
+                                    "при неоднозначном типе возвращает candidates и kind=; action=help — справка. "
                                     "Инструмент прощает дрейф отступов и переводов строк (fuzzy) и сообщает ближайшее совпадение, "
-                                    "если точного нет. Возвращает unified diff; устаревший файл (изменён вне сессии) отклоняется. "
-                                    "Запись вне папки сессии требует dangerous mode."),
+                                    "если точного нет. Возвращает unified diff; после правок автоматически проверяет синтаксис (поле syntax). "
+                                    "Устаревший файл (изменён вне сессии) отклоняется. Запись вне папки сессии требует dangerous mode."),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "action": {"type": "string", "enum": ["read", "write", "replace", "apply", "undo", "help"], "description": "Действие"},
+                            "action": {"type": "string", "enum": ["read", "write", "replace", "apply", "undo", "check", "help"], "description": "Действие"},
                             "path": {"type": "string", "description": "Путь к файлу (в сессии относительный резолвится в session_path/project/)"},
                             "content": {"type": "string", "description": "Содержимое для action=write"},
                             "old_text": {"type": "string", "description": "Текст для замены (action=replace)"},
@@ -271,7 +273,8 @@ class ToolManager:
                             "limit": {"type": "integer", "description": "Сколько строк читать (action=read; 0 = все)"},
                             "line_numbers": {"type": "boolean", "description": "Показывать номера строк при чтении"},
                             "checkpoint": {"type": "string", "description": "Путь чекпоинта для action=undo (иначе последний)"},
-                            "force": {"type": "boolean", "description": "Для action=undo: откатить даже если файл изменился после правки"}
+                            "force": {"type": "boolean", "description": "Для action=undo: откатить даже если файл изменился после правки"},
+                            "kind": {"type": "string", "description": "Для action=check: язык/тип вручную (python/json/yaml/toml/xml/bash/javascript/typescript/html), если автоопределение неоднозначно"}
                         },
                         "required": ["action", "path"]
                     }
