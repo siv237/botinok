@@ -21,10 +21,16 @@ import re
 import time
 import threading
 from datetime import datetime
-from core.text_width import normalize_cells, cell_truncate
+from core.text_width import normalize_cells, cell_truncate, cell_width
 from core.shell_screen import format_shell_command
 from core.file_kinds import syntax_renderable
 import core.net_meter as net_meter
+
+# Ленивая загрузка истории: сразу рисуем только хвост сессии, остальное — по
+# кнопке/прокрутке. На длинной сессии полная отрисовка — десятки секунд и
+# подвешивает UI (тысячи виджетов x CSS Textual).
+HISTORY_INITIAL_ENTRIES = 200
+HISTORY_BATCH_ENTRIES = 200
 
 try:
     from core import process_control as _pc
@@ -374,7 +380,7 @@ class Composer(TextArea):
             # Composer держит фокус и не даёт клавише всплыть до App.on_key,
             # поэтому останавливаем сессию прямо здесь.
             app = self.app
-            if getattr(app, "is_streaming", False):
+            if app.turn_in_progress():
                 try:
                     app.request_stop()
                     app._log_stop_once()
@@ -418,10 +424,13 @@ class BotinokTextualApp(App):
     #auto_flag.on { display: block; }
     #main { height: 1fr; }
     #content { width: 2fr; height: 1fr; padding: 0; }
-    #diag { height: auto; width: 1fr; background: transparent; border: none; padding: 0; }
+    #diag { height: auto; max-height: 16; width: 1fr; background: transparent; border: none; padding: 0; }
     #diag CollapsibleTitle { width: 1fr; padding: 0; color: cyan; }
-    #diag_scroll { max-height: 14; }
+    #diag_scroll { height: auto; max-height: 14; }
     #diag_list { height: auto; }
+    #diag_list .diag_row { height: auto; width: 1fr; }
+    #diag_list .diag_prefix { width: auto; height: auto; }
+    #diag_list .diag_text { width: 1fr; height: auto; }
     #diag_list Collapsible { width: 1fr; height: auto; background: transparent;
                              border: none; padding: 0; }
     #diag_list CollapsibleTitle { padding: 0; width: 1fr; }
@@ -464,7 +473,11 @@ class BotinokTextualApp(App):
     #inline_shell_input { height: 3; width: 1fr; }
     #inline_shell_buttons { height: 3; width: auto; align: right middle; }
     #inline_shell_buttons Button { min-width: 12; height: 3; margin: 0 1; }
-    #chat { height: 1fr; border: solid green; padding: 0 1; overflow-y: auto; }
+    #chat { height: 1fr; min-height: 3; border: solid green; padding: 0 1; overflow-y: auto; }
+    #load_older { width: 1fr; height: 1; min-height: 1; margin: 0; padding: 0 1;
+                  background: transparent; border: none; color: cyan; }
+    #load_older:hover { background: $primary 30%; }
+    .history_batch { height: auto; width: 1fr; }
     #right { width: 1fr; }
     #shells { height: auto; max-height: 50%; display: none; border: solid cyan; padding: 0; }
     #shells.has-items { display: block; }
@@ -478,9 +491,9 @@ class BotinokTextualApp(App):
     #shells Static.stamp { width: auto; height: 1; padding: 0 1; color: $text-muted; }
     #shells Button.kill { width: 3; min-width: 3; text-align: center;
                           content-align: center middle; }
-    #stats { height: 1fr; border: round yellow; border-title-color: yellow;
+    #stats { height: auto; border: round yellow; border-title-color: yellow;
              border-title-style: bold; padding: 0 1; }
-    #stats_rows { height: 1fr; }
+    #stats_rows { height: auto; }
     #ctx_bar { height: 1; }
     #ctx_bar.low .bar--bar { color: green; }
     #ctx_bar.mid .bar--bar { color: yellow; }
@@ -494,6 +507,15 @@ class BotinokTextualApp(App):
     #footer { height: 3; border: round cyan; border-title-color: cyan; padding: 0 1; }
     Input { height: 3; }
     #input { height: 3; min-height: 3; max-height: 10; }
+    /* Очередь «мыслей»: висит внизу над полем ввода, у каждой — крестик отмены. */
+    #thought_queue { height: auto; max-height: 8; display: none;
+                     background: $surface; border-top: solid $panel; padding: 0 1; }
+    #thought_queue.-visible { display: block; }
+    .thought_chip { height: 1; }
+    .thought_text { width: 1fr; color: $text-muted; }
+    .thought_del { width: 3; min-width: 3; height: 1; border: none; padding: 0;
+                   background: transparent; color: red; }
+    .thought_del:hover { background: $error 30%; }
     Collapsible { width: 1fr; height: auto; background: transparent; border: none; padding: 0; }
     CollapsibleTitle { color: $text-muted; padding: 0 1; width: 1fr; }
     """
@@ -549,6 +571,14 @@ class BotinokTextualApp(App):
         # скорость считается по нему, чтобы простой не занижал среднюю.
         self._stream_active_time = 0.0
         self._prev_chunk_at: Optional[float] = None
+        self._stream_ui_last = 0.0
+        self._stats_lines = -1
+        self._render_target = None
+        self._history_all: list = []
+        self._history_from = 0
+        self._load_older_button = None
+        self._loading_older = False
+        self._loading_widget = None
         self._phase_status = ""
         self._phase_started_at = time.time()
         self._stream_content = ""
@@ -565,6 +595,7 @@ class BotinokTextualApp(App):
         self._prompt_history: List[str] = []
         self._history_idx = 0
         self._confirmation_event: Optional[threading.Event] = None
+        self._confirmation_started_at = 0.0
         self._confirmation_result: bool = False
         self._confirmation_kind: str = "confirm"
         # Автосогласие на опасные действия до конца сессии (галочка в окне
@@ -607,9 +638,13 @@ class BotinokTextualApp(App):
         preview = text[:max_preview].replace("\n", " ")
         if len(text) > max_preview:
             preview += "..."
-        return f"{label}: {preview}  {ts}"
+        # Заголовок Collapsible парсится как Rich-markup, поэтому экранируем
+        # '[' — иначе JSON-массив в аргументах (edits:[{...]) роняет рендер
+        # истории с MarkupError.
+        return f"{self._rich_escape(label)}: {self._rich_escape(preview)}  {ts}"
 
-    def _mount_spoiler(self, title: str, *content_widgets, collapsed: bool = False, before=None):
+    def _mount_spoiler(self, title: str, *content_widgets, collapsed: bool = False,
+                       before=None, target=None):
         if self._last_open_spoiler:
             try:
                 self._last_open_spoiler.collapsed = True
@@ -617,15 +652,17 @@ class BotinokTextualApp(App):
                 pass
         c = Collapsible(*content_widgets, title=title, collapsed=collapsed, collapsed_symbol="", expanded_symbol="")
         self._last_open_spoiler = c
+        dst = target if target is not None else (self._render_target or self.chat)
         if before is not None:
             try:
-                self.chat.mount(c, before=before)
+                dst.mount(c, before=before)
             except Exception:
-                self.chat.mount(c)
+                dst.mount(c)
         else:
-            self.chat.mount(c)
-        self._auto_scroll_chat(animate=False)
-        self._keep_focus()
+            dst.mount(c)
+        if dst is self.chat:
+            self._auto_scroll_chat(animate=False)
+            self._keep_focus()
 
     def _keep_focus(self) -> None:
         try:
@@ -667,14 +704,16 @@ class BotinokTextualApp(App):
         if self._is_at_bottom():
             self.chat.scroll_end(animate=animate)
 
-    def _add_static(self, content, markup=True):
+    def _add_static(self, content, markup=True, target=None):
         # Единая точка вставки в чат: нормализуем ширину для строк, чтобы
         # вариационные селекторы/ZWJ/табы не сдвигали границы панелей.
         if isinstance(content, str):
             content = normalize_cells(content)
         s = Static(content, markup=markup)
-        self.chat.mount(s)
-        self._keep_focus()
+        dst = target if target is not None else (self._render_target or self.chat)
+        dst.mount(s)
+        if dst is self.chat:
+            self._keep_focus()
         return s
 
     def compose(self) -> ComposeResult:
@@ -689,7 +728,7 @@ class BotinokTextualApp(App):
             with self.content_container:
                 self.diag_list = Vertical(id="diag_list")
                 self.diag_scroll = VerticalScroll(self.diag_list, id="diag_scroll")
-                self.diag = Collapsible(self.diag_scroll, title="Prompt:", collapsed=True, id="diag")
+                self.diag = Collapsible(self.diag_scroll, title="📝 Запрос:", collapsed=True, id="diag")
                 yield self.diag
                 # Встроенное подтверждение опасного действия (не модалка —
                 # чтобы не накрывать правые панели).
@@ -702,8 +741,6 @@ class BotinokTextualApp(App):
                 self.chat = Vertical(id="chat")
                 yield self.chat
             with Vertical(id="right"):
-                self.shells_display = VerticalScroll(id="shells")
-                yield self.shells_display
                 with Vertical(id="stats"):
                     self.stats_rows = Static("", id="stats_rows")
                     yield self.stats_rows
@@ -712,6 +749,12 @@ class BotinokTextualApp(App):
                 with Vertical(id="tools"):
                     self.tools_list = Vertical(id="tools_list")
                     yield self.tools_list
+                # Терминалы — ВНИЗУ колонки: растут вниз, сжимая инструменты,
+                # а не панель метрик.
+                self.shells_display = VerticalScroll(id="shells")
+                yield self.shells_display
+        self.thought_queue = Vertical(id="thought_queue")
+        yield self.thought_queue
         self.input_widget = Composer(
             id="input",
             placeholder="Введите ваш вопрос (Enter — отправить, Shift+Enter — новая строка)...",
@@ -855,10 +898,19 @@ class BotinokTextualApp(App):
         # Раз в 30 секунд обновляем относительное время у вопросов в Diagnostic Log.
         if now - self._diag_last_refresh > 30:
             self._footer_dirty = True
-        # Панель обязана «жить» всегда, пока задача не завершена: таймеры,
-        # скорость и признаки зависания пересчитываются 10 раз в секунду.
-        # Форсируем перерисовку каждый тик (текст маленький, это дёшево).
-        self._stats_dirty = True
+        # Панель «живёт» только пока задача не завершена: иначе в простое мы бы
+        # перерисовывали её 10 раз в секунду впустую и грели CPU (шум вентилятора).
+        # Метрики «живут» 10 раз в секунду, пока ход активен (стрим, инструменты,
+        # переждание сервера). В покое метрикам нечего менять — не гоняем полную
+        # пересборку Textual впустую (это и грело CPU). Раньше поведение было
+        # именно таким: dirty выставлялся только при активном статусе.
+        waiting_human = (self._confirmation_event is not None
+                         and not self._confirmation_event.is_set())
+        metrics_active = (self._task_active() or waiting_human
+                          or bool(self.stats_data.get("retries", 0))
+                          or bool(self.stats_data.get("retry_wait", 0)))
+        if metrics_active:
+            self._stats_dirty = True
         status = self.stats_data.get("status", "")
         if status != self._phase_status:
             self._phase_status = status
@@ -876,6 +928,10 @@ class BotinokTextualApp(App):
             if self._last_scroll_y is not None and cur_y < self._last_scroll_y - 0.5:
                 self._user_scrolled_away = True
             self._last_scroll_y = cur_y
+            # Догружаем более раннюю историю, когда пользователь домотал вверх.
+            if (cur_y <= 1.0 and self._history_from > 0 and not self._loading_older
+                    and self._user_scrolled_away):
+                self._load_older_history()
 
             if self._user_scrolled_away:
                 # Пользователь листает сам: не прилипаем, пока он явно не
@@ -883,7 +939,8 @@ class BotinokTextualApp(App):
                 if self._is_at_bottom():
                     self._user_scrolled_away = False
             else:
-                self.chat.scroll_end(animate=False)
+                if metrics_active:
+                    self.chat.scroll_end(animate=False)
         if self._stats_dirty or self._tools_dirty or self._footer_dirty:
             self.update_stats_display()
         self._update_shells_panel()
@@ -1205,6 +1262,18 @@ class BotinokTextualApp(App):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = getattr(event.button, "id", "") or ""
+        if bid == "load_older":
+            event.stop()
+            self._load_older_history()
+            return
+        if bid.startswith("thought_del_"):
+            event.stop()
+            try:
+                idx = int(bid.rsplit("_", 1)[1])
+            except Exception:
+                return
+            self._remove_queued(idx)
+            return
         if bid.startswith("shell_restore_"):
             event.stop()
             sid = bid[len("shell_restore_"):]
@@ -1248,7 +1317,7 @@ class BotinokTextualApp(App):
     def _update_header(self) -> None:
         if not self.header_display:
             return
-        self.header_display.update(self._render_header_text())
+        self.header_display.update(self._render_header_text(), layout=False)
         # Цвет шапки — CSS-классы (см. CSS).
         try:
             row = self.header_row or self.header_display
@@ -1261,7 +1330,7 @@ class BotinokTextualApp(App):
             if self.auto_flag is not None:
                 show = self.dangerous_auto_confirm
                 self.auto_flag.set_class(show, "on")
-                self.auto_flag.update("АВТОСОГЛАСИЕ: ВКЛ ✕" if show else "")
+                self.auto_flag.update("АВТОСОГЛАСИЕ: ВКЛ ✕" if show else "", layout=False)
         except Exception:
             pass
 
@@ -1283,7 +1352,8 @@ class BotinokTextualApp(App):
     def _diag_id(key: str) -> str:
         return "d_" + re.sub(r"[^0-9a-zA-Z_-]", "_", key)
 
-    def _record_diag(self, text: str, ts: Optional[float] = None) -> None:
+    def _record_diag(self, text: str, ts: Optional[float] = None, kind: str = "prompt",
+                     index: Optional[int] = None) -> None:
         text = normalize_cells(str(text)).strip()
         if not text:
             return
@@ -1292,34 +1362,39 @@ class BotinokTextualApp(App):
         # Не плодим дубликаты при повторном рендере одного и того же запроса.
         if self.diag_entries:
             last = self.diag_entries[-1]
-            if last["text"] == text and abs(ts - last["ts"]) < 3:
+            if last["text"] == text and last.get("kind") == kind and abs(ts - last["ts"]) < 3:
                 return
         key = f"{ts:.3f}:{len(self.diag_entries)}"
-        self.diag_entries.append({"ts": ts, "text": text, "key": key})
+        # index — позиция записи в истории сессии (для будущего клика «перейти/
+        # откатиться»); текст храним ПОЛНОСТЬЮ, обрезка только при отрисовке.
+        self.diag_entries.append({"ts": ts, "text": text, "key": key,
+                                  "kind": kind, "index": index})
         self._footer_dirty = True
 
-    def _diag_card_title(self, entry: dict) -> str:
-        text = entry["text"]
-        # Дата + «сколько назад» + сам вопрос, обрезанный по ширине окна.
-        width = 0
-        try:
-            width = self.diag.size.width if self.diag else 0
-        except Exception:
-            width = 0
-        head = ""
+    def _diag_row_parts(self, entry: dict):
+        """(префикс, текст) строки панели запросов.
+
+        Префикс — время и метка («📝 Запрос» / «💭 Мысль», разный цвет).
+        Перенос длинного текста делает сам Textual во второй колонке, поэтому
+        продолжение всегда выровнено под текстом и ничего не «уезжает».
+        """
+        text = str(entry["text"]).replace("\n", " ")
         try:
             head = datetime.fromtimestamp(entry["ts"]).strftime("%d.%m %H:%M")
         except Exception:
             head = "--.-- --:--"
         rel = self._rel_time(entry["ts"])
-        prefix = f"{head} · {rel}  "
-        budget = max(8, (width - len(prefix) - 6)) if width else 40
-        return f"[dim]{prefix}[/dim][cyan]{cell_truncate(text, budget)}[/cyan]"
+        is_thought = entry.get("kind") == "thought"
+        label = "💭 Мысль: " if is_thought else "📝 Запрос: "
+        color = "magenta" if is_thought else "cyan"
+        prefix = f"[dim]{head} · {rel}  [/dim][{color}]{label}[/{color}]"
+        body = f"[{color}]{self._rich_escape(text)}[/{color}]"
+        return prefix, body
 
     def _update_diag(self) -> None:
         if self.diag is None:
             return
-        # Заголовок свёрнутого блока — последний вопрос (обрезанный).
+        # Заголовок «выпадающего окна» — последний запрос/мысль (обрезанный).
         if self.diag_entries:
             latest = self.diag_entries[-1]
             width = 0
@@ -1327,32 +1402,47 @@ class BotinokTextualApp(App):
                 width = self.diag.size.width or 0
             except Exception:
                 width = 0
-            budget = max(10, (width - 10)) if width else 60
             try:
-                self.diag.title = f"[bold cyan]Prompt:[/bold cyan] [dim]{cell_truncate(latest['text'], budget)}[/dim]"
+                is_thought = latest.get("kind") == "thought"
+                label = "💭 Мысль: " if is_thought else "📝 Запрос: "
+                avail = (width - 2) if width else 60
+                budget = max(8, avail - cell_width(label))
+                latest_text = self._rich_escape(
+                    cell_truncate(str(latest['text']).replace("\n", " "), budget))
+                if is_thought:
+                    self.diag.title = f"[bold magenta]💭 Мысль:[/bold magenta] [dim]{latest_text}[/dim]"
+                else:
+                    self.diag.title = f"[bold cyan]📝 Запрос:[/bold cyan] [dim]{latest_text}[/dim]"
             except Exception:
                 pass
-        # Карточки вопросов (создаём недоимостающие, обновляем заголовки).
+        else:
+            try:
+                self.diag.title = "📝 Запрос:"
+            except Exception:
+                pass
+        # Строки в две колонки (префикс + текст), свежие СВЕРХУ.
         if self.diag_list is not None:
             for entry in self.diag_entries:
                 key = entry["key"]
-                node = self._diag_widgets.get(key)
-                if node is None:
+                prefix, body = self._diag_row_parts(entry)
+                refs = self._diag_widgets.get(key)
+                if refs is None:
                     cid = self._diag_id(key)
                     self._diag_id_to_key[cid] = key
-                    node = Collapsible(Static(normalize_cells(entry["text"])),
-                                       title=self._diag_card_title(entry),
-                                       collapsed=True, id=cid)
-                    self._diag_widgets[key] = node
+                    p = Static(prefix, markup=True, classes="diag_prefix")
+                    t = Static(body, markup=True, classes="diag_text")
+                    row = Horizontal(p, t, classes="diag_row", id=cid)
+                    self._diag_widgets[key] = (row, p, t)
                     try:
-                        self.diag_list.mount(node)
-                        node.collapsed = True
+                        # Новые строки кладём наверх, чтобы свежая была первой.
+                        self.diag_list.mount(row, before=0)
                     except Exception:
                         self._diag_widgets.pop(key, None)
                         self._diag_id_to_key.pop(cid, None)
                 else:
                     try:
-                        node.title = self._diag_card_title(entry)
+                        refs[1].update(prefix)
+                        refs[2].update(body)
                     except Exception:
                         pass
         self._diag_last_refresh = time.time()
@@ -1388,19 +1478,57 @@ class BotinokTextualApp(App):
         if self._stream_active_time > 0:
             speed_val = (thinking_len + response_len + tool_len) / max(self._stream_active_time, 0.1)
 
-        # Молчание модели: сколько секунд нет новых данных.
-        if self._last_chunk_time > 0:
-            silence = now - self._last_chunk_time
-        elif self._task_active() and self._stream_started_at:
-            silence = now - self._stream_started_at
+        # Что именно ждём: данные модели, возврат инструмента или решение
+        # человека. «Молчание модели» капает ТОЛЬКО когда ждём ответ модели;
+        # во время работы инструмента и ожидания кнопки это не «зависание».
+        running_tools = [t for t in self.active_tools if t.get("status") == "running"]
+        waiting_human = bool(self._confirmation_event is not None
+                             and not self._confirmation_event.is_set())
+        tool_hang = False
+        tool_info = None
+        if running_tools:
+            t = max(running_tools, key=lambda x: now - x.get("start_time", now))
+            tdur = now - t.get("start_time", now)
+            if tdur >= 300:
+                tcs, tword = "red", "слишком долго"
+            elif tdur >= 60:
+                tcs, tword = "yellow", "долго"
+            else:
+                tcs, tword = "green", "работает"
+            tool_hang = tdur >= 300
+            tool_info = (tcs, f"{normalize_cells(t.get('name', ''))}, "
+                         f"{self._fmt_secs(tdur)} ({tword})")
+
+        model_silence = 0.0
+        retry_wait = s.get("retry_wait", 0) or 0
+        retries = s.get("retries", 0) or 0
+        waiting_server = bool(retries or retry_wait)
+        if waiting_human:
+            hdur = now - (self._confirmation_started_at or now)
+            wait_label = "Ждём вас:"
+            wait_value = f"[bold yellow]{self._fmt_secs(hdur)} — нужно ваше решение[/bold yellow]"
+        elif running_tools:
+            wait_label = "Модель молчит:"
+            wait_value = "[dim]— (идёт инструмент)[/dim]"
+        elif waiting_server:
+            # Переждание сервера (сетевые повторы/504): это НЕ «молчание модели»
+            # и не повод кричать «зависло».
+            wait_label = "Ждём сервер:"
+            wait_value = (f"[bold yellow]{self._fmt_secs(retry_wait)}"
+                          f" — попытка {retries}[/bold yellow]")
         else:
-            silence = 0.0
-        if silence >= 30:
-            sil_cs, sil_word = "red", "долго молчит"
-        elif silence >= 10:
-            sil_cs, sil_word = "yellow", "подозрительно"
-        else:
-            sil_cs, sil_word = "green", "норма"
+            if self._last_chunk_time > 0:
+                model_silence = now - self._last_chunk_time
+            elif self._task_active() and self._stream_started_at:
+                model_silence = now - self._stream_started_at
+            if model_silence >= 30:
+                sil_cs, sil_word = "red", "долго молчит"
+            elif model_silence >= 10:
+                sil_cs, sil_word = "yellow", "подозрительно"
+            else:
+                sil_cs, sil_word = "green", "норма"
+            wait_label = "Модель молчит:"
+            wait_value = f"[{sil_cs}]{model_silence:.1f} с — {sil_word}[/{sil_cs}]"
 
         L = 18  # ширина колонки подписей (моноширинный шрифт)
         def row(label: str, value: str) -> str:
@@ -1421,27 +1549,12 @@ class BotinokTextualApp(App):
         lines += [
             row("Скорость:", f"[bold green]{speed_val:.1f} Б/с[/bold green]"),
             row("Первый ответ:", f"[bold yellow]{first_val}[/bold yellow]"),
-            row("Модель молчит:", f"[{sil_cs}]{silence:.1f} с — {sil_word}[/{sil_cs}]"),
+            row(wait_label, wait_value),
         ]
 
         # Работающий инструмент: растущий счётчик времени (детектор зависаний).
-        running_tools = [t for t in self.active_tools if t.get("status") == "running"]
-        tool_hang = False
-        if running_tools:
-            t = max(running_tools, key=lambda x: now - x.get("start_time", now))
-            tdur = now - t.get("start_time", now)
-            if tdur >= 300:
-                tcs, tword = "red", "слишком долго"
-            elif tdur >= 60:
-                tcs, tword = "yellow", "долго"
-            else:
-                tcs, tword = "green", "работает"
-            tool_hang = tdur >= 300
-            lines.append(row("Инструмент:", f"[{tcs}]{normalize_cells(t.get('name', ''))}, "
-                                            f"{self._fmt_secs(tdur)} ({tword})[/{tcs}]"))
-        if s.get("retries", 0) or s.get("retry_wait", 0):
-            lines.append(row("Ждём сервер:", f"[bold red]{int(s.get('retry_wait', 0))} с[/bold red]"
-                                             f"   (попыток: {s.get('retries', 0)})"))
+        if tool_info is not None:
+            lines.append(row("Инструмент:", f"[{tool_info[0]}]{tool_info[1]}[/{tool_info[0]}]"))
         lines.append("")
 
         # Видеопамять — только у Ollama; OpenAI её не сообщает, поэтому строку
@@ -1473,11 +1586,17 @@ class BotinokTextualApp(App):
         lines.append("")
         lines.append("[bold cyan]Заполнено памяти диалога:[/bold cyan]")
 
-        if silence >= 30 or tool_hang:
+        if model_silence >= 30 or tool_hang:
             lines.append("[bold red]⚠ Похоже, зависло. Нажмите Esc, чтобы остановить "
                          "и продолжить с места.[/bold red]")
 
-        self.stats_rows.update("\n".join(lines))
+        # layout обновляем ТОЛЬКО когда меняется число строк (редко). Иначе
+        # layout=False: не инвалидируем дерево и не «перерисовываем» чат на
+        # каждом тике, но метрики обновляются 10 раз в секунду.
+        text = "\n".join(lines)
+        need_layout = (len(lines) != getattr(self, "_stats_lines", -1))
+        self._stats_lines = len(lines)
+        self.stats_rows.update(text, layout=need_layout)
         if self.ctx_bar:
             try:
                 self.ctx_bar.progress = float(ctx_pct)
@@ -1507,10 +1626,10 @@ class BotinokTextualApp(App):
             f"[bold cyan]Инструмент:[/bold cyan] {normalize_cells(t.get('name', ''))}",
             f"[bold cyan]Время:[/bold cyan] {started}  [bold cyan]Статус:[/bold cyan] [{ss}]{t['status']}[/{ss}]  [bold cyan]Размер:[/bold cyan] {sz}",
         ]
-        query = normalize_cells(t.get("query", ""))
+        query = self._rich_escape(t.get("query", ""))
         if query:
             lines += ["", "[bold cyan]Запрос:[/bold cyan]", query]
-        result = normalize_cells(t.get("result", ""))
+        result = self._rich_escape(t.get("result", ""))
         if result:
             lines += ["", "[bold cyan]Результат:[/bold cyan]", result]
         return "\n".join(lines)
@@ -1640,7 +1759,9 @@ class BotinokTextualApp(App):
             except Exception as e:
                 self._add_static(f"[red]Ошибка загрузки истории: {e}[/red]")
         if history:
-            for entry in history:
+            # Панель запросов — по ВСЕЙ истории (дёшево). А тяжёлый рендер
+            # виджетов делаем лениво: на длинной сессии это десятки секунд.
+            for _idx, entry in enumerate(history):
                 if entry.get("role") == "user" and entry.get("content"):
                     ts = None
                     raw_ts = entry.get("timestamp")
@@ -1649,13 +1770,111 @@ class BotinokTextualApp(App):
                             ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).timestamp()
                         except Exception:
                             ts = None
-                    self._record_diag(str(entry.get("content")), ts)
-                self._render_history_entry(entry)
-            self.chat.scroll_end()
+                    content = str(entry.get("content"))
+                    # Мысль, ушедшая в поток, сохранена с пометкой в начале —
+                    # восстанавливаем её вид (облачко + время отправки), чтобы
+                    # после перезапуска она не выглядела обычным запросом.
+                    if content.lstrip().startswith("(во время работы)"):
+                        shown = content.replace("(во время работы)", "", 1).strip()
+                        self._record_diag(shown, ts, kind="thought", index=_idx)
+                    else:
+                        self._record_diag(content, ts, index=_idx)
+            self._history_all = history
+            self._history_from = max(0, len(history) - HISTORY_INITIAL_ENTRIES)
+            # Индикатор: рендер отложен, поэтому «Загрузка…» успевает показаться.
+            self._loading_widget = self._add_static("[dim]⏳ Загрузка сессии…[/dim]")
+            self.call_after_refresh(self._render_initial_history)
         else:
             # Новая сессия: показываем баннер с логотипом (после раскладки,
             # чтобы знать ширину поля вывода и автомасштабировать арт).
             self.call_after_refresh(self._mount_banner)
+
+    def _remove_loading_widget(self) -> None:
+        w = getattr(self, "_loading_widget", None)
+        if w is not None:
+            try:
+                w.remove()
+            except Exception:
+                pass
+            self._loading_widget = None
+
+    def _render_initial_history(self) -> None:
+        """Отрисовать только хвост истории; раннее — по кнопке/прокрутке."""
+        try:
+            self._render_history_range(self._history_from, len(self._history_all))
+            if self._history_from > 0:
+                self._ensure_load_older_button()
+        finally:
+            self._remove_loading_widget()
+        self._auto_scroll_chat(animate=False)
+
+    def _render_history_range(self, start: int, end: int) -> None:
+        for entry in self._history_all[start:end]:
+            self._render_history_entry(entry)
+
+    def _ensure_load_older_button(self) -> None:
+        if getattr(self, "_load_older_button", None) is not None:
+            try:
+                self._load_older_button.label = f"⤒ Показать более раннее ({self._history_from})"
+            except Exception:
+                pass
+            return
+        try:
+            btn = Button(f"⤒ Показать более раннее ({self._history_from})", id="load_older")
+            self._load_older_button = btn
+            self.chat.mount(btn, before=0)
+        except Exception:
+            self._load_older_button = None
+
+    def _load_older_history(self) -> None:
+        """Догрузить предыдущую порцию истории наверх (без блокировки UI)."""
+        if getattr(self, "_loading_older", False):
+            return
+        if self._history_from <= 0:
+            return
+        self._loading_older = True
+        end = self._history_from
+        start = max(0, end - HISTORY_BATCH_ENTRIES)
+        btn = getattr(self, "_load_older_button", None)
+        if btn is not None:
+            try:
+                btn.label = "⏳ Загрузка…"
+            except Exception:
+                pass
+        container = Vertical(classes="history_batch")
+        # mount асинхронный: рендерим в контейнер после следующего refresh,
+        # когда он уже реально в дереве.
+        try:
+            if btn is not None:
+                self.chat.mount(container, after=btn)
+            else:
+                self.chat.mount(container, before=0)
+        except Exception:
+            try:
+                self.chat.mount(container)
+            except Exception:
+                pass
+        self.call_after_refresh(self._render_older_batch, container, start, end, btn)
+
+    def _render_older_batch(self, container, start: int, end: int, btn) -> None:
+        try:
+            self._render_target = container
+            try:
+                self._render_history_range(start, end)
+            finally:
+                self._render_target = None
+            self._history_from = start
+            if self._history_from <= 0:
+                if btn is not None:
+                    try:
+                        btn.remove()
+                    except Exception:
+                        pass
+                self._load_older_button = None
+            else:
+                self._ensure_load_older_button()
+        finally:
+            self._loading_older = False
 
     def _mount_banner(self) -> None:
         """Логотип + версия в начале новой сессии, с автоскейлом под ширину чата."""
@@ -1722,6 +1941,14 @@ class BotinokTextualApp(App):
             widgets.append(Static(syntax_renderable(code, kind), markup=False))
         return widgets
 
+    def _mount_widget(self, w):
+        """Смонтировать виджет в чат или в текущую ленивую цель истории."""
+        dst = self._render_target or self.chat
+        dst.mount(w)
+        if dst is self.chat:
+            self._keep_focus()
+        return w
+
     def _render_history_entry(self, entry: dict) -> None:
         role = entry.get("role", "")
         content = entry.get("content", "")
@@ -1736,8 +1963,16 @@ class BotinokTextualApp(App):
             except Exception:
                 ts_str = str(timestamp)[:8]
         if role == "user":
+            raw = str(content)
             self._add_static(f"[dim]━━━ {ts_str} ━━━[/dim]")
-            self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(str(content))}")
+            if raw.lstrip().startswith("(во время работы)"):
+                # Мысль, ушедшая в поток (после перезапуска) — показываем как мысль.
+                shown = raw.replace("(во время работы)", "", 1).strip()
+                self._add_static(
+                    f"[bold blue]💭 Моя мысль (во время работы):[/bold blue] "
+                    f"{self._rich_escape(shown)}")
+            else:
+                self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(raw)}")
             self._add_static("")
         elif role == "assistant":
             self._add_static("[bold green]Assistant:[/bold green]")
@@ -1745,7 +1980,7 @@ class BotinokTextualApp(App):
                 self._mount_spoiler(self._spoiler_title("Thinking", thinking), Static(self._rich_escape(thinking)), collapsed=True)
             if content:
                 try:
-                    self.chat.mount(Markdown(normalize_cells(str(content))))
+                    self._mount_widget(Markdown(normalize_cells(str(content))))
                 except Exception:
                     self._add_static(self._rich_escape(str(content)))
                 self._add_static("")
@@ -1759,10 +1994,13 @@ class BotinokTextualApp(App):
                         args = {}
                     args_json = json.dumps(args, ensure_ascii=False)
                     title = self._spoiler_title(name, args_json)
-                    self._mount_spoiler(title, *self._tool_call_widgets(name, args))
+                    # В истории спойлеры СВЁРНУТЫ — раскрывать по клику.
+                    self._mount_spoiler(title, *self._tool_call_widgets(name, args),
+                                        collapsed=True)
         elif role == "tool":
             title = self._spoiler_title("Tool result", str(content)[:200])
-            self._mount_spoiler(title, Static(f"[dim]{self._rich_escape(str(content)[:1000])}[/dim]"))
+            self._mount_spoiler(title, Static(f"[dim]{self._rich_escape(str(content)[:1000])}[/dim]"),
+                                collapsed=True)
         elif role == "system":
             pass
 
@@ -1772,6 +2010,27 @@ class BotinokTextualApp(App):
         self._add_static(f"[dim]━━━ {ts} ━━━[/dim]")
         self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(str(content))}")
         self._add_static("")
+        self.chat.scroll_end(animate=False)
+
+    def deliver_thought_block(self, text: str) -> None:
+        """Мысль ушла в поток: показать её в чате как сообщение пользователя и
+        отметить в панели промтов облачком с меткой времени отправки."""
+        text = normalize_cells(str(text)).strip()
+        if not text:
+            return
+        self._record_diag(text, kind="thought")
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._add_static(f"[dim]━━━ {ts} ━━━[/dim]")
+        self._add_static(
+            f"[bold blue]💭 Моя мысль (во время работы):[/bold blue] {self._rich_escape(text)}")
+        self._add_static("")
+        try:
+            self._update_diag()
+            # Свежая строка теперь СВЕРХУ — прокручиваем список к началу.
+            if self.diag_scroll is not None:
+                self.diag_scroll.scroll_home(animate=False)
+        except Exception:
+            pass
         self.chat.scroll_end(animate=False)
 
     def reset_turn_state(self) -> None:
@@ -1795,6 +2054,7 @@ class BotinokTextualApp(App):
         self._first_token_at = None
         self._stream_active_time = 0.0
         self._prev_chunk_at = None
+        self._stream_ui_last = 0.0
         self.stream_static = Static("", markup=True)
         self.chat.mount(self.stream_static)
         self._stream_content = ""
@@ -1814,6 +2074,55 @@ class BotinokTextualApp(App):
                 inp.placeholder = "Введите ваш вопрос (Enter — отправить, Shift+Enter — новая строка)..."
         except Exception:
             pass
+
+    def _render_thought_queue(self) -> None:
+        """Перерисовать нижнюю панель «мыслей»: чип + крестик отмены на каждую."""
+        try:
+            container = getattr(self, "thought_queue", None)
+            if container is None:
+                return
+            container.remove_children()
+            if not self._queued_inputs:
+                container.remove_class("-visible")
+                return
+            container.add_class("-visible")
+            chips = []
+            for i, text in enumerate(self._queued_inputs):
+                label = (text.splitlines()[0] if text else "").strip()
+                if len(label) > 140:
+                    label = label[:137] + "…"
+                chips.append(Horizontal(
+                    Static(f"💭 {label}", classes="thought_text"),
+                    Button("✕", id=f"thought_del_{i}", classes="thought_del"),
+                    classes="thought_chip",
+                ))
+            container.mount(*chips)
+        except Exception:
+            pass
+
+    def take_queued_thoughts(self) -> str:
+        """Атомарно забрать все мысли одним блоком (вызывать в UI-потоке).
+
+        Возвращает склеенный текст (пустая строка, если мыслей нет) и очищает
+        очередь вместе с панелью. Мысль не может уйти в поток дважды.
+        """
+        if not self._queued_inputs:
+            return ""
+        text = "\n\n".join(self._queued_inputs)
+        self._queued_inputs = []
+        self._render_thought_queue()
+        self._update_queue_placeholder()
+        return text
+
+    def _remove_queued(self, idx: int) -> None:
+        """Убрать мысль из очереди по крестику (до отправки в поток)."""
+        try:
+            if 0 <= idx < len(self._queued_inputs):
+                self._queued_inputs.pop(idx)
+        except Exception:
+            return
+        self._render_thought_queue()
+        self._update_queue_placeholder()
 
     def _autosize_composer(self) -> None:
         """Подогнать высоту композера под число строк (1..8) + рамка."""
@@ -1872,7 +2181,7 @@ class BotinokTextualApp(App):
         elif self.is_streaming:
             self._queued_inputs.append(user_input)
             self._update_queue_placeholder()
-            self._add_static(f"[dim]⏸ +{len(self._queued_inputs)}: {self._rich_escape(user_input)}[/dim]")
+            self._render_thought_queue()
             self.chat.scroll_end(animate=False)
         elif self.on_submit:
             self._submit_text(user_input)
@@ -1890,13 +2199,26 @@ class BotinokTextualApp(App):
         if _pc is not None:
             _pc.signal_stop()
 
+    def turn_in_progress(self) -> bool:
+        """Идёт ли ход: стрим модели ИЛИ работающий инструмент.
+
+        Esc должен прерывать и во время инструмента, а не только во время
+        генерации — раньше проверялся лишь `is_streaming`.
+        """
+        if getattr(self, "is_streaming", False):
+            return True
+        try:
+            return any(t.get("status") == "running" for t in self.active_tools)
+        except Exception:
+            return False
+
     def _log_stop_once(self) -> None:
         if not self._stop_logged:
             self._stop_logged = True
             self.append_log("[dim]⏹ Остановлено. Прерываю действие и завершаю ход…[/dim]")
 
     def on_key(self, event) -> None:
-        if event.key == "escape" and self.is_streaming:
+        if event.key == "escape" and self.turn_in_progress():
             self.request_stop()
             self._log_stop_once()
             event.stop()
@@ -1926,7 +2248,14 @@ class BotinokTextualApp(App):
             self._stream_content += content
         if tool_stream_json:
             self._last_tool_content = tool_stream_json
-        if self.stream_static:
+        # Троттлинг: не пересобираем ВЕСЬ накопленный текст на каждом чанке
+        # (это O(n²) и насыщает UI — из-за этого воркер вис на call_from_thread
+        # и не успевал среагировать на Esc). Текст копится всегда, а в Static
+        # выводим не чаще ~10 раз в секунду.
+        now = time.time()
+        first_paint = self._stream_ui_last == 0.0
+        if self.stream_static and (first_paint or now - self._stream_ui_last >= 0.1):
+            self._stream_ui_last = now
             parts = []
             if self._stream_thinking:
                 t = self._collapse_newlines(self._rich_escape(self._stream_thinking))
@@ -2032,10 +2361,11 @@ class BotinokTextualApp(App):
         if not self._queued_inputs:
             return
         if stopped:
-            # Esc: НЕ продолжаем диалог сами. Возвращаем накопленный ввод в поле
-            # и ждём, пока пользователь сам отправит следующее сообщение.
+            # Esc: НЕ продолжаем диалог сами. Возвращаем всю очередь мыслей в
+            # поле ввода одним блоком и ждём, пока пользователь сам отправит.
             pending = "\n\n".join(self._queued_inputs)
             self._queued_inputs = []
+            self._render_thought_queue()
             self._update_queue_placeholder()
             try:
                 if self.input_widget is not None:
@@ -2043,12 +2373,16 @@ class BotinokTextualApp(App):
                     self._autosize_composer()
             except Exception:
                 pass
-            self.append_log("[dim]⏹ Остановлено. Жду следующее сообщение…[/dim]")
+            self.append_log("[dim]⏹ Остановлено. Мысли возвращены в строку ввода.[/dim]")
             return
-        text = "\n\n".join(self._queued_inputs)
+        # Мысли, не успевшие попасть в поток на границе раунда, отдаём следующим
+        # ходом одним блоком с нейтральной пометкой.
+        joined = "\n\n".join(self._queued_inputs)
         self._queued_inputs = []
+        self._render_thought_queue()
         self._update_queue_placeholder()
-        self.append_user_message(text)
+        self.deliver_thought_block(joined)
+        text = "(во время работы)\n" + joined
         if self.on_submit:
             self.is_streaming = True
             self.on_submit(text)
@@ -2068,6 +2402,7 @@ class BotinokTextualApp(App):
     def show_confirmation_prompt(self, tool_name: str, args_display: str, warn_text: str = "",
                                  kind: str = "confirm") -> None:
         self._confirmation_event = threading.Event()
+        self._confirmation_started_at = time.time()
         self._confirmation_result = False
         self._confirmation_reason = ""
         self._confirmation_kind = kind

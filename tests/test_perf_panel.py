@@ -160,7 +160,7 @@ async def main_async() -> int:
         app.update_stats_display()
         await asyncio.sleep(0.2)
         txt = _panel(app)
-        check("retries_row", "Ждём сервер" in txt and "15 с" in txt and "попыток: 2" in txt, txt)
+        check("retries_row", "Ждём сервер" in txt and "15 с" in txt and "попытка 2" in txt, txt)
 
         # Профиль OpenAI: строки памяти и черновика команды не показываем.
         app.set_model_info("gpt-x", server="openai")
