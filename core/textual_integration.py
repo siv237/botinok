@@ -41,6 +41,10 @@ STREAM_TOOL_TEXT_MAX_CHARS = 12000  # не используется, остав�
 HARD_CTX_PCT = 0.90
 MAX_TOOL_ROUNDS_PER_TURN = 80
 MAX_AUTO_RECOVERIES_PER_TURN = 2
+# Сколько раз подряд молча переспрашивать модель, если она вернула полностью
+# пустое завершение (нет content, thinking и tool_calls). Модели глючат и рвутся
+# — это штатная ситуация, из которой нужно выходить, а не молча гасить сессию.
+MAX_EMPTY_RETRIES_PER_TURN = 3
 MAX_PROOFREAD_ROUNDS = 3
 MISSING_FINAL_AUTO_CONTINUE_MAX = 2
 REPEAT_LINE_WINDOW = 40
@@ -132,6 +136,16 @@ def _prepare_messages_for_ollama(sm, session_path, messages, num_ctx, reserve_to
         }
         trimmed = system_msgs + [notice] + kept
     return trimmed
+
+
+def _is_empty_completion(full_response, full_thinking, tool_calls) -> bool:
+    """Полностью пустое завершение модели: нет текста, reasoning и tool_calls.
+
+    Штатный сбой (модель сглючила/оборвалась) — его нельзя молча принимать за
+    финальный ответ. → защита по `MAX_EMPTY_RETRIES_PER_TURN`.
+    """
+    return (not tool_calls) and (not (full_response or "").strip()) \
+        and (not (full_thinking or "").strip())
 
 
 def _detect_repetition(full_response: str) -> bool:
@@ -591,6 +605,7 @@ def ask_ollama_textual(
 
         tool_rounds = 0
         auto_recoveries = 0
+        empty_retries = 0
         proof_rounds = 0
         stopped_by_user = False
         turn_prompt = user_text
@@ -886,6 +901,8 @@ def ask_ollama_textual(
 
                         if len(full_response) % 800 == 0 and _detect_repetition(full_response):
                             _abort_stream(response)
+                            _write_log("[yellow]⚠ Обнаружен повтор в ответе модели — "
+                                       "прерываю генерацию и запускаю восстановление…[/yellow]")
                             stream_done = True
                             break
 
@@ -1006,6 +1023,42 @@ def ask_ollama_textual(
                 messages.append(cont_user)
                 sm.update_context(session_path, "user", cont_user["content"])
                 continue
+
+            # Полностью пустое завершение: модель не выдала ни текста, ни
+            # reasoning, ни tool_call (бэкенд сгенерировал токены, но до клиента
+            # ничего не дошло). Раньше это молча сохранялось как финальный ответ
+            # и гасило ход. Теперь — видимая пометка и повтор (ограниченно).
+            if _is_empty_completion(full_response, full_thinking, tool_calls):
+                if empty_retries >= MAX_EMPTY_RETRIES_PER_TURN:
+                    note = (f"Модель {empty_retries + 1}-й раз подряд вернула пустой "
+                            f"ответ (eval_tokens={metrics.get('eval_count', 0)}). "
+                            "Останавливаюсь и жду следующее сообщение.")
+                    _write_log(f"[red]⚠ {note}[/red]")
+                    sm.update_context(session_path, "system", note)
+                    messages.append({"role": "system", "content": note})
+                    _finalize_turn("", "")
+                    break
+                empty_retries += 1
+                tool_rounds = 0
+                _write_log(f"[yellow]⚠ Пустой ответ от модели — повторяю запрос "
+                           f"({empty_retries}/{MAX_EMPTY_RETRIES_PER_TURN})…[/yellow]")
+                sm.update_context(
+                    session_path, "system",
+                    f"Пустое завершение модели (eval_tokens={metrics.get('eval_count', 0)}). "
+                    f"Повтор {empty_retries}/{MAX_EMPTY_RETRIES_PER_TURN}.")
+                cont_user_content = sm.load_prompt(
+                    session_path, "auto_continue_final",
+                    LAST_USER_PROMPT=turn_prompt,
+                    SESSION_PATH=session_path,
+                )
+                cont_user = {"role": "user",
+                             "content": cont_user_content or f"Formulate final answer for: {turn_prompt[:100]}"}
+                messages.append(cont_user)
+                sm.update_context(session_path, "user", cont_user["content"])
+                continue
+            else:
+                # Нормальный ответ (в т.ч. tool-call-only) — счётчик сбрасываем.
+                empty_retries = 0
 
             if _detect_repetition(full_response):
                 sm.update_context(session_path, "system", "Repetition detected, auto-continuing")

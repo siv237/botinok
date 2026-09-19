@@ -569,3 +569,18 @@ TypeError: execute() got an unexpected keyword argument 'resume'`.
 - Мусорные `*_recovery-test`/`*_recovery-snapshot` и бэкап убраны из
   `~/.botinok/sessions`; настоящая сессия снова самая свежая.
 - Страницы: `entities/session_manager.md`.
+
+## [2026-09-19] fix | защита от пустого («молчаливого») завершения модели
+Причина обрыва ответа в сессии 20260919_090557 (11:58:10): бэкенд сгенерировал
+`eval_count=52`, но клиент не получил ни `content`, ни `thinking`, ни `tool_calls`;
+ветка `if not tool_calls:` сохраняла пустого ассистента, финализировала ход и
+гасила сессию без лога/ошибки.
+- `_is_empty_completion(full_response, full_thinking, tool_calls)` — классификатор.
+- Обработка в `core/textual_integration.py`: видимая пометка в UI + system-заметка
+  в сессию, повтор запроса (`auto_continue_final`) до `MAX_EMPTY_RETRIES_PER_TURN=3`,
+  при исчерпании — явное сообщение и ожидание следующего ввода. Счётчик
+  сбрасывается на нормальном ответе.
+- Обрыв генерации по повторам (`_detect_repetition` → `_abort_stream`) теперь
+  логируется.
+- Тест `tests/test_empty_completion.py`.
+- Страницы: `concepts/streaming_tui.md`.
