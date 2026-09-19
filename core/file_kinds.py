@@ -164,6 +164,41 @@ def detect_kinds(path: str, head: Optional[bytes] = None) -> List[Dict]:
     return sorted(cands, key=lambda c: _rank(c["confidence"]))
 
 
+def syntax_renderable(code: str, kind: Optional[str] = None, line_numbers: bool = False):
+    """Готовый Rich-renderable с подсветкой кода (Pygments через rich.Syntax).
+
+    Лексер подбирается ТОЛЬКО по известному kind: контентный `guess_lexer`
+    ненадёжен (может угадать не тот язык), поэтому не используется. Если kind
+    пуст, лексер не найден или Pygments/Rich недоступны — возвращается исходная
+    строка без подсветки (вызывающая сторона рендерит её как plain-текст).
+    """
+    if not code or not kind:
+        return code
+    try:
+        from pygments.lexers import get_lexer_by_name
+        from pygments.util import ClassNotFound
+    except Exception:
+        return code
+    try:
+        lexer = get_lexer_by_name(str(kind).strip().lower())
+    except ClassNotFound:
+        return code
+    except Exception:
+        return code
+    try:
+        from rich.syntax import Syntax
+        return Syntax(
+            code,
+            lexer=lexer,
+            theme="ansi_dark",
+            line_numbers=line_numbers,
+            word_wrap=True,
+            background_color="default",
+        )
+    except Exception:
+        return code
+
+
 def primary_kind(cands: List[Dict]) -> Optional[str]:
     return cands[0]["kind"] if cands else None
 

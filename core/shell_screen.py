@@ -33,6 +33,8 @@ from textual.widgets import RichLog
 from rich.markup import escape as _markup_escape
 from rich.text import Text
 
+from core.file_kinds import syntax_renderable
+
 
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -58,8 +60,10 @@ def format_shell_command(command: str) -> str:
     """Красиво развернуть shell-команду через shfmt (mvdan/sh).
 
     shfmt полноценно парсит bash и pretty-принтит: разбивает `;` на строки,
-    сохраняет `for …; do`, выравнивает тело и `done`. Если shfmt недоступен
-    или команда не парсится — возвращаем исходную строку.
+    сохраняет `for …; do`, выравнивает тело и `done`. Флаги `-sr` (пробел
+    после операторов перенаправления) и `-ci` (отступ тела `case`) повышают
+    читаемость для аудита. Если shfmt недоступен или команда не парсится —
+    возвращаем исходную строку.
     """
     cmd = (command or "").strip()
     if not cmd:
@@ -69,7 +73,7 @@ def format_shell_command(command: str) -> str:
         return cmd
     try:
         proc = subprocess.run(
-            [binary, "-i", "2", "-"],
+            [binary, "-i", "2", "-sr", "-ci", "-"],
             input=cmd.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -179,9 +183,9 @@ class ShellScreen(ModalScreen):
         padding: 0 1;
     }
     #shell_cmd.show {
-        background: cyan;
-        color: black;
-        text-style: bold;
+        background: #0f0f0f;
+        color: #d0d0d0;
+        border: round #5f87af;
     }
     ShellScreen.cmd-open #shell_title {
         display: none;
@@ -383,7 +387,7 @@ class ShellScreen(ModalScreen):
         if self._cmd_shown:
             raw = getattr(self.session, "command", "") or getattr(self.session, "name", "")
             try:
-                cmd_w.update(format_shell_command(raw))
+                cmd_w.update(syntax_renderable(format_shell_command(raw), "bash"))
             except Exception:
                 pass
         try:
@@ -793,7 +797,7 @@ class ShellInline(Vertical):
         if self._cmd_shown:
             raw = getattr(self.session, "command", "") or getattr(self.session, "name", "")
             try:
-                cmd_w.update(format_shell_command(raw))
+                cmd_w.update(syntax_renderable(format_shell_command(raw), "bash"))
             except Exception:
                 pass
         try:
