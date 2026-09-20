@@ -40,6 +40,7 @@
 | github | [entities/tools/github.md](entities/tools/github.md) | Работа с GitHub API |
 | experience | [entities/tools/experience.md](entities/tools/experience.md) | База «позитивного/негативного» опыта |
 | vision | [entities/tools/vision.md](entities/tools/vision.md) | Анализ изображений мультимодальной моделью |
+| image | [entities/tools/image.md](entities/tools/image.md) | Показать изображение в чате: файл/URL → каталог проекта → id → рендер по скроллу |
 | audio | [entities/tools/audio.md](entities/tools/audio.md) | Анализ аудио мультимодальной (omni) моделью |
 | skills | [entities/tools/skills.md](entities/tools/skills.md) | Менеджер AI-навыков (личные/проектные, ClawHub) |
 | session_memory | [entities/tools/session-memory.md](entities/tools/session-memory.md) | Архивариус: restore (EXACT) / resume_brief / get_turn / гибкий поиск |
@@ -58,6 +59,7 @@
 - [concepts/thought_queue.md](concepts/thought_queue.md) — очередь «мыслей»: сказать модели, не прерывая; доставка блоком на границе раунда, крестик отмены
 - [concepts/terminal_unicode_width.md](concepts/terminal_unicode_width.md) — ширина Unicode в терминале: почему «плывут» панели и как лечим
 - [concepts/embedded_terminal.md](concepts/embedded_terminal.md) — встроенный терминал: PTY-сессии, свернуть/вернуть, общий доступ человека и агента
+- [concepts/image_rendering.md](concepts/image_rendering.md) — изображения в чате: идентификаторы в сессии, каталог, ленивый рендер по скроллу, производительность на 4К
 - [concepts/skills_system.md](concepts/skills_system.md) — система навыков (personal/project, ClawHub)
 - [concepts/experience_learning.md](concepts/experience_learning.md) — обучение на опыте (positive/negative)
 - [concepts/vision_multimodal.md](concepts/vision_multimodal.md) — мультимодальность: конвертация/ресaйз изображений

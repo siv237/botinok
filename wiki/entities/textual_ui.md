@@ -81,11 +81,21 @@ status: stable
 
 ## Баннер новой сессии
 При старте новой сессии (пустая история) в начале `#chat` показывается логотип
-`assets/logo.png`, сгенерированный в ASCII (`core/image_ascii.image_to_fullcolor`)
-и автомасштабированный под ширину поля вывода, плюс строка версии
-(`BOTINOK AGENT — Version …`). Для возобновлённой сессии (есть история) баннер не
-показывается. Реализация: `_mount_banner` (через `call_after_refresh`, чтобы
-знать ширину после раскладки). → `concepts/vision_multimodal.md`
+`assets/logo.png` (chafa-рендер через `core/image_render.render_image_text`) и
+строка версии (`BOTINOK AGENT — Version …`). Для возобновлённой сессии (есть
+история) баннер не показывается. Реализация: `_mount_banner` (пустой Static
+сразу, картинку дозаполняет фоновый рендер). Баннер ограничен
+`LOGO_MAX_WIDTH=168` / `LOGO_MAX_HEIGHT=48`: рендер шире/выше блокировал раскладку
+на maximize (~1.5 с). → `concepts/image_rendering.md`
+
+## Изображения в чате
+Ответы могут содержать маркеры `[[image:<id>]]` — в сессии хранятся только
+идентификаторы, файлы лежат в `<session>/project/.botinok/images/` (инструмент
+`image`). `_mount_content_with_images` режет текст на сегменты: текст — Markdown,
+картинка — ленивый `ImageBlock` (`core/image_block.py`), который рисует только
+видимый срез строк. `ChatScroll.watch_scroll_y` подтягивает картинки при
+прокрутке. Пейджер (F6) рендерит их chafa. Неизвестный id — пометка, не падение.
+→ `concepts/image_rendering.md`, `entities/tools/image.md`
 
 ## Встроенный терминал
 `BotinokTextualApp` показывает PTY-сессии `shell_exec` прямо в TUI:

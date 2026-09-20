@@ -21,6 +21,7 @@ from rich.theme import Theme as RichTheme
 # теме он получается почти-белым на светлом и «исчезает».
 _PAGER_THEME = RichTheme({"markdown.code": "bold", "markdown.code_block": "none"})
 _PAGER_CODE_THEME = "ansi_light"
+from core.image_block import ImageBlock, refresh_visible_images
 from typing import Optional, Callable, List
 import io
 import json
@@ -33,6 +34,20 @@ import time
 import threading
 from datetime import datetime
 _SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+class ChatScroll(Vertical):
+    """Колонка чата: при прокрутке подтягиваем видимые изображения.
+
+    Картинки в чате — ленивые `ImageBlock`: рисуется только попавшее на экран,
+    поэтому прокрутка длинной истории с сотнями картинок остаётся быстрой.
+    """
+
+    def watch_scroll_y(self, old_value, new_value) -> None:
+        try:
+            refresh_visible_images(self)
+        except Exception:
+            pass
 
 
 def strip_ansi_backgrounds(text: str) -> str:
@@ -664,6 +679,10 @@ class BotinokTextualApp(App):
         self.model_name = ""
         self._banner_static = None
         self._banner_timer = None
+        self._logo_width_used = None
+        self._logo_busy = False
+        self._logo_pending = None
+        self._logo_token = 0
         self.dangerous_mode = False
         self.is_proofreader = False
         self.current_prompt = ""
@@ -923,12 +942,15 @@ class BotinokTextualApp(App):
                 entries = []
             if entries:
                 emitted = False
+                hist_has_image = False
                 for entry in entries:
                     role = entry.get("role")
                     content = entry.get("content")
                     if not content:
                         continue
                     content = str(content)
+                    if role == "user":
+                        content = self._mask_image_tokens(content)
                     if role not in ("user", "assistant"):
                         continue  # tool/system и прочее — пропускаем.
                     if emitted:
@@ -943,12 +965,34 @@ class BotinokTextualApp(App):
                         else:
                             console.print(Text("User: " + content))
                     else:
-                        try:
-                            console.print(RichMarkdown(content, code_theme=_PAGER_CODE_THEME))
-                        except Exception:
-                            console.print(Text(content))
+                        # Ответ: текст — Markdown, маркеры изображений — chafa-рендер.
+                        seeded = False
+                        for seg in self._image_segments(content):
+                            if seg["type"] == "text":
+                                txt = seg["text"]
+                                if not txt.strip():
+                                    continue
+                                try:
+                                    console.print(RichMarkdown(txt, code_theme=_PAGER_CODE_THEME))
+                                except Exception:
+                                    console.print(Text(txt))
+                                seeded = True
+                            else:
+                                ansi = self._pager_image_ansi(seg["id"], width)
+                                if ansi:
+                                    console.print(Text.from_ansi(ansi))
+                                    hist_has_image = True
+                                    seeded = True
+                                else:
+                                    console.print(Text(f"🖼 [изображение: {seg['id']}]"))
+                                    seeded = True
+                        if not seeded:
+                            pass
                     emitted = True
-                return strip_ansi_backgrounds(buffer.getvalue()) or "(чат пуст)\n"
+                out = buffer.getvalue()
+                if not hist_has_image:
+                    out = strip_ansi_backgrounds(out)
+                return out or "(чат пуст)\n"
         # Фолбэк: то, что смонтировано в чате сейчас (новая/эфемерная сессия).
         loading = getattr(self, "_loading_widget", None)
         stream = getattr(self, "stream_static", None)
@@ -957,6 +1001,7 @@ class BotinokTextualApp(App):
         except Exception:
             children = []
         emitted = False
+        had_image = False
         for widget in children:
             if widget is loading or widget is stream:
                 continue
@@ -971,6 +1016,23 @@ class BotinokTextualApp(App):
                 except Exception:
                     console.print(Text(source))
                 emitted = True
+            elif isinstance(widget, ImageBlock):
+                # В пейджере картинку отдаём настоящим chafa-рендером.
+                try:
+                    from core.image_render import render_image_ansi
+                    ansi = render_image_ansi(widget.source, max(20, width - 2))
+                except Exception:
+                    ansi = None
+                if not ansi:
+                    continue
+                if emitted:
+                    console.print()
+                try:
+                    console.print(Text.from_ansi(ansi))
+                except Exception:
+                    console.print(Text(self._widget_plain_text(widget)))
+                emitted = True
+                had_image = True
             elif isinstance(widget, Static):
                 text = self._widget_plain_text(widget).rstrip()
                 if not text.strip().startswith(self._PAGER_KEEP_PREFIXES):
@@ -979,7 +1041,31 @@ class BotinokTextualApp(App):
                     console.print()
                 console.print(Text(text))
                 emitted = True
-        return strip_ansi_backgrounds(buffer.getvalue()) or "(чат пуст)\n"
+        out = buffer.getvalue()
+        # У картинок chafa цвет задаётся ФОНОМ: вырезание фонов их испортит.
+        if not had_image:
+            out = strip_ansi_backgrounds(out)
+        return out or "(чат пуст)\n"
+
+    @staticmethod
+    def _image_segments(content: str) -> list:
+        try:
+            from core import image_refs
+            return image_refs.split_segments(content)
+        except Exception:
+            return [{"type": "text", "text": content}]
+
+    def _pager_image_ansi(self, image_id: str, width: int):
+        """chafa-рендер картинки для пейджера (по идентификатору из текста)."""
+        try:
+            from core import image_refs
+            from core.image_render import render_image_ansi
+            path = image_refs.resolve(image_id, self.session_path)
+            if not path:
+                return None
+            return render_image_ansi(path, max(20, int(width) - 2))
+        except Exception:
+            return None
 
     def _pager_footer(self, content: str) -> str:
         """Итоговая строка пейджера: путь сессии, размер, краткая статистика."""
@@ -1064,7 +1150,7 @@ class BotinokTextualApp(App):
                 self.inline_shell_container = Vertical(id="inline_shell")
                 yield self.inline_shell_container
                 # Чат; кнопка пейджера — в правом верхнем углу ВНУТРИ рамки чата.
-                self.chat = Vertical(id="chat")
+                self.chat = ChatScroll(id="chat")
                 with self.chat:
                     with Horizontal(id="chat_toolbar"):
                         yield self.chat_pager_btn
@@ -2081,7 +2167,20 @@ class BotinokTextualApp(App):
     _GGUF_TAG_RE = re.compile(r"(?:<\|[^\n\r]*?\|>|</?[^>\n\r]+?>)", re.IGNORECASE)
     _GGUF_QUOTE_RE = re.compile(r'<\|"|>', re.IGNORECASE)
     _KNOWN_TOOLS = {"code_editor", "shell_exec", "file_system", "web_search", "open_url",
-                    "curl", "skills", "experience", "journal", "session_memory"}
+                    "curl", "skills", "experience", "journal", "session_memory",
+                    "web", "web_extract", "image", "vision", "audio"}
+
+    @staticmethod
+    def _mask_image_tokens(text: str) -> str:
+        """В стриме не показываем сырой [[image:<id>]] — только пометку.
+
+        Итоговый ответ рендерится отдельно (там маркер превращается в картинку).
+        """
+        try:
+            from core import image_refs
+            return image_refs.TOKEN_RE.sub("🖼 [изображение]", text)
+        except Exception:
+            return text
 
     def _rich_escape(self, text: str) -> str:
         # Нормализуем ширину (табы, VS15/VS16, ZWJ, контролы), чтобы строки с
@@ -2221,15 +2320,23 @@ class BotinokTextualApp(App):
         """Логотип + версия в начале новой сессии, с автоскейлом под ширину чата."""
         if self.chat is None:
             return
-        art = self._render_logo_art()
+        render_width = self._logo_render_width()
         try:
-            if art is not None:
-                self._banner_static = Static(art, markup=False)
-                self.chat.mount(self._banner_static)
+            # Не блокируем старт: пустой Static сразу, картинку дозаполнит
+            # фоновый рендер (см. _request_logo_render).
+            self._banner_static = Static("", markup=False)
+            self.chat.mount(self._banner_static)
+            self._logo_width_used = None
+            self._request_logo_render(render_width)
             ver = f"BOTINOK AGENT — Version {self.version}" if self.version else "BOTINOK AGENT"
             self.chat.mount(Static(f"[bold yellow]{ver}[/bold yellow]"))
             self.chat.mount(Static(""))
             self.chat.scroll_end(animate=False)
+            # Ширина чата на старте ещё не финальная — перерисовываем после
+            # раскладки (события resize при уже растянутом окне может не быть).
+            self.call_after_refresh(self._rescale_banner)
+            self.set_timer(0.3, self._rescale_banner)
+            self.set_timer(0.8, self._rescale_banner)
         except Exception:
             pass
 
@@ -2245,36 +2352,91 @@ class BotinokTextualApp(App):
         except Exception:
             return 40
 
-    def _render_logo_art(self):
-        """Логотип под текущую ширину: chafa (секстанты) или встроенный рендер."""
-        field_width = self._logo_field_width()
+    def _logo_render_width(self) -> int:
+        """Ширина для рендера, квантованная — чтобы скроллбар (±2) не вызывал
+        бесконечную петлю «перерисовал → размер изменился → снова resize».
+
+        Сверху ограничена `LOGO_MAX_WIDTH`: чем шире рендер, тем тяжелее
+        раскладка Static, а не только сам chafa.
+        """
+        width = max(16, (self._logo_field_width() // 4) * 4)
+        return min(width, self.LOGO_MAX_WIDTH)
+
+    # Баннер не должен превращаться в сотни строк: гигантский Static блокирует
+    # UI на раскладке (замер: 328x122 → ~1.5с фриза при maximize окна).
+    # Картинки в чате показываются отдельным ленивым виджетом (ImageBlock) и
+    # могут быть любой высоты — там ограничение не нужно.
+    LOGO_MAX_WIDTH = int(os.environ.get("BOTINOK_LOGO_MAX_WIDTH", "168"))
+    LOGO_MAX_HEIGHT = int(os.environ.get("BOTINOK_LOGO_MAX_HEIGHT", "48"))
+
+    def _render_logo_art(self, field_width: int = 0):
+        """Логотип под текущую ширину (chafa или встроенный рендер).
+
+        Разбор ANSI кэшируется в `core.image_render`; при повторных вызовах
+        на той же ширине это почти бесплатно.
+        """
+        if not field_width:
+            field_width = self._logo_render_width()
         logo_path = os.path.join(os.path.dirname(__file__), "..", "assets", "logo.png")
-        if not os.path.exists(logo_path):
-            return None
         try:
-            chafa = shutil.which("chafa")
-            if chafa:
-                symbols = os.environ.get("BOTINOK_LOGO_SYMBOLS", "sextant")
-                size = f"{max(16, min(100, field_width or 80))}x"
-                proc = subprocess.run(
-                    [chafa, "--format", "symbols", "--symbols", symbols,
-                     "--colors", "full", "--animate", "off", "--size", size,
-                     logo_path],
-                    capture_output=True, timeout=10,
-                )
-                if proc.returncode == 0:
-                    text = proc.stdout.decode("utf-8", "ignore")
-                    text = re.sub(r"\x1b\[\?25[lh]", "", text)
-                    return Text.from_ansi(text)
-        except Exception:
-            pass
-        try:
-            from core.image_ascii import image_to_fullcolor
-            logo_width = max(16, min(80, (field_width - 6) // 2)) if field_width else 40
-            text, _ = image_to_fullcolor(logo_path, logo_width)
-            return Text.from_ansi(text)
+            from core.image_render import render_image_text
+            return render_image_text(logo_path, field_width,
+                                     max_height=self.LOGO_MAX_HEIGHT)
         except Exception:
             return None
+
+    def _request_logo_render(self, width: int) -> None:
+        """Рендер логотипа в ФОНЕ (chafa + разбор ANSI не должны блокировать UI).
+
+        Single-flight: пока идёт один рендер, храним только последнюю нужную
+        ширину; устаревшие результаты отбрасываются по токену.
+        """
+        if width == getattr(self, "_logo_width_used", None):
+            return
+        if getattr(self, "_logo_busy", False):
+            self._logo_pending = width  # запомним последнюю нужную ширину
+            return
+        self._logo_busy = True
+        self._logo_token += 1
+        token = self._logo_token
+        logo_path = os.path.join(os.path.dirname(__file__), "..", "assets", "logo.png")
+        max_height = self.LOGO_MAX_HEIGHT
+
+        def worker() -> None:
+            try:
+                from core.image_render import render_image_text
+                text = render_image_text(logo_path, width, max_height=max_height)
+            except Exception:
+                text = None
+            try:
+                self.call_from_thread(self._apply_logo_render, token, width, text)
+            except Exception:
+                self._logo_busy = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_logo_render(self, token: int, width: int, text) -> None:
+        # Пришёл устаревший рендер — молча игнорируем, UI не трогаем.
+        if token != getattr(self, "_logo_token", 0):
+            return
+        self._logo_busy = False
+        static = getattr(self, "_banner_static", None)
+        try:
+            mounted = static is not None and static.is_mounted
+        except Exception:
+            mounted = False
+        if text is not None and mounted and width == self._logo_render_width():
+            try:
+                static.update(text)
+                self._logo_width_used = width
+            except Exception:
+                pass
+        # Если во время рендера ширина ещё менялась — догоняем последнюю.
+        pending = getattr(self, "_logo_pending", None)
+        self._logo_pending = None
+        target = pending or self._logo_render_width()
+        if target != self._logo_width_used:
+            self._request_logo_render(target)
 
     def _rescale_banner(self) -> None:
         """Перерисовать логотип под новую ширину (после ресайза)."""
@@ -2286,13 +2448,10 @@ class BotinokTextualApp(App):
                 return
         except Exception:
             return
-        art = self._render_logo_art()
-        if art is None:
-            return
-        try:
-            static.update(art)
-        except Exception:
-            pass
+        width = self._logo_render_width()
+        if width == getattr(self, "_logo_width_used", None):
+            return  # ширина не изменилась — не трогаем (иначе петля)
+        self._request_logo_render(width)
 
     def _format_tool_call(self, name: str, args) -> str:
         """Тело раскрытого tool-call: команда через shfmt либо pretty-JSON.
@@ -2337,6 +2496,38 @@ class BotinokTextualApp(App):
             self._keep_focus()
         return w
 
+    def _mount_content_with_images(self, content: str, before=None) -> list:
+        """Текст ответа + изображения по идентификаторам [[image:<id>]].
+
+        В сессии хранится только маркер; здесь он превращается в ленивый
+        `ImageBlock`, который берёт файл из каталога проекта и рисуется по
+        мере прокрутки. Неизвестный id остаётся заметной пометкой.
+        """
+        from core import image_refs
+        mounted = []
+        segments = image_refs.split_segments(str(content))
+        for seg in segments:
+            if seg["type"] == "text":
+                text = seg["text"]
+                if not text.strip():
+                    continue
+                try:
+                    widget = Markdown(normalize_cells(text))
+                except Exception:
+                    widget = Static(self._rich_escape(text), markup=True)
+            else:
+                path = image_refs.resolve(seg["id"], getattr(self, "session_path", None))
+                if path:
+                    widget = ImageBlock(path, alt=seg.get("alt", ""))
+                else:
+                    widget = Static(f"[dim]🖼 изображение не найдено: {seg['id']}[/dim]")
+            if before is not None:
+                self.chat.mount(widget, before=before)
+            else:
+                self._mount_widget(widget)
+            mounted.append(widget)
+        return mounted
+
     def _render_history_entry(self, entry: dict) -> None:
         role = entry.get("role", "")
         content = entry.get("content", "")
@@ -2368,7 +2559,7 @@ class BotinokTextualApp(App):
                 self._mount_spoiler(self._spoiler_title("Thinking", thinking), Static(self._rich_escape(thinking)), collapsed=True)
             if content:
                 try:
-                    self._mount_widget(Markdown(normalize_cells(str(content))))
+                    self._mount_content_with_images(str(content))
                 except Exception:
                     self._add_static(self._rich_escape(str(content)))
                 self._add_static("")
@@ -2715,7 +2906,8 @@ class BotinokTextualApp(App):
                 if any(t in tool_display for t in self._KNOWN_TOOLS) or ("call:" in tool_display) or ("{" in tool_display and ":" in tool_display):
                     parts.append(f"[bold magenta]Tool Call:[/bold magenta]\n{tool_display}")
             if self._stream_content:
-                t = self._collapse_newlines(self._rich_escape(self._stream_content))
+                t = self._collapse_newlines(
+                    self._rich_escape(self._mask_image_tokens(self._stream_content)))
                 parts.append(f"[#555555]Response:[/#555555]\n[#555555]{t}[/#555555]")
             self.stream_static.update("\n\n".join(parts) if parts else "")
 
@@ -2739,8 +2931,9 @@ class BotinokTextualApp(App):
             if final_content:
                 mounted_md = False
                 try:
-                    md = Markdown(normalize_cells(str(final_content)))
-                    self.chat.mount(md, before=self.stream_static)
+                    # Текст + картинки по идентификаторам [[image:<id>]].
+                    self._mount_content_with_images(str(final_content),
+                                                    before=self.stream_static)
                     self.stream_static.remove()
                     mounted_md = True
                 except Exception:

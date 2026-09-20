@@ -890,3 +890,27 @@ Esc не прерывает: `is_streaming` остаётся True, сервер 
   раскрытых спойлеров 0.
 - Тест `tests/test_history_lazy.py`; набор 19 зелёный.
 - Страницы: `entities/textual_ui.md`.
+
+## [2026-09-20] ingest | показ изображений в чате: инструмент `image`, идентификаторы, ленивый рендер
+Инструмент `image` (`tools/image_show.py`, реестр `image`): принимает картинку
+файлом или по URL, кладёт в каталог проекта, возвращает `token` вида
+`[[image:<id>]]` для вставки в текст ответа. В сессии хранятся только
+идентификаторы (`core/image_catalog.py`, `core/image_refs.py`); id уникальны и
+не повторяются (`seq` + `retired`, переиспользование по sha256).
+
+Рендер: `core/image_render.py` (chafa → фолбэк, кэши ANSI/`rich.Text`, бюджет
+памяти) + `core/image_block.py` — ленивый `ImageBlock` (фиксированная высота,
+рисуется только видимый срез строк, видимость в виртуальных координатах
+контейнера). В чате — прокрутка подтягивает картинки (`ChatScroll.watch_scroll_y`),
+в стриминге маркер маскируется, пейджер F6 рендерит картинки chafa.
+
+Диагностика фризов: `Text.from_ansi` на UI-потоке (1.2с при ширине 400) и
+гигантский `Static` (~1.5с на maximize). Исправлено: парсинг в фоне + кэш;
+баннер ограничен (`LOGO_MAX_WIDTH=168`, `LOGO_MAX_HEIGHT=48`); картинки чата —
+видимый срез. Замер 4К (400×110, 60 шт. 200×800): старт 4/60 рендеров, срез
+32/401 строк, провал UI 68 мс.
+
+Тесты: `test_image_render.py`, `test_image_catalog.py`, `test_image_in_chat.py`,
+`test_logo_rescale.py` (реальный maximize 4К), `test_lazy_images.py` (4К, высокие
+картинки). Страницы: `entities/tools/image.md`, `concepts/image_rendering.md`,
+`entities/textual_ui.md`.
