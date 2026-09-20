@@ -820,17 +820,6 @@ class BotinokTextualApp(App):
             net_meter.install()
         except Exception:
             pass
-        # Приводим mouse-tracking к набору opencode: Textual включает лишний
-        # urxvt-режим ?1015h, из-за которого VTE (xfce4-terminal/GNOME Terminal)
-        # шлёт среднюю кнопку как событие мыши вместо нативной вставки primary.
-        # Убираем 1015h и включаем button-event tracking (?1002h) как в opentui.
-        try:
-            driver = getattr(self, "_driver", None)
-            if driver is not None:
-                driver.write("\x1b[?1015l")
-                driver.write("\x1b[?1002h")
-        except Exception:
-            pass
         self.load_history()
         # Заголовки панелей и колонки таблицы инструментов — нативные средства Textual.
         try:
