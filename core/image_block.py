@@ -3,15 +3,16 @@
 Политика:
 - картинка всегда занимает всю ширину контейнера, пропорции сохраняются;
 - высота не ограничивается, контент скроллится;
-- разбирается и рисуется ТОЛЬКО ВИДИМЫЙ СРЕЗ строк (по скроллу), а не вся
-  картинка целиком.
+- рисуется ТОЛЬКО ВИДИМЫЙ СРЕЗ строк, а сам источник на лету приводится к
+  разрешению терминала и кэшируется, пока размер окна не изменился.
 
-Почему так: Textual рисует `Static` целиком, и один гигантский Static на 4К
-(ширина ~400 клеток, высота сотни строк) блокирует UI на сотни миллисекунд.
-Здесь контейнер держит ФИКСИРОВАННУЮ высоту (=высота картинки) и геометрию
-скролла, а единственный дочерний вью смещён (`offset`) на начало видимого
-среза и содержит только его. Стоимость раскладки и парсинга пропорциональна
-экрану, а не размеру картинки — поэтому на 4К всё летает.
+Схема (по требованию):
+1. `prepare_scaled(source, width, total_rows)` — уменьшенная копия ровно под
+   текущий размер терминала (≈2 px на клетку), кэшируется на диске по
+   (файл, mtime, ширина, высота). Огромный файл декодируется один раз.
+2. `render_image_band(scaled, width, rows, y0, y1)` — chafa рисует только
+   видимую полосу уже уменьшенной копии; стоимость не зависит от размера
+   исходной картинки.
 
 В сессии хранятся только идентификаторы; файл берётся из каталога по id
 (см. `core/image_catalog.py`, `core/image_refs.py`).
@@ -76,11 +77,16 @@ class ImageBlock(Container):
         self.alt = alt
         self.max_height = max_height
         self._aspect = image_aspect(source)
-        self._ansi_lines: List[str] = []
-        self._rendered_width: Optional[int] = None
+        # уменьшенная копия под текущий размер окна
+        self._scaled_path: Optional[str] = None
+        self._scaled_px: tuple = (0, 0)
+        self._scaled_width: Optional[int] = None
+        self._total_rows = 0
+        # видимый срез
         self._slice_start: Optional[int] = None
         self._slice_rows = 0
         self._slice_token = 0
+        # фоновые задачи
         self._token = 0
         self._busy = False
         self._pending_width: Optional[int] = None
@@ -103,8 +109,7 @@ class ImageBlock(Container):
         return None
 
     def _viewport_region(self):
-        """Видимое окно контейнера — в ВИРТУАЛЬНЫХ координатах (без лага
-        экранных регионов): (scroll_x, scroll_y, ширина, высота)."""
+        """Видимое окно контейнера в виртуальных координатах (без лага регионов)."""
         c = self._scroll_container()
         try:
             if c is not None:
@@ -137,7 +142,7 @@ class ImageBlock(Container):
         except Exception:
             return True
 
-    def _reserve_height(self, width: int) -> int:
+    def _rows_for_width(self, width: int) -> int:
         rows = nominal_rows(width, self._aspect)
         if self.max_height > 0:
             rows = min(rows, self.max_height)
@@ -145,7 +150,7 @@ class ImageBlock(Container):
 
     def _set_placeholder(self) -> None:
         width = self._target_width() or 40
-        rows = len(self._ansi_lines) or self._reserve_height(width)
+        rows = self._total_rows or self._rows_for_width(width)
         try:
             self.styles.height = rows
             label = os.path.basename(self.source)
@@ -169,7 +174,6 @@ class ImageBlock(Container):
             bottom = min(vr.height, vp.y + vp.height - vr.y + _MARGIN_ROWS)
             if bottom <= top:
                 return None
-            # Квантуем начало, чтобы мелкий скролл не пересобирал срез.
             top = (top // _MARGIN_ROWS) * _MARGIN_ROWS
             return top, max(top + 1, bottom)
         except Exception:
@@ -192,7 +196,7 @@ class ImageBlock(Container):
         self._timer = self.set_timer(0.05, self.refresh_visibility)
 
     def refresh_visibility(self) -> None:
-        """Подтянуть картинку/срез, если блок виден (идемпотентно)."""
+        """Подготовить копию/полосу, если блок виден (идемпотентно)."""
         self._timer = None
         if not self.is_mounted:
             return
@@ -201,13 +205,13 @@ class ImageBlock(Container):
         width = self._target_width()
         if width <= 0:
             return
-        if width != self._rendered_width:
-            self._request_full(width)
+        if width != self._scaled_width or not self._scaled_path:
+            self._request_prepare(width)
             return
         self._render_slice()
 
-    # -- полный рендер (в фоне) ----------------------------------------
-    def _request_full(self, width: int) -> None:
+    # -- шаг 1: уменьшенная копия под размер окна (в фоне) ---------------
+    def _request_prepare(self, width: int) -> None:
         if self._busy:
             self._pending_width = width
             return
@@ -215,22 +219,22 @@ class ImageBlock(Container):
         self._token += 1
         token = self._token
         source = self.source
-        max_height = self.max_height
+        rows = self._rows_for_width(width)
 
         def worker() -> None:
             try:
-                from core.image_render import render_image_ansi
-                ansi = render_image_ansi(source, width, max_height=max_height)
+                from core.image_render import prepare_scaled
+                result = prepare_scaled(source, width, rows)
             except Exception:
-                ansi = None
+                result = None
             try:
-                self.app.call_from_thread(self._apply_full, token, width, ansi)
+                self.app.call_from_thread(self._apply_prepare, token, width, rows, result)
             except Exception:
                 self._busy = False
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_full(self, token: int, width: int, ansi) -> None:
+    def _apply_prepare(self, token: int, width: int, rows: int, result) -> None:
         if token != self._token:
             return
         self._busy = False
@@ -238,12 +242,15 @@ class ImageBlock(Container):
             mounted = self.is_mounted
         except Exception:
             mounted = False
-        if ansi and mounted:
-            self._ansi_lines = ansi.split("\n")
-            self._rendered_width = width
+        if result and mounted:
+            path, tw, th = result
+            self._scaled_path = path
+            self._scaled_px = (tw, th)
+            self._scaled_width = width
+            self._total_rows = rows
             self._slice_start = None
             try:
-                self.styles.height = max(1, len(self._ansi_lines))
+                self.styles.height = rows
             except Exception:
                 pass
             self._render_slice(force=True)
@@ -251,40 +258,53 @@ class ImageBlock(Container):
             self._set_placeholder()
         pending = self._pending_width
         self._pending_width = None
-        if pending and pending != self._rendered_width:
-            self._request_full(pending)
+        if pending and pending != self._scaled_width:
+            self._request_prepare(pending)
 
-    # -- отрисовка видимого среза (в фоне) ------------------------------
+    # -- шаг 2: chafa только по видимой полосе (в фоне) ------------------
     def _render_slice(self, force: bool = False) -> None:
-        if not self._ansi_lines:
+        if not self._scaled_path:
             self._set_placeholder()
             return
         rng = self._visible_range()
         if rng is None:
             return
         start, end = rng
-        end = min(end, len(self._ansi_lines))
+        end = min(end, self._total_rows)
         if not force and start == self._slice_start:
             return
         self._slice_start = start
-        lines = self._ansi_lines[start:end]
+        rows = max(1, end - start)
+        tw, th = self._scaled_px
+        y0 = int(th * start / self._total_rows) if self._total_rows else 0
+        y1 = int(th * end / self._total_rows) if self._total_rows else th
+        y1 = max(y0 + 1, min(th, y1))
         self._slice_token += 1
         token = self._slice_token
+        scaled = self._scaled_path
+        width = self._scaled_width or self._target_width()
 
         def worker() -> None:
             try:
-                from rich.text import Text
-                parsed = Text.from_ansi("\n".join(lines))
+                from core.image_render import render_image_band
+                ansi = render_image_band(scaled, width, rows, y0, y1)
+            except Exception:
+                ansi = None
+            try:
+                parsed = None
+                if ansi:
+                    from rich.text import Text
+                    parsed = Text.from_ansi(ansi)
             except Exception:
                 parsed = None
             try:
-                self.app.call_from_thread(self._apply_slice, token, start, end, parsed)
+                self.app.call_from_thread(self._apply_slice, token, start, rows, parsed)
             except Exception:
                 pass
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_slice(self, token: int, start: int, end: int, text) -> None:
+    def _apply_slice(self, token: int, start: int, rows: int, text) -> None:
         if token != self._slice_token or text is None:
             return
         if start != self._slice_start:
@@ -292,23 +312,22 @@ class ImageBlock(Container):
         try:
             if not self.is_mounted:
                 return
-            self._slice_rows = max(1, end - start)
-            self._view.styles.height = self._slice_rows
+            self._slice_rows = rows
+            self._view.styles.height = rows
             self._view.styles.offset = (0, start)
             self._view.update(text)
         except Exception:
             pass
 
+    # -- диагностика/освобождение ---------------------------------------
     def visible_rows(self) -> int:
-        """Сколько строк реально разобрано/нарисовано сейчас (для тестов/диагностики)."""
         return self._slice_rows
 
     def total_rows(self) -> int:
-        """Полная высота картинки в строках (0, пока не отрендерена)."""
-        return len(self._ansi_lines)
+        return self._total_rows
 
     def release(self) -> None:
-        """Сбросить разобранное (например, ушёл далеко за экран)."""
+        """Сбросить нарисованный срез (например, ушёл далеко за экран)."""
         self._slice_start = None
         self._set_placeholder()
 

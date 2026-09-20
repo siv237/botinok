@@ -34,6 +34,13 @@ FALLBACK_DIR = os.path.expanduser("~/.botinok/images")
 
 MAX_BYTES = int(os.environ.get("BOTINOK_IMAGE_MAX_BYTES", str(25 * 1024 * 1024)))
 
+# Нормализация «под терминал»: нет смысла хранить/декодировать 4000x2250, если
+# терминал показывает максимум ~500 клеток (≈1000 px по ширине). Дериватив
+# сохраняется рядом и используется для рендера; даже очень большой файл
+# декодируется один раз и уменьшается.
+TERM_MAX_PX_WIDTH = int(os.environ.get("BOTINOK_IMAGE_TERM_WIDTH_PX", "1200"))
+TERM_MAX_PIXELS = int(os.environ.get("BOTINOK_IMAGE_TERM_PIXELS", str(2_000_000)))
+
 _BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
