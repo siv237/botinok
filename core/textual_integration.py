@@ -35,6 +35,7 @@ from core.tool_manager import (
 from core.path_utils import resolve_session_path
 from core.openai_compat import is_openai_backend, chat_stream_request, chat_once
 from core.textual_app import BotinokTextualApp
+from core.terminal_keys import install as install_terminal_keys
 
 MODELS_NO_TOOLS = set()
 
@@ -1766,6 +1767,9 @@ def ask_ollama_textual(
     app.on_submit = on_user_input
     app.on_slash_command = _handle_slash_command
     app._vram_prep_fn = _do_vram_prep
+
+    # Различение Alt+Enter (ESC+CR/LF) — до запуска TUI.
+    install_terminal_keys()
 
     app.run()
 
