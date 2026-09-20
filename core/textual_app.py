@@ -43,7 +43,23 @@ class ChatScroll(Vertical):
     поэтому прокрутка длинной истории с сотнями картинок остаётся быстрой.
     """
 
+    _images_timer = None
+
     def watch_scroll_y(self, old_value, new_value) -> None:
+        # ВАЖНО: базовый наблюдатель двигает ползунок (vertical_scrollbar.position).
+        # Без super() полоса прокрутки всегда оставалась бы наверху.
+        super().watch_scroll_y(old_value, new_value)
+        # НЕ работаем прямо в наблюдателе: монтирование/обновление виджетов во
+        # время события скролла сбивает полосу прокрутки. Откладываем на тик.
+        try:
+            if self._images_timer is not None:
+                self._images_timer.stop()
+            self._images_timer = self.set_timer(0.03, self._refresh_images)
+        except Exception:
+            pass
+
+    def _refresh_images(self) -> None:
+        self._images_timer = None
         try:
             refresh_visible_images(self)
         except Exception:
@@ -2238,10 +2254,17 @@ class BotinokTextualApp(App):
                 pass
             self._loading_widget = None
 
+    def _refresh_images_now(self) -> None:
+        try:
+            refresh_visible_images(self.chat)
+        except Exception:
+            pass
+
     def _render_initial_history(self) -> None:
         """Отрисовать только хвост истории; раннее — по кнопке/прокрутке."""
         try:
             self._render_history_range(self._history_from, len(self._history_all))
+            self.call_after_refresh(self._refresh_images_now)
             if self._history_from > 0:
                 self._ensure_load_older_button()
         finally:
@@ -2303,6 +2326,7 @@ class BotinokTextualApp(App):
                 self._render_history_range(start, end)
             finally:
                 self._render_target = None
+            self.call_after_refresh(self._refresh_images_now)
             self._history_from = start
             if self._history_from <= 0:
                 if btn is not None:
@@ -2496,7 +2520,8 @@ class BotinokTextualApp(App):
             self._keep_focus()
         return w
 
-    def _mount_content_with_images(self, content: str, before=None) -> list:
+    def _mount_content_with_images(self, content: str, before=None,
+                                   defer: bool = False) -> list:
         """Текст ответа + изображения по идентификаторам [[image:<id>]].
 
         В сессии хранится только маркер; здесь он превращается в ленивый
@@ -2518,7 +2543,7 @@ class BotinokTextualApp(App):
             else:
                 path = image_refs.resolve(seg["id"], getattr(self, "session_path", None))
                 if path:
-                    widget = ImageBlock(path, alt=seg.get("alt", ""))
+                    widget = ImageBlock(path, alt=seg.get("alt", ""), defer=defer)
                 else:
                     widget = Static(f"[dim]🖼 изображение не найдено: {seg['id']}[/dim]")
             if before is not None:
@@ -2559,7 +2584,9 @@ class BotinokTextualApp(App):
                 self._mount_spoiler(self._spoiler_title("Thinking", thinking), Static(self._rich_escape(thinking)), collapsed=True)
             if content:
                 try:
-                    self._mount_content_with_images(str(content))
+                    # История: картинки монтируем отложенно (плейсхолдер), рендер
+                    # позже — чтобы длинная история грузилась без всплеска chafa.
+                    self._mount_content_with_images(str(content), defer=True)
                 except Exception:
                     self._add_static(self._rich_escape(str(content)))
                 self._add_static("")
