@@ -335,10 +335,11 @@ class Composer(TextArea):
 
     Enter — отправка, Alt+Enter — новая строка (работает в любом терминале),
     Ctrl+J — тоже новая строка, Shift+Enter — там, где терминал его различает.
-    Esc — очистить, Alt+↑/↓ — история. Вставка из буфера (bracketed paste)
-    вставляет текст целиком и НЕ отправляет; дополнительно есть защита от
-    «всплеска» ввода на терминалах без bracketed paste (Enter внутри вставки
-    становится переводом строки, а не отправкой).
+    Esc — очистить, Alt+↑/↓ — история. Вставка из буфера (bracketed paste:
+    Shift+Insert / Ctrl+Shift+V) и средней кнопкой (primary selection) вставляет
+    текст целиком и НЕ отправляет; дополнительно есть защита от «всплеска» ввода
+    на терминалах без bracketed paste (Enter внутри вставки становится переводом
+    строки, а не отправкой).
     """
 
     BINDINGS = [
@@ -807,7 +808,8 @@ class BotinokTextualApp(App):
         yield self.thought_queue
         self.input_widget = Composer(
             id="input",
-            placeholder="Введите ваш вопрос (Enter — отправить, Alt+Enter — новая строка)...",
+            placeholder="Введите ваш вопрос (Enter — отправить, Alt+Enter — новая строка, "
+                        "вставка — Shift+Insert / средняя кнопка)...",
         )
         yield self.input_widget
 
