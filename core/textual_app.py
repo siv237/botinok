@@ -26,6 +26,8 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 import threading
@@ -660,6 +662,8 @@ class BotinokTextualApp(App):
         self._diag_id_to_key: dict = {}
         self._diag_last_refresh = 0.0
         self.model_name = ""
+        self._banner_static = None
+        self._banner_timer = None
         self.dangerous_mode = False
         self.is_proofreader = False
         self.current_prompt = ""
@@ -1121,6 +1125,14 @@ class BotinokTextualApp(App):
         # Пересчитать обрезку заголовка Prompt при изменении размеров окна.
         self._footer_dirty = True
         self.update_stats_display()
+        # Логотип баннера — перерисовать под новую ширину (с дебаунсом: chafa
+        # не должен запускаться на каждый тик перетаскивания окна).
+        try:
+            if getattr(self, "_banner_timer", None) is not None:
+                self._banner_timer.stop()
+            self._banner_timer = self.set_timer(0.25, self._rescale_banner)
+        except Exception:
+            pass
 
     def _submit_initial_prompt(self) -> None:
         prompt = (self.initial_prompt or "").strip()
@@ -2209,29 +2221,76 @@ class BotinokTextualApp(App):
         """Логотип + версия в начале новой сессии, с автоскейлом под ширину чата."""
         if self.chat is None:
             return
-        art = None
-        try:
-            from core.image_ascii import image_to_fullcolor
-            logo_path = os.path.join(os.path.dirname(__file__), "..", "assets", "logo.png")
-            if os.path.exists(logo_path):
-                # Ширина поля вывода в символах; каждый пиксель арта = 2 символа.
-                field_width = 0
-                try:
-                    field_width = self.chat.size.width or self.size.width or 0
-                except Exception:
-                    field_width = 0
-                logo_width = max(16, min(80, (field_width - 6) // 2)) if field_width else 40
-                text, _ = image_to_fullcolor(logo_path, logo_width)
-                art = Text.from_ansi(text)
-        except Exception:
-            art = None
+        art = self._render_logo_art()
         try:
             if art is not None:
-                self.chat.mount(Static(art, markup=False))
+                self._banner_static = Static(art, markup=False)
+                self.chat.mount(self._banner_static)
             ver = f"BOTINOK AGENT — Version {self.version}" if self.version else "BOTINOK AGENT"
             self.chat.mount(Static(f"[bold yellow]{ver}[/bold yellow]"))
             self.chat.mount(Static(""))
             self.chat.scroll_end(animate=False)
+        except Exception:
+            pass
+
+    def _logo_field_width(self) -> int:
+        """Доступная ширина под логотип: контент чата БЕЗ вертикального скроллбара."""
+        try:
+            chat = self.chat
+            region = getattr(chat, "scrollable_content_region", None)
+            width = region.width if region is not None else 0
+            if not width:
+                width = chat.content_region.width or chat.size.width or 0
+            return max(16, width - 1)  # -1: запас, чтобы строки не переносились
+        except Exception:
+            return 40
+
+    def _render_logo_art(self):
+        """Логотип под текущую ширину: chafa (секстанты) или встроенный рендер."""
+        field_width = self._logo_field_width()
+        logo_path = os.path.join(os.path.dirname(__file__), "..", "assets", "logo.png")
+        if not os.path.exists(logo_path):
+            return None
+        try:
+            chafa = shutil.which("chafa")
+            if chafa:
+                symbols = os.environ.get("BOTINOK_LOGO_SYMBOLS", "sextant")
+                size = f"{max(16, min(100, field_width or 80))}x"
+                proc = subprocess.run(
+                    [chafa, "--format", "symbols", "--symbols", symbols,
+                     "--colors", "full", "--animate", "off", "--size", size,
+                     logo_path],
+                    capture_output=True, timeout=10,
+                )
+                if proc.returncode == 0:
+                    text = proc.stdout.decode("utf-8", "ignore")
+                    text = re.sub(r"\x1b\[\?25[lh]", "", text)
+                    return Text.from_ansi(text)
+        except Exception:
+            pass
+        try:
+            from core.image_ascii import image_to_fullcolor
+            logo_width = max(16, min(80, (field_width - 6) // 2)) if field_width else 40
+            text, _ = image_to_fullcolor(logo_path, logo_width)
+            return Text.from_ansi(text)
+        except Exception:
+            return None
+
+    def _rescale_banner(self) -> None:
+        """Перерисовать логотип под новую ширину (после ресайза)."""
+        static = getattr(self, "_banner_static", None)
+        if static is None:
+            return
+        try:
+            if not static.is_mounted:
+                return
+        except Exception:
+            return
+        art = self._render_logo_art()
+        if art is None:
+            return
+        try:
+            static.update(art)
         except Exception:
             pass
 

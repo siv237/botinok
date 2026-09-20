@@ -185,6 +185,34 @@ def _system_deps_warning() -> str:
             "(sudo bash install.sh) — он доставит aria2/file.")
 
 
+def _ensure_chafa() -> str:
+    """Best-effort: поставить chafa (детализированный логотип баннера).
+
+    Не критично: если не вышло — логотип рисуется встроенным рендером.
+    """
+    if shutil.which("chafa"):
+        return ""
+    candidates = []
+    if shutil.which("apt-get"):
+        candidates.append(["apt-get", "install", "-y", "chafa"])
+    elif shutil.which("dnf"):
+        candidates.append(["dnf", "install", "-y", "chafa"])
+    elif shutil.which("yum"):
+        candidates.append(["yum", "install", "-y", "chafa"])
+    elif shutil.which("brew"):
+        candidates.append(["brew", "install", "chafa"])
+    for base in candidates:
+        cmd = base if os.geteuid() == 0 else (["sudo", "-n"] + base)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        except Exception:
+            continue
+        if result.returncode == 0 and shutil.which("chafa"):
+            return "[+] chafa установлен — логотип будет детализированным."
+    return ("[i] chafa не установлен — логотип во встроенном рендере "
+            "(можно поставить: sudo apt install chafa).")
+
+
 def _perform_update():
     """Выполняет git pull для обновления и при необходимости обновляет зависимости Python."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -229,9 +257,10 @@ def _perform_update():
                     )
                     pip_output = pip_result.stdout if pip_result.returncode == 0 else pip_result.stderr
                     return True, (f"{pull_result.stdout}\n[Обнаружено изменение requirements.txt]"
-                                  f"\nОбновление зависимостей:\n{pip_output}{_system_deps_warning()}")
+                                  f"\nОбновление зависимостей:\n{pip_output}{_system_deps_warning()}"
+                                  f"\n{_ensure_chafa()}")
         
-        return True, pull_result.stdout + _system_deps_warning()
+        return True, pull_result.stdout + _system_deps_warning() + "\n" + _ensure_chafa()
     except Exception as e:
         return False, str(e)
 
