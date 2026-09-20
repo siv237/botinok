@@ -14,13 +14,58 @@ from textual.containers import Vertical, Horizontal, VerticalScroll
 # лог терминала) — Rich является внутренним движком Textual. Панели/таблицы/
 # прогресс/разметка переведены на нативные виджеты Textual.
 from rich.text import Text
+from rich.console import Console as RichConsole
+from rich.markdown import Markdown as RichMarkdown
+from rich.theme import Theme as RichTheme
+# Код в пейджере — без фона и через ANSI-палитру терминала, иначе на светлой
+# теме он получается почти-белым на светлом и «исчезает».
+_PAGER_THEME = RichTheme({"markdown.code": "bold", "markdown.code_block": "none"})
+_PAGER_CODE_THEME = "ansi_light"
 from typing import Optional, Callable, List
+import io
 import json
 import os
 import re
+import sys
 import time
 import threading
 from datetime import datetime
+_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def strip_ansi_backgrounds(text: str) -> str:
+    """Убрать фоновые цвета из ANSI (SGR 40–49, 100–107 и 48;…), оставив
+    цвет текста, жирность и прочее. Нужно, т.к. палитра терминала может быть
+    иной, а фон у inline-кода Rich ломает вид."""
+    def repl(match: "re.Match") -> str:
+        params = match.group(1)
+        if params == "":
+            return match.group(0)  # полный сброс — оставляем
+        parts = params.split(";")
+        kept = []
+        i = 0
+        while i < len(parts):
+            part = parts[i]
+            if part == "48":
+                nxt = parts[i + 1] if i + 1 < len(parts) else ""
+                if nxt == "5":
+                    i += 3
+                    continue
+                if nxt == "2":
+                    i += 5
+                    continue
+                i += 1
+                continue
+            if part.isdigit() and (40 <= int(part) <= 49 or 100 <= int(part) <= 107):
+                i += 1
+                continue
+            kept.append(part)
+            i += 1
+        return ("\x1b[" + ";".join(kept) + "m") if kept else ""
+
+    return _SGR_RE.sub(repl, text)
+
+
 from core.text_width import normalize_cells, cell_truncate, cell_width
 from core.shell_screen import format_shell_command
 from core.file_kinds import syntax_renderable
@@ -345,6 +390,7 @@ class Composer(TextArea):
     BINDINGS = [
         Binding("alt+up", "history_prev", "Предыдущий вопрос", show=False),
         Binding("alt+down", "history_next", "Следующий вопрос", show=False),
+        Binding("f6", "chat_pager", "Чат в пейджере", show=False),
     ]
 
     class Submitted(Message):
@@ -447,6 +493,13 @@ class Composer(TextArea):
             return
         self._insert_via_keyboard(self._normalize_paste(text))
 
+    def action_chat_pager(self) -> None:
+        """F6 из поля ввода (оно в фокусе) — открыть чат в пейджере."""
+        try:
+            self.app.action_open_chat_in_pager()
+        except Exception:
+            pass
+
     def action_history_prev(self) -> None:
         app = self.app
         if hasattr(app, "_composer_history"):
@@ -473,6 +526,12 @@ class BotinokTextualApp(App):
     #auto_flag { width: auto; height: 1; padding: 0 1; margin: 0; display: none;
                  background: #cc8800; color: black; text-style: bold; }
     #auto_flag.on { display: block; }
+    /* Кнопка «открыть текст чата в терминале» — без фона, лёгкий акцент. */
+    #chat_pager_btn { width: auto; height: 1; min-height: 1; max-height: 1; min-width: 0;
+                     padding: 0 1; margin: 0 0 0 0; border: none;
+                     background: transparent; color: #6b8f9a; text-style: bold; }
+    #chat_pager_btn:hover, #chat_pager_btn:focus {
+                     background: transparent; color: cyan; text-style: bold underline; }
     #main { height: 1fr; }
     #content { width: 2fr; height: 1fr; padding: 0; }
     #diag { height: auto; max-height: 16; width: 1fr; background: transparent; border: none; padding: 0; }
@@ -525,6 +584,7 @@ class BotinokTextualApp(App):
     #inline_shell_buttons { height: 3; width: auto; align: right middle; }
     #inline_shell_buttons Button { min-width: 12; height: 3; margin: 0 1; }
     #chat { height: 1fr; min-height: 3; border: solid green; padding: 0 1; overflow-y: auto; }
+    #chat_toolbar { dock: top; height: 1; min-height: 1; width: 1fr; align-horizontal: right; }
     #load_older { width: 1fr; height: 1; min-height: 1; margin: 0; padding: 0 1;
                   background: transparent; border: none; color: cyan; }
     #load_older:hover { background: $primary 30%; }
@@ -570,6 +630,10 @@ class BotinokTextualApp(App):
     Collapsible { width: 1fr; height: auto; background: transparent; border: none; padding: 0; }
     CollapsibleTitle { color: $text-muted; padding: 0 1; width: 1fr; }
     """
+
+    BINDINGS = [
+        Binding("f6", "open_chat_in_pager", "Чат в пейджере", show=False),
+    ]
 
     def __init__(self, session_path: str = "", on_submit: Optional[Callable] = None,
                  on_slash_command: Optional[Callable] = None, version: str = "",
@@ -767,10 +831,216 @@ class BotinokTextualApp(App):
             self._keep_focus()
         return s
 
+    @staticmethod
+    def _widget_plain_text(widget) -> str:
+        """Плоский текст одного виджета чата (Static/Markdown/Collapsible)."""
+        try:
+            if isinstance(widget, Markdown):
+                return str(getattr(widget, "source", "") or "")
+            if isinstance(widget, Collapsible):
+                return str(getattr(widget, "title", "") or "")
+            visual = getattr(widget, "visual", None)
+            if visual is not None and hasattr(visual, "plain"):
+                return visual.plain
+            content = getattr(widget, "content", None)
+            if isinstance(content, Text):
+                return content.plain
+            if isinstance(content, str):
+                return Text.from_markup(content).plain
+            renderable = getattr(widget, "renderable", None)
+            if isinstance(renderable, Text):
+                return renderable.plain
+            if isinstance(renderable, str):
+                return Text.from_markup(renderable).plain
+            if renderable is not None:
+                return str(renderable)
+        except Exception:
+            pass
+        return ""
+
+    # В пейджер идёт только чистый диалог: вопросы, мысли и ответы.
+    _PAGER_KEEP_PREFIXES = ("User:", "Assistant:", "💭")
+
+    def _chat_text(self) -> str:
+        """Плоский текст чата для пейджера — только диалог (без мыслей модели,
+        инструментов и служебных строк)."""
+        parts: List[str] = []
+        loading = getattr(self, "_loading_widget", None)
+        stream = getattr(self, "stream_static", None)
+        try:
+            children = list(self.chat.children)
+        except Exception:
+            children = []
+        for widget in children:
+            if widget is loading or widget is stream:
+                continue
+            if isinstance(widget, Markdown):
+                text = str(getattr(widget, "source", "") or "")
+            elif isinstance(widget, Static):
+                text = self._widget_plain_text(widget)
+                if not text.strip().startswith(self._PAGER_KEEP_PREFIXES):
+                    continue
+            else:
+                # Collapsible (Thinking/инструменты), кнопки, тулбары — мимо.
+                continue
+            text = text.rstrip()
+            if text.strip():
+                parts.append(text)
+        return "\n\n".join(parts) if parts else "(чат пуст)"
+
+    @staticmethod
+    def _format_ts(raw) -> str:
+        """ISO-таймстамп записи → локальное «дд.мм чч:мм:сс» для пейджера."""
+        if not raw:
+            return ""
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            try:
+                dt = dt.astimezone()
+            except Exception:
+                pass
+            return dt.strftime("%d.%m.%y %H:%M:%S")
+        except Exception:
+            return str(raw)[:19]
+
+    def _chat_ansi(self) -> str:
+        """Диалог для пейджера в ANSI: ответы — настоящим Markdown (таблицы, код,
+        жирный). Источник — ПОЛНАЯ история сессии (не только смонтированные
+        виджеты, история рендерится лениво). Для `less -R`."""
+        width = max(40, getattr(getattr(self, "size", None), "width", 80) or 80)
+        buffer = io.StringIO()
+        console = RichConsole(file=buffer, force_terminal=True, color_system="truecolor",
+                              width=width, highlight=False, soft_wrap=False, theme=_PAGER_THEME)
+        if self.session_path:
+            try:
+                from core.session_manager import SessionManager
+                entries = SessionManager().load_history_entries(self.session_path) or []
+            except Exception:
+                entries = []
+            if entries:
+                emitted = False
+                for entry in entries:
+                    role = entry.get("role")
+                    content = entry.get("content")
+                    if not content:
+                        continue
+                    content = str(content)
+                    if role not in ("user", "assistant"):
+                        continue  # tool/system и прочее — пропускаем.
+                    if emitted:
+                        console.print()
+                    ts = self._format_ts(entry.get("timestamp"))
+                    if ts:
+                        console.print(Text(f"── {ts} ──", style="dim"))
+                    if role == "user":
+                        if content.lstrip().startswith("(во время работы)"):
+                            shown = content.replace("(во время работы)", "", 1).strip()
+                            console.print(Text("💭 " + shown))
+                        else:
+                            console.print(Text("User: " + content))
+                    else:
+                        try:
+                            console.print(RichMarkdown(content, code_theme=_PAGER_CODE_THEME))
+                        except Exception:
+                            console.print(Text(content))
+                    emitted = True
+                return strip_ansi_backgrounds(buffer.getvalue()) or "(чат пуст)\n"
+        # Фолбэк: то, что смонтировано в чате сейчас (новая/эфемерная сессия).
+        loading = getattr(self, "_loading_widget", None)
+        stream = getattr(self, "stream_static", None)
+        try:
+            children = list(self.chat.children)
+        except Exception:
+            children = []
+        emitted = False
+        for widget in children:
+            if widget is loading or widget is stream:
+                continue
+            if isinstance(widget, Markdown):
+                source = str(getattr(widget, "source", "") or "").strip()
+                if not source:
+                    continue
+                if emitted:
+                    console.print()
+                try:
+                    console.print(RichMarkdown(source, code_theme=_PAGER_CODE_THEME))
+                except Exception:
+                    console.print(Text(source))
+                emitted = True
+            elif isinstance(widget, Static):
+                text = self._widget_plain_text(widget).rstrip()
+                if not text.strip().startswith(self._PAGER_KEEP_PREFIXES):
+                    continue
+                if emitted:
+                    console.print()
+                console.print(Text(text))
+                emitted = True
+        return strip_ansi_backgrounds(buffer.getvalue()) or "(чат пуст)\n"
+
+    def _pager_footer(self, content: str) -> str:
+        """Итоговая строка пейджера: путь сессии, размер, краткая статистика."""
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", content)
+        lines = plain.count("\n") + 1
+        chars = len(plain)
+        parts = ["── конец истории · Enter — вернуться ──"]
+        meta: List[str] = []
+        if self.model_name:
+            meta.append(f"Модель: {self.model_name}")
+        if self.session_path:
+            meta.append(f"Сессия: {self.session_path}")
+            try:
+                ctx = os.path.join(self.session_path, "context.json")
+                if os.path.isfile(ctx):
+                    meta.append(f"context.json: {max(1, os.path.getsize(ctx) // 1024)} КБ")
+            except Exception:
+                pass
+        meta.append(f"Диалог: {lines} строк · {chars} символов")
+        if meta:
+            parts.append(" · ".join(meta))
+        return "\n".join(parts)
+
+    def action_open_chat_in_pager(self) -> None:
+        """F6: вывести чат в обычный скроллбек терминала (выделение и копирование
+        мышью как в нормальной терминальной сессии — на всю длину)."""
+        content = self._chat_ansi()
+        header = "── История диалога ──\n\n"
+        footer = "\n" + self._pager_footer(content) + "\n"
+        try:
+            with self.suspend():
+                try:
+                    sys.stdout.write(header)
+                    sys.stdout.write(content)
+                    if not content.endswith("\n"):
+                        sys.stdout.write("\n")
+                    sys.stdout.write(footer)
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    pass
+        except Exception:
+            pass
+        finally:
+            try:
+                self.set_focus(self.query_one("#input", Composer))
+            except Exception:
+                pass
+            try:
+                self.refresh()
+            except Exception:
+                pass
+
     def compose(self) -> ComposeResult:
         self.header_row = Horizontal(id="header_row")
         self.header_display = Static("", id="header")
         self.auto_flag = Static("АВТОСОГЛАСИЕ: ВКЛ ✕", id="auto_flag")
+        self.chat_pager_btn = Button(">_", id="chat_pager_btn")
+        try:
+            self.chat_pager_btn.tooltip = "Открыть чат в терминале (F6)"
+        except Exception:
+            pass
         with self.header_row:
             yield self.header_display
             yield self.auto_flag
@@ -789,8 +1059,11 @@ class BotinokTextualApp(App):
                 # чат со стримом модели остаётся под ним.
                 self.inline_shell_container = Vertical(id="inline_shell")
                 yield self.inline_shell_container
+                # Чат; кнопка пейджера — в правом верхнем углу ВНУТРИ рамки чата.
                 self.chat = Vertical(id="chat")
-                yield self.chat
+                with self.chat:
+                    with Horizontal(id="chat_toolbar"):
+                        yield self.chat_pager_btn
             with Vertical(id="right"):
                 with Vertical(id="stats"):
                     self.stats_rows = Static("", id="stats_rows")
@@ -1314,6 +1587,10 @@ class BotinokTextualApp(App):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = getattr(event.button, "id", "") or ""
+        if bid == "chat_pager_btn":
+            event.stop()
+            self.action_open_chat_in_pager()
+            return
         if bid == "load_older":
             event.stop()
             self._load_older_history()

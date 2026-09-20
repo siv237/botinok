@@ -184,10 +184,42 @@ class SessionManager:
 
         return ""
 
+    @staticmethod
+    def _fast_first_user_prompt(context_path: str, max_chars: int) -> str:
+        """Быстрое извлечение первого user-текста из начала context.json без разбора
+        всего файла (сессии бывают на мегабайты)."""
+        try:
+            with open(context_path, "r", encoding="utf-8", errors="ignore") as f:
+                head = f.read(262144)
+        except Exception:
+            return ""
+        match = re.search(
+            r'"role"\s*:\s*"user".*?"content"\s*:\s*"((?:[^"\\]|\\.)*)"',
+            head, re.DOTALL,
+        )
+        if not match:
+            return ""
+        raw = match.group(1)
+        try:
+            content = json.loads('"' + raw + '"')
+        except Exception:
+            content = raw
+        content = re.sub(r"\s+", " ", str(content)).strip()
+        if not content:
+            return ""
+        if len(content) > max_chars:
+            content = content[:max_chars] + "..."
+        return content
+
     def load_first_user_prompt(self, session_path: str, max_chars: int = 120) -> str:
         context_path = os.path.join(session_path, "context.json")
         try:
             if os.path.exists(context_path):
+                # Быстрый путь: не парсим весь context.json (он бывает в мегабайты),
+                # а ищем первый user-текст по началу файла регуляркой.
+                fast = self._fast_first_user_prompt(context_path, max_chars)
+                if fast:
+                    return fast
                 with open(context_path, "r", encoding="utf-8", errors="ignore") as f:
                     ctx = json.load(f)
                 hist = ctx.get("history", []) if isinstance(ctx, dict) else []

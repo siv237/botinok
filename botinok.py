@@ -633,23 +633,23 @@ def _choose_or_resume_session(sm: SessionManager, stealth_mode: bool, default_su
     latest = sessions[0]
     latest_name = latest.get("name") or "(unknown)"
 
-    # Данные для Textual-экрана выбора: имя, путь, mtime, превью первого запроса.
-    session_data = []
-    for s in sessions:
-        s_path = s.get("path") or ""
-        preview = ""
-        if s_path and os.path.isdir(s_path):
-            preview = sm.load_first_user_prompt(s_path, max_chars=60)
-        session_data.append({
+    # Данные для Textual-экрана выбора: имя, путь, mtime. Превью первого запроса
+    # и размер папки экран досчитывает САМ, в фоне — иначе открытие списка ждёт
+    # перебор тысяч файлов во всех сессиях.
+    session_data = [
+        {
             "name": s.get("name") or "(unknown)",
-            "path": s_path,
+            "path": s.get("path") or "",
             "mtime": s.get("mtime"),
-            "preview": preview,
-        })
+        }
+        for s in sessions
+    ]
 
     from core.session_picker import pick_session
     try:
-        action, chosen_path = pick_session(session_data, latest_name)
+        action, chosen_path = pick_session(
+            session_data, latest_name, preview_loader=sm.load_first_user_prompt
+        )
     except KeyboardInterrupt:
         return None, ""
 
