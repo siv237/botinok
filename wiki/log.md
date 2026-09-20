@@ -914,3 +914,18 @@ Esc не прерывает: `is_streaming` остаётся True, сервер 
 `test_logo_rescale.py` (реальный maximize 4К), `test_lazy_images.py` (4К, высокие
 картинки). Страницы: `entities/tools/image.md`, `concepts/image_rendering.md`,
 `entities/textual_ui.md`.
+
+## [2026-09-20] perf | нормализация изображений под терминал + полосовой рендер
+Повод: огромные изображения (4000×2250 и выше) «люто тормозили» — декодировался
+и рендерился весь файл, хотя терминал показывает лишь десятки строк.
+- `core/image_render.prepare_scaled(source, width, rows)` — уменьшенная копия
+  ровно под текущий размер окна (≈2 px/клетку), кэш на диске по (файл, mtime,
+  ширина, высота); `Image.draft` для быстрого JPEG-декодирования; лимиты
+  `BOTINOK_IMAGE_TERM_WIDTH_PX=1200`, `BOTINOK_IMAGE_TERM_PIXELS=2M`.
+- `render_image_band(scaled, width, rows, y0, y1)` — chafa `--stretch` рисует
+  только видимую полосу уменьшенной копии (кэш полос в памяти и на диске).
+- `ImageBlock` переведён на два шага: подготовка копии под ширину окна, затем
+  отрисовка видимого среза; полоса из 4000×3000 и из 400×300 стоит одинаково
+  (16 мс vs 15 мс), подготовка 10 мс (кэш 0.04 мс).
+- Тест `tests/test_image_scaling.py`; набор 37 зелёный.
+- Страницы: `concepts/image_rendering.md`.

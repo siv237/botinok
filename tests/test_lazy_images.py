@@ -80,14 +80,13 @@ async def main() -> int:
 
     ir.clear_cache()
     calls = {"n": 0}
-    real = ir.render_image_ansi
+    real = ir.prepare_scaled
 
-    def counting_render(path, width, prefer_chafa=True, symbols=None, max_height=0):
+    def counting_render(path, width, rows, max_pixels=0):
         calls["n"] += 1
-        return real(path, width, prefer_chafa=prefer_chafa, symbols=symbols,
-                    max_height=max_height)
+        return real(path, width, rows, max_pixels=max_pixels)
 
-    ir.render_image_ansi = counting_render
+    ir.prepare_scaled = counting_render
     ticks = []
     try:
         app = GalleryApp(paths)
@@ -98,14 +97,14 @@ async def main() -> int:
 
             initial = calls["n"]
             visible = refresh_visible_images(container)
-            print(f"  · старт: полных рендеров {initial} из {N_IMAGES} (видимых блоков {visible})")
+            print(f"  · старт: подготовлено копий {initial} из {N_IMAGES} (видимых блоков {visible})")
             check("initial_only_visible", 0 < initial <= visible + 4,
                   f"rendered={initial} visible={visible} of {N_IMAGES}")
 
             # Высокая картинка: разобранный срез много меньше всей высоты.
             blocks = list(container.query(ImageBlock))
             first = blocks[0]
-            total_rows = len(first._ansi_lines)
+            total_rows = first.total_rows()
             slice_rows = view_rows(first)
             print(f"  · срез первой картинки: {slice_rows} строк из {total_rows}")
             check("tall_image_rendered", total_rows > 200, f"total_rows={total_rows}")
@@ -120,7 +119,7 @@ async def main() -> int:
             await settle(pilot, 1.0)
             refresh_visible_images(container)
             await settle(pilot, 0.6)
-            print(f"  · после прокрутки: полных рендеров {calls['n']} из {N_IMAGES}")
+            print(f"  · после прокрутки: подготовлено копий {calls['n']} из {N_IMAGES}")
             check("scroll_not_all", calls["n"] < N_IMAGES,
                   f"rendered={calls['n']} of {N_IMAGES}")
 
@@ -142,7 +141,7 @@ async def main() -> int:
             check("ui_responsive_4k", max_gap < 0.5,
                   f"max_gap={max_gap:.3f}s (блокировка UI-потока)")
     finally:
-        ir.render_image_ansi = real
+        ir.prepare_scaled = real
 
     print("=" * 70)
     if FAILURES:

@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from collections import OrderedDict
 from typing import Optional
 
@@ -44,6 +45,7 @@ def clear_cache() -> None:
     _CACHE.clear()
     _CACHE_BYTES = 0
     _TEXT_CACHE.clear()
+    _BAND_CACHE.clear()
 
 
 def _cache_key(path: str, width: int, symbols: Optional[str],
@@ -124,6 +126,166 @@ def render_with_chafa(path: str, width: int,
     text = proc.stdout.decode("utf-8", "ignore")
     # chafa прячет/показывает курсор — это нам не нужно в Static.
     return re.sub(r"\x1b\[\?25[lh]", "", text)
+
+
+# --- Полосовой рендер: рисуем только видимый кусок картинки -----------------
+# Смысл: для огромного изображения (например 4000x2250 или очень высокого)
+# нет смысла рендерить всё целиком — терминал показывает лишь несколько
+# десятков строк. Режем источник на полосы по пикселям, кэшируем их и отдаём
+# chafa только нужную полосу. Стоимость не зависит от размера картинки.
+_BAND_CACHE: "OrderedDict[tuple, str]" = OrderedDict()
+_BAND_CACHE_MAX = 128
+_BAND_DIR = os.path.join(tempfile.gettempdir(), "botinok-bands")
+
+
+def _band_key(path: str, y0: int, y1: int) -> tuple:
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+    return (os.path.abspath(path), mtime, int(y0), int(y1))
+
+
+def _crop_source(path: str, y0: int, y1: int) -> Optional[str]:
+    """Вырезать полосу источника в отдельный файл (кэшируется на диске)."""
+    os.makedirs(_BAND_DIR, exist_ok=True)
+    import hashlib
+    key = _band_key(path, y0, y1)
+    digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:16]
+    out = os.path.join(_BAND_DIR, f"{digest}.png")
+    if os.path.isfile(out):
+        return out
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            im = im.convert("RGBA")
+            w, h = im.size
+            y0c = max(0, min(h - 1, int(y0)))
+            y1c = max(y0c + 1, min(h, int(y1)))
+            band = im.crop((0, y0c, w, y1c))
+        band.save(out, "PNG")
+        return out
+    except Exception:
+        return None
+
+
+_SCALE_DIR = os.path.join(tempfile.gettempdir(), "botinok-scale")
+_SCALE_MAX_PIXELS = int(os.environ.get("BOTINOK_IMAGE_TERM_PIXELS", str(2_000_000)))
+
+
+def _prune_dir(directory: str, limit: int = 400) -> None:
+    try:
+        files = [os.path.join(directory, f) for f in os.listdir(directory)]
+        if len(files) <= limit:
+            return
+        files.sort(key=os.path.getmtime)
+        for f in files[:len(files) - limit]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def prepare_scaled(path: str, width: int, rows: int,
+                   max_pixels: int = 0):
+    """Уменьшенная копия источника ровно под текущий размер терминала.
+
+    Возвращает `(путь, ширина_px, высота_px)` или None. Кэшируется на диске по
+    (файл, mtime, ширина, высота) — пока размер терминала не изменился, картинка
+    не пересчитывается. Декодирование JPEG ускоряется через `Image.draft`.
+    """
+    if not path or width <= 0 or rows <= 0 or not os.path.isfile(path):
+        return None
+    target_w = max(1, int(width) * 2)
+    target_h = max(1, int(rows) * 2)
+    cap = max_pixels or _SCALE_MAX_PIXELS
+    if cap and target_w * target_h > cap:
+        scale = (cap / float(target_w * target_h)) ** 0.5
+        target_w = max(1, int(target_w * scale))
+        target_h = max(1, int(target_h * scale))
+    key = _band_key(path, 0, 0)[:2] + (target_w, target_h)
+    import hashlib
+    digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:16]
+    os.makedirs(_SCALE_DIR, exist_ok=True)
+    out = os.path.join(_SCALE_DIR, f"{digest}.png")
+    if os.path.isfile(out):
+        return out, target_w, target_h
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            try:
+                im.draft("RGB", (target_w, target_h))  # быстрый DCT-скейл для JPEG
+            except Exception:
+                pass
+            im = im.convert("RGB")
+            if im.size != (target_w, target_h):
+                resample = getattr(Image, "Resampling", Image).BILINEAR
+                im = im.resize((target_w, target_h), resample)
+        im.save(out, "PNG")
+    except Exception:
+        return None
+    _prune_dir(_SCALE_DIR)
+    return out, target_w, target_h
+
+
+def _prune_band_dir(limit: int = 400) -> None:
+    try:
+        files = [os.path.join(_BAND_DIR, f) for f in os.listdir(_BAND_DIR)]
+        if len(files) <= limit:
+            return
+        files.sort(key=os.path.getmtime)
+        for f in files[:len(files) - limit]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
+def render_image_band(path: str, width: int, rows: int, y0: int, y1: int,
+                      symbols: Optional[str] = None,
+                      timeout: float = 15.0) -> Optional[str]:
+    """ANSI ровно для полосы источника [y0, y1) пикселей, высотой `rows` строк.
+
+    Возвращает готовый кусок картинки без перерисовки всего изображения.
+    """
+    if not path or width <= 0 or rows <= 0 or not os.path.isfile(path):
+        return None
+    key = _band_key(path, y0, y1) + (int(width), int(rows),
+                                     symbols or os.environ.get("BOTINOK_LOGO_SYMBOLS", DEFAULT_SYMBOLS))
+    cached = _BAND_CACHE.get(key)
+    if cached is not None:
+        _BAND_CACHE.move_to_end(key)
+        return cached
+
+    band_file = _crop_source(path, y0, y1)
+    if not band_file:
+        return None
+    chafa = chafa_path()
+    if not chafa:
+        return None
+    sym = symbols or os.environ.get("BOTINOK_LOGO_SYMBOLS", DEFAULT_SYMBOLS)
+    try:
+        proc = subprocess.run(
+            [chafa, "--format", "symbols", "--symbols", sym,
+             "--colors", "full", "--animate", "off",
+             "--size", f"{int(width)}x{int(rows)}", "--stretch", band_file],
+            capture_output=True, timeout=timeout,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    text = re.sub(r"\x1b\[\?25[lh]", "", proc.stdout.decode("utf-8", "ignore")).rstrip("\n")
+    _BAND_CACHE[key] = text
+    _BAND_CACHE.move_to_end(key)
+    while len(_BAND_CACHE) > _BAND_CACHE_MAX:
+        _BAND_CACHE.popitem(last=False)
+    _prune_band_dir()
+    return text
 
 
 def render_with_pillow(path: str, width: int) -> Optional[str]:
