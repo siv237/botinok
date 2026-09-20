@@ -36,6 +36,19 @@ from datetime import datetime
 _SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 
 
+def filter_mouse_motion(data):
+    """Заменить `?1003h` (любое движение мыши) на `?1002h` (кнопки + колесо).
+
+    Textual включает any-event mouse: терминал шлёт MouseMove на каждый пиксель,
+    и на каждое движение происходит рендер контента под курсором — на большой
+    chafa-картинке это лавина событий и залипание UI. Прокрутка колесом и клики
+    работают и в режиме 1002, а «чистое движение» перестаёт приходить.
+    """
+    if isinstance(data, str) and "\x1b[?1003h" in data:
+        return data.replace("\x1b[?1003h", "\x1b[?1002h")
+    return data
+
+
 class ChatScroll(Vertical):
     """Колонка чата: при прокрутке подтягиваем видимые изображения.
 
@@ -1218,10 +1231,45 @@ class BotinokTextualApp(App):
         self._tools_dirty = True
         self._footer_dirty = True
         self.update_stats_display()
+        self._disable_mouse_motion()
         # Стартовый промпт из CLI (--prompt / позиционный аргумент): отправляем
         # автоматически, когда приложение готово.
         if self.initial_prompt:
             self.call_after_refresh(self._submit_initial_prompt)
+
+    def _disable_mouse_motion(self) -> None:
+        """Мышь нужна прежде всего для ПРОКРУТКИ чата — её не трогаем.
+
+        Но Textual включает `?1003h` (любое движение мыши) и терминал шлёт
+        MouseMove на каждый пиксель. Каждое такое событие Textual гоняет через
+        `get_style_at` → рендер контента виджета под курсором → на большой
+        chafa-картинке это лавина событий и залипание UI при maximize.
+        Переключаемся на `?1002h` (кнопки + колесо): прокрутка и клики работают,
+        «чистое движение» больше не приходит.
+        """
+        if os.environ.get("BOTINOK_MOUSE_MOTION", "0") == "1":
+            return
+        driver = getattr(self, "_driver", None)
+        if driver is None:
+            return
+        try:
+            if getattr(driver, "_botinok_motion_off", False):
+                return
+            original = driver.write
+
+            def write(data, _original=original):
+                return _original(filter_mouse_motion(data))
+
+            driver.write = write
+            driver._botinok_motion_off = True
+            # Если 1003 уже включён (на старте) — сразу гасим движение.
+            try:
+                original("\x1b[?1003l\x1b[?1002h")
+                driver.flush()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def on_resize(self, event) -> None:
         # Пересчитать обрезку заголовка Prompt при изменении размеров окна.
