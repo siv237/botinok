@@ -47,8 +47,10 @@ def main() -> int:
     dt_first = (time.time() - t0) * 1000
     check("scaled_created", bool(res), str(res))
     scaled, tw, th = res
-    check("scaled_size_matches_terminal", tw <= width * 2 and th <= rows * 2 and tw >= width,
-          f"{tw}x{th} для width={width} rows={rows}")
+    over = float(os.environ.get("BOTINOK_IMAGE_OVERSAMPLE", "2"))
+    check("scaled_size_matches_terminal",
+          tw == int(width * 2 * over) and th <= int(rows * 2 * over) + 2 and tw >= width,
+          f"{tw}x{th} для width={width} rows={rows} (oversample={over})")
     check("scaled_smaller_than_source", tw < 4000, f"{tw} < 4000")
     check("scaled_written", os.path.isfile(scaled))
 

@@ -170,7 +170,9 @@ def _crop_source(path: str, y0: int, y1: int) -> Optional[str]:
 
 
 _SCALE_DIR = os.path.join(tempfile.gettempdir(), "botinok-scale")
-_SCALE_MAX_PIXELS = int(os.environ.get("BOTINOK_IMAGE_TERM_PIXELS", str(2_000_000)))
+# Ограничение только сверху и щедрое: режем по ширине (сколько клеток),
+# высоту не «съедаем» — иначе высокие картинки теряли разрешение.
+_SCALE_MAX_PIXELS = int(os.environ.get("BOTINOK_IMAGE_TERM_PIXELS", str(24_000_000)))
 
 
 def _prune_dir(directory: str, limit: int = 400) -> None:
@@ -198,8 +200,11 @@ def prepare_scaled(path: str, width: int, rows: int,
     """
     if not path or width <= 0 or rows <= 0 or not os.path.isfile(path):
         return None
-    target_w = max(1, int(width) * 2)
-    target_h = max(1, int(rows) * 2)
+    # chafa качественнее работает, если скормить копию с увеличенным (×2 к
+    # минимально необходимому) разрешением — тогда ей есть из чего усреднять.
+    over = float(os.environ.get("BOTINOK_IMAGE_OVERSAMPLE", "2"))
+    target_w = max(1, int(width * 2 * over))
+    target_h = max(1, int(rows * 2 * over))
     cap = max_pixels or _SCALE_MAX_PIXELS
     if cap and target_w * target_h > cap:
         scale = (cap / float(target_w * target_h)) ** 0.5
@@ -226,7 +231,7 @@ def prepare_scaled(path: str, width: int, rows: int,
         im.save(out, "PNG")
     except Exception:
         return None
-    _prune_dir(_SCALE_DIR)
+    _prune_dir(_SCALE_DIR, limit=120)
     return out, target_w, target_h
 
 

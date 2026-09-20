@@ -94,6 +94,29 @@ async def main() -> int:
             check("block_has_content", blocks[0].total_rows() > 0,
                   f"total_rows={blocks[0].total_rows()}")
 
+        # Полоса прокрутки: после прокрутки вниз позиция не должна сбрасываться
+        # в начало при подтягивании картинок.
+        for i in range(30):
+            app._add_static(f"строка {i}")
+        app.chat.scroll_end(animate=False)
+        await settle(pilot, 0.3)
+        refresh_visible_images(app.chat)
+        await settle(pilot, 1.0)
+        check("scroll_kept_after_render", app.chat.scroll_y > 0,
+              f"scroll_y={app.chat.scroll_y} max={app.chat.max_scroll_y}")
+        # Ползунок обязан ходить за scroll_y: ChatScroll.watch_scroll_y должен
+        # вызывать super(), иначе полоса навсегда залипает наверху.
+        sb = app.chat.vertical_scrollbar
+        check("scrollbar_position_tracks_scroll",
+              abs(float(sb.position) - float(app.chat.scroll_y)) < 1.0,
+              f"position={sb.position} scroll_y={app.chat.scroll_y}")
+        app.chat.scroll_y = 0
+        await settle(pilot, 0.3)
+        check("scrollbar_position_tracks_top", abs(float(sb.position)) < 1.0,
+              f"position={sb.position}")
+        app.chat.scroll_end(animate=False)
+        await settle(pilot, 0.3)
+
         # Пейджер: идентификатор не должен светиться сырым текстом.
         pager = app._chat_ansi()
         check("pager_no_raw_token", "[[image:" not in pager)

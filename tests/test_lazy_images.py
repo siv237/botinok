@@ -108,8 +108,11 @@ async def main() -> int:
             slice_rows = view_rows(first)
             print(f"  · срез первой картинки: {slice_rows} строк из {total_rows}")
             check("tall_image_rendered", total_rows > 200, f"total_rows={total_rows}")
-            check("slice_is_window", 0 < slice_rows <= VIEW[1] + 40,
-                  f"slice_rows={slice_rows} (не должно быть {total_rows})")
+            # Полоса = видимая зона + запас в несколько экранов, но всё ещё
+            # много меньше всей высоты картинки.
+            check("slice_is_window",
+                  0 < slice_rows <= VIEW[1] * 6 and slice_rows < total_rows,
+                  f"slice_rows={slice_rows} total={total_rows}")
             check("block_height_reserved", first.region.height >= total_rows - 2,
                   f"region_h={first.region.height} total={total_rows}")
 
