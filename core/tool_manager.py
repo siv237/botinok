@@ -115,6 +115,7 @@ class ToolManager:
             "skills": ("tools.skills", "skills"),
             "curl": ("tools.curl", "curl"),
             "vision": ("tools.vision", "execute"),
+            "image": ("tools.image_show", "image"),
             "audio": ("tools.audio", "execute"),
             "session_memory": ("tools.session_memory", "session_memory_tool"),
         }
@@ -374,6 +375,34 @@ class ToolManager:
                             "url": {"type": "string", "description": "URL изображения (альтернатива image_path)"},
                             "prompt": {"type": "string", "description": "Вопрос к модели про изображение (по умолчанию: 'Опиши что ты видишь')"},
                             "timeout_sec": {"type": "integer", "description": "Таймаут скачивания URL в секундах (по умолчанию 30)"}
+                        },
+                        "required": []
+                    }
+                }
+            },
+            "image": {
+                "type": "function",
+                "function": {
+                    "name": "image",
+                    "description": ("Показать изображение В ЧАТЕ (не анализ, а отображение). "
+                                    "Принимает картинку файлом или по URL, кладёт её в каталог проекта "
+                                    "и возвращает короткий идентификатор. Чтобы картинка появилась в ответе, "
+                                    "вставь полученный token вида [[image:<id>]] прямо в текст ответа — "
+                                    "рендер чата сам превратит его в изображение по мере прокрутки. "
+                                    "В сессии хранится только идентификатор, не сам файл. "
+                                    "Идентификаторы уникальны и никогда не повторяются; повторная вставка того же файла "
+                                    "вернёт тот же id. Действия: show (по умолчанию), list, get, help."),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["show", "list", "get", "help"],
+                                       "description": "show — добавить картинку (по умолчанию); list — что уже добавлено; get — запись по id; help — справка"},
+                            "source": {"type": "string", "description": "Путь к файлу (относительный ищется в project/ сессии) или URL http/https"},
+                            "path": {"type": "string", "description": "Альтернатива source: путь к локальному файлу"},
+                            "url": {"type": "string", "description": "Альтернатива source: ссылка на изображение"},
+                            "alt": {"type": "string", "description": "Подпись к изображению (необязательно)"},
+                            "id": {"type": "string", "description": "Идентификатор для action=get"},
+                            "limit": {"type": "integer", "description": "Сколько записей вернуть для action=list (по умолчанию 50)"}
                         },
                         "required": []
                     }
