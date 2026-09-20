@@ -332,11 +332,12 @@ class ConfirmInline(Vertical):
 class Composer(TextArea):
     """Многострочный композер ввода.
 
-    Enter — отправка, Shift+Enter / Ctrl+J — новая строка, Esc — очистить,
-    Alt+↑/↓ — история. Вставка из буфера (bracketed paste) вставляет текст
-    целиком и НЕ отправляет; дополнительно есть защита от «всплеска» ввода
-    на терминалах без bracketed paste (Enter внутри вставки становится
-    переводом строки, а не отправкой).
+    Enter — отправка, Alt+Enter — новая строка (работает в любом терминале),
+    Ctrl+J — тоже новая строка, Shift+Enter — там, где терминал его различает.
+    Esc — очистить, Alt+↑/↓ — история. Вставка из буфера (bracketed paste)
+    вставляет текст целиком и НЕ отправляет; дополнительно есть защита от
+    «всплеска» ввода на терминалах без bracketed paste (Enter внутри вставки
+    становится переводом строки, а не отправкой).
     """
 
     BINDINGS = [
@@ -359,7 +360,8 @@ class Composer(TextArea):
 
     async def _on_key(self, event) -> None:
         key = getattr(event, "key", "") or ""
-        if key == "enter":
+        # Ctrl+Enter (если терминал его различает) — отправка, как обычный Enter.
+        if key in ("enter", "ctrl+enter"):
             event.stop()
             event.prevent_default()
             if time.time() < self._paste_until:
@@ -368,7 +370,9 @@ class Composer(TextArea):
             else:
                 self.action_submit()
             return
-        if key in ("shift+enter", "ctrl+j"):
+        # Новая строка: Alt+Enter — универсально (VTE/xterm/VS Code), Ctrl+J —
+        # везде, Shift+Enter — там, где терминал умеет его различать.
+        if key in ("alt+enter", "shift+enter", "ctrl+j"):
             event.stop()
             event.prevent_default()
             self.insert("\n")
@@ -757,7 +761,7 @@ class BotinokTextualApp(App):
         yield self.thought_queue
         self.input_widget = Composer(
             id="input",
-            placeholder="Введите ваш вопрос (Enter — отправить, Shift+Enter — новая строка)...",
+            placeholder="Введите ваш вопрос (Enter — отправить, Alt+Enter — новая строка)...",
         )
         yield self.input_widget
 
