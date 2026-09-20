@@ -24,6 +24,7 @@ from datetime import datetime
 from core.text_width import normalize_cells, cell_truncate, cell_width
 from core.shell_screen import format_shell_command
 from core.file_kinds import syntax_renderable
+from core.clipboard import read_primary_selection
 import core.net_meter as net_meter
 
 # Ленивая загрузка истории: сразу рисуем только хвост сессии, остальное — по
@@ -352,14 +353,28 @@ class Composer(TextArea):
             self.value = value
             super().__init__()
 
+    # «Всплеск» ввода = вставка из буфера на терминале без bracketed paste:
+    # символы идут пачкой с почти нулевым интервалом. Ловим это по времени МЕЖДУ
+    # КЛАВИШАМИ прямо здесь, до обработки Enter: TextArea.Changed обрабатывается
+    # уже после клавиш, и окно не успевало открыться (вставка рассылалась по
+    # строкам, как у opencode без bracketed paste).
+    PASTE_GAP = 0.02
+    PASTE_WINDOW = 0.25
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._paste_until = 0.0
         self._prev_len = 0
         self._last_change = 0.0
+        self._last_key_time = 0.0
 
     async def _on_key(self, event) -> None:
         key = getattr(event, "key", "") or ""
+        now = time.time()
+        if getattr(event, "is_printable", False) and getattr(event, "character", None):
+            if self._last_key_time and (now - self._last_key_time) < self.PASTE_GAP:
+                self._paste_until = now + self.PASTE_WINDOW
+            self._last_key_time = now
         # Ctrl+Enter (если терминал его различает) — отправка, как обычный Enter.
         if key in ("enter", "ctrl+enter"):
             event.stop()
@@ -399,6 +414,37 @@ class Composer(TextArea):
         text = (self.text or "").strip()
         if text:
             self.post_message(self.Submitted(text))
+
+    @staticmethod
+    def _normalize_paste(text: str) -> str:
+        """Терминалы (VTE) внутри bracketed paste разделяют строки как `\\r`/`\\r\\n`."""
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+
+    def _insert_via_keyboard(self, text: str) -> None:
+        result = self._replace_via_keyboard(text, *self.selection)
+        if result is not None:
+            self.move_cursor(result.end_location)
+        self._paste_until = time.time() + self.PASTE_WINDOW
+
+    async def _on_paste(self, event) -> None:
+        """Bracketed paste: вставляем текст целиком (редактор с прокруткой)."""
+        if self.read_only:
+            return
+        text = getattr(event, "text", "") or ""
+        if not text:
+            return
+        # prevent_default обязателен: Textual вызывает _on_paste по всей MRO,
+        # то есть и базовый TextArea._on_paste — иначе текст вставится дважды.
+        event.prevent_default()
+        event.stop()
+        self._insert_via_keyboard(self._normalize_paste(text))
+        self.focus()
+
+    def insert_paste(self, text: str) -> None:
+        """Вставить готовый текст (в т.ч. многострочный) без отправки."""
+        if not text:
+            return
+        self._insert_via_keyboard(self._normalize_paste(text))
 
     def action_history_prev(self) -> None:
         app = self.app
@@ -770,6 +816,17 @@ class BotinokTextualApp(App):
         # фоновой проверки памяти, которая стартует ниже).
         try:
             net_meter.install()
+        except Exception:
+            pass
+        # Приводим mouse-tracking к набору opencode: Textual включает лишний
+        # urxvt-режим ?1015h, из-за которого VTE (xfce4-terminal/GNOME Terminal)
+        # шлёт среднюю кнопку как событие мыши вместо нативной вставки primary.
+        # Убираем 1015h и включаем button-event tracking (?1002h) как в opentui.
+        try:
+            driver = getattr(self, "_driver", None)
+            if driver is not None:
+                driver.write("\x1b[?1015l")
+                driver.write("\x1b[?1002h")
         except Exception:
             pass
         self.load_history()
@@ -2226,6 +2283,64 @@ class BotinokTextualApp(App):
             self.request_stop()
             self._log_stop_once()
             event.stop()
+
+    def on_mouse_down(self, event) -> None:
+        # Средняя кнопка = вставка primary selection. При включённом mouse-tracking
+        # терминал не вставляет сам, а шлёт MouseDown(button=2), поэтому вставку
+        # делаем здесь.
+        try:
+            if getattr(event, "button", None) != 2:
+                return
+            if os.environ.get("BOTINOK_DEBUG"):
+                self.append_log("[dim]middle-click: button=2 получен[/dim]")
+            # Не выдёргиваем фокус из встроенного терминала.
+            if self.inline_shell_active and self.inline_shell_widget is not None:
+                node = self.focused
+                while node is not None:
+                    if node is self.inline_shell_widget:
+                        return
+                    node = getattr(node, "parent", None)
+            event.stop()
+            # xclip/чтение selection — блокирующая операция; уводим её в поток,
+            # иначе на большом тексте и во время генерации UI зависает и вставка
+            # теряется.
+            threading.Thread(target=self._paste_primary_worker, daemon=True).start()
+        except Exception:
+            pass
+
+    def _paste_primary_worker(self) -> None:
+        text = read_primary_selection()
+        try:
+            self.call_from_thread(self._apply_pasted_text, text)
+        except Exception:
+            pass
+
+    def _apply_pasted_text(self, text: str) -> None:
+        try:
+            if os.environ.get("BOTINOK_DEBUG"):
+                self.append_log(f"[dim]middle-click: primary={len(text)} символов[/dim]")
+            if not text or self.input_widget is None:
+                return
+            self.input_widget.insert_paste(text)
+            self.input_widget.focus()
+            self._autosize_composer()
+        except Exception:
+            pass
+
+    def on_paste(self, event) -> None:
+        # Вставка (bracketed paste) приходит на сфокусированный виджет. Если фокус
+        # ушёл с поля ввода (например, после выделения текста мышью), ловим Paste
+        # здесь и вставляем в композер — иначе вставка «терялась».
+        try:
+            text = getattr(event, "text", "") or ""
+            if not text or self.input_widget is None:
+                return
+            event.stop()
+            self.input_widget.insert_paste(text)
+            self.input_widget.focus()
+            self._autosize_composer()
+        except Exception:
+            pass
 
     def on_click(self, event) -> None:
         # Клик по флагу автосогласия в шапке — выключить его.

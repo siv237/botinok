@@ -124,16 +124,21 @@ async def main() -> int:
         check("ctrl_j_newline", c.text == "x\ny" and submitted == [],
               f"text={c.text!r} submitted={submitted!r}")
 
+        # Печатаем текст не «всплеском» (пауза), затем отправляем.
         reset(app)
         submitted.clear()
-        feed(app, b"hi\x1b[27;5;13~")
+        feed(app, b"hi")
+        await asyncio.sleep(0.35)
+        feed(app, b"\x1b[27;5;13~")
         await pilot.pause()
         check("ctrl_enter_submits", submitted == ["hi"] and c.text == "",
               f"text={c.text!r} submitted={submitted!r}")
 
         reset(app)
         submitted.clear()
-        feed(app, b"ok\r")
+        feed(app, b"ok")
+        await asyncio.sleep(0.35)
+        feed(app, b"\r")
         await pilot.pause()
         check("enter_submits", submitted == ["ok"] and c.text == "",
               f"text={c.text!r} submitted={submitted!r}")

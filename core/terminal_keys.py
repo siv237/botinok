@@ -13,6 +13,7 @@ xterm ``CSI 27;<mod>;<code>~`` (на случай, если терминал и�
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Iterable
 
@@ -58,17 +59,34 @@ class BotinokXTermParser(XTermParser):
         yield from super()._sequence_to_key_events(sequence, alt)
 
 
+_DEBUG_LOG = "/tmp/botinok_input.log"
+
+
+class _DebugLoggingParser(BotinokXTermParser):
+    """То же, но пишет сырой ввод терминала в файл (для диагностики)."""
+
+    def feed(self, data: str):
+        try:
+            if data:
+                with open(_DEBUG_LOG, "a") as f:
+                    f.write(repr(data) + "\n")
+        except Exception:
+            pass
+        return super().feed(data)
+
+
 def install() -> None:
     """Поставить парсер клавиш в Linux-драйверы Textual до запуска приложения."""
+    parser_cls = _DebugLoggingParser if os.environ.get("BOTINOK_DEBUG") else BotinokXTermParser
     try:
         import textual.drivers.linux_driver as _linux_driver
 
-        _linux_driver.XTermParser = BotinokXTermParser
+        _linux_driver.XTermParser = parser_cls
     except Exception:
         pass
     try:
         import textual.drivers.linux_inline_driver as _linux_inline
 
-        _linux_inline.XTermParser = BotinokXTermParser
+        _linux_inline.XTermParser = parser_cls
     except Exception:
         pass
