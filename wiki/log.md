@@ -983,3 +983,14 @@ Esc не прерывает: `is_streaming` остаётся True, сервер 
 - `install.sh`: `ffmpeg` в списках пакетов (apt/dnf/yum/brew).
 - Тест `tests/test_system_deps.py`; страницы `concepts/self_update.md`,
   `entities/botinok_cli.md`; CHANGELOG (Unreleased).
+
+## [2026-09-21] fix | изображения: chafa 1.8 не знает --animate
+После установки chafa (обновление из git) картинки всё равно не рисовались:
+band-рендер передавал `--animate off`, которого нет в chafa 1.8.0 (Ubuntu 22.04)
+→ rc=1, `render_image_band` → None, `ImageBlock` — пустой placeholder.
+- `core/image_render.py`: `chafa_caps()` (по `chafa --help`, кэш) и
+  `_chafa_base_args()` — `--animate off` только если поддерживается; применено
+  в `render_with_chafa` и `render_image_band`.
+- Тест `tests/test_chafa_args.py`; `test_image_scaling`, `test_image_in_chat`,
+  `test_lazy_images` снова зелёные. Страница `concepts/image_rendering.md`,
+  CHANGELOG.
