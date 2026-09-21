@@ -18,6 +18,7 @@ status: stable
 - `--proofread` — режим корректора, работает и в Textual, и в headless. → `concepts/proofreader.md`
 - `--wizard` — мастер настройки. → `concepts/config_priority.md`
 - `--update`, `--update-packages`/`-U` — обновление. → `concepts/self_update.md`
+- `--ensure-deps` — только проверка/установка системных компонентов (`chafa`, `ffmpeg`, `aria2`, …), без обновления кода. → `concepts/self_update.md`
 - `--debug` — отладочный вывод (в т.ч. в Textual).
 
 ## Режимы запуска

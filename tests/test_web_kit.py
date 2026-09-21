@@ -158,6 +158,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send(b"forbidden", "text/plain", status=403)
             else:
                 self._send(TINY_JPEG, "image/jpeg")
+        elif path == "/gallery":
+            html = ('<!doctype html><html><body>'
+                    '<img src="/img.jpg" alt="рабочая">'
+                    '<img src="/missing" alt="битая">'
+                    '</body></html>')
+            self._send(html.encode("utf-8"), "text/html; charset=utf-8")
         elif path == "/missing":
             self._send(b"nope", "text/plain", status=404)
         else:
@@ -348,7 +354,8 @@ def main() -> int:
         # web_search wrapper: без сети тестируем делегирование через monkeypatch
         cached = web_search_tool._web._action_search
 
-        def fake_search(query, headers, timeout_sec, max_bytes, max_items):
+        def fake_search(query, headers, timeout_sec, max_bytes, max_items,
+                        session_path=None, proxy=None):
             return ("🔎 fake — 1 результатов\n\n1. Result\n   https://example.com",
                     ['web action=open url="https://example.com"'])
         web_search_tool._web._action_search = fake_search
@@ -362,6 +369,50 @@ def main() -> int:
         parsed = web_tool._parse_ddg_html(DDG_FIXTURE, 10)
         check("ddg_parser", len(parsed) == 2 and parsed[0]["url"] == "https://example.com/a",
               str(parsed))
+
+        # --- extract-помощник: инвентарь страницы в харнесе ---
+        out = web_tool.execute(action="open", url=f"{base}/page")
+        check("inventory_harness",
+              "📦 На странице" in out and "images=" in out
+              and "links=" in out, out[-300:])
+        check("inventory_actions",
+              "web action=extract" in out and 'extract=["images"]' in out, out[-300:])
+
+        # --- action=images: отдаёт только живые прямые картинки ---
+        out = web_tool.execute(action="images", url=f"{base}/gallery", max_items=3)
+        check("images_working_only",
+              "img.jpg" in out and "/missing" not in out and "рабочих" in out, out[:400])
+        check("images_next_steps",
+              "image(source=" in out and "web action=images" in out, out[-300:])
+
+        # --- download картинки подсказывает показать через image ---
+        img_path = os.path.join(session, "shown.jpg")
+        out = web_tool.execute(action="download", url=f"{base}/img.jpg", output_path=img_path)
+        check("download_image_hints_image",
+              os.path.exists(img_path) and "image(source=" in out, out[:300])
+
+        # --- fallback движка: aria2c упал → httpx дотянул ---
+        orig_avail, orig_aria = web_tool._aria2c_available, web_tool._aria2c_download
+        web_tool._aria2c_available = lambda: True
+        web_tool._aria2c_download = lambda *a, **k: (False, "boom")
+        try:
+            fb_path = os.path.join(session, "fallback.bin")
+            ok, err, engine = web_tool._download_file(f"{base}/file.bin", fb_path, None, 10)
+            check("download_falls_back_to_httpx",
+                  ok and os.path.exists(fb_path) and "httpx" in engine,
+                  f"ok={ok} engine={engine} err={err}")
+        finally:
+            web_tool._aria2c_available, web_tool._aria2c_download = orig_avail, orig_aria
+
+        # --- наследование прокси из сессии (без реального прокси) ---
+        from core import net_config as _nc
+        _nc.set_proxy("17277", session, scope="session")
+        check("proxy_inherited_by_web",
+              web_tool._effective_proxy(session, None) == "http://127.0.0.1:17277")
+        check("proxy_inherited_by_image_catalog",
+              __import__("core.image_catalog", fromlist=["x"])._net_proxy(session)
+              == "http://127.0.0.1:17277")
+        _nc.clear(session, scope="session")
 
         # vision по URL: CDN требует браузерный User-Agent
         from core.tool_manager import ToolManager
@@ -381,6 +432,25 @@ def main() -> int:
         r = tm.call_tool("web", {"action": "download", "url": f"{base}/file.bin",
                                  "output_path": inside}, session_path=session)
         check("gate_inside_allowed", os.path.exists(inside), r[:200])
+
+        # --- action=proxy: show / set (нормализация) / test (TCP) / clear ---
+        out = web_tool.execute(action="proxy", command="show", session_path=session)
+        check("proxy_show", "Прокси" in out, out[:200])
+        out = web_tool.execute(action="proxy", command="set", proxy="17277",
+                               session_path=session, scope="session")
+        check("proxy_set_normalizes", "127.0.0.1:17277" in out and "session" in out, out[:200])
+        out = web_tool.execute(action="proxy", command="show", session_path=session)
+        check("proxy_show_after_set",
+              "127.0.0.1:17277" in out and "session" in out, out[:200])
+        port = base.rsplit(":", 1)[-1]
+        out = web_tool.execute(action="proxy", command="set", proxy=f"127.0.0.1:{port}",
+                               session_path=session, scope="session")
+        out = web_tool.execute(action="proxy", command="test", session_path=session)
+        check("proxy_test_tcp_confirms", "✅ TCP" in out and "192" not in out, out[:300])
+        out = web_tool.execute(action="proxy", command="clear", session_path=session)
+        check("proxy_clear", "снят" in out, out[:200])
+        check("proxy_cleared_effect",
+              web_tool._effective_proxy(session, None) is None)
     finally:
         httpd.shutdown()
         httpd.server_close()
