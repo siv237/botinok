@@ -6,10 +6,14 @@ TOOL_USAGE_REMINDER:
    НЕ используй `shell_exec` для простого чтения файлов.
 4. Редактирование: используй `code_editor`. Один фрагмент — `replace`, несколько за раз — `apply` (`edits=[{old_text,new_text}]`, атомарно). Отступы/EOL инструмент прощает сам; diff изменений возвращается в ответе; откат — `undo`.
    НЕ используй `shell_exec` (sed/echo >) для правки кода.
-5. Скачивание файлов: используй `curl` (url, output_path). 
-   - Сначала проверь что файл существует (curl сам проверяет HEAD запросом)
+5. Скачивание файлов: используй `web action=download` (url, output_path).
+   - Большие файлы, докачка, торренты/magnet, sha256 — движок aria2c; сложные HTTP-запросы (методы/тело/JSON/API) — HTTP-клиент (method/json_body).
    - Рекомендуемый путь: `<session_path>/downloads/<filename>` (папка создаётся автоматически)
-   - НЕ используй `shell_exec curl` — это системный инструмент curl для HTTP запросов.
+   - Скачал картинку — покажи её через `image(source="<путь>")`.
+   - НЕ используй `shell_exec curl`.
+5a. Картинки: прямые ссылки — через `web action=images` (url=… или query=…), показ — `image(source=…)`. Не угадывай URL.
+5b. Страница получена: прочитай «📦 На Странице» (images/links/tables) и используй готовые «Следующие шаги», а не угадывай.
+5c. Сеть не отвечает: проверь `web action=proxy show`; задать/проверить — `web action=proxy command=set proxy="host:port"` и `command=test url="https://…"`. Прокси не выдумывай — только если назвал человек.
 6. Порядок: Сначала изучи (list/read), потом планируй, потом меняй.
 6a. БЕЗОПАСНЫЙ РЕЖИМ (dangerous mode OFF): НЕ пытайся выполнять shell-команды. Смотри `file_system action=help` и используй безопасные read-only операции (например, base64 файла → `file_system action=inspect command=fs.base64 path=…`, тип → `fs.file_type`). Система сама подскажет безопасный эквивалент при запрете.
 7. Системные промпты: Редактируй файлы в {{PROMPTS_DIR}}/ для настройки своего поведения в этой сессии.

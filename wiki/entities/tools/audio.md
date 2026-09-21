@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [tool, llm, audio]
-updated: 2026-08-24
-sources: 1
+updated: 2026-09-21
+sources: 2
 status: stable
 ---
 
@@ -12,9 +12,13 @@ status: stable
 
 ## Параметры
 - `audio_path` — локальный файл (wav, mp3, ogg, flac, m4a, webm, aiff).
-- `url` — URL аудио (альтернатива).
+- `url` — URL аудио (альтернатива). Если в `url` передан локальный путь или
+  `file://…` — он трактуется как файл (модель, назвавшая путь в `url`, не
+  упирается в «Request URL is missing protocol»; диагностика сессии
+  `20260824_164041_visual_run`).
 - `prompt` — вопрос к модели (по умолчанию «Опиши, что ты слышишь в этом аудио»).
 - `timeout_sec` — таймаут скачивания URL.
+- Скачивание по URL идёт **через прокси** из `core/net_config`, если он задан.
 
 ## Обработка аудио
 - Детект формата по magic-байтам (`_detect_mime`): RIFF/WAVE, MP3 (ID3/frame-sync), OGG, FLAC, WebM/MKV, MP4/M4A, AIFF; фолбэк по расширению.

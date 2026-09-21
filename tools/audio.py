@@ -100,7 +100,19 @@ def _detect_mime(data: bytes, ext_hint: str = "") -> str:
     }.get(ext, "")
 
 
-def _download_audio(url: str, timeout: int = 30) -> tuple[bytes, str]:
+def _net_proxy(session_path):
+    try:
+        from core import net_config
+        return net_config.httpx_proxy(session_path)
+    except Exception:
+        return None
+
+
+def _looks_like_remote(url: str) -> bool:
+    return str(url).lower().startswith(("http://", "https://"))
+
+
+def _download_audio(url: str, timeout: int = 30, session_path: str = None) -> tuple[bytes, str]:
     """Скачивает аудио по URL, возвращает (data, mime_type).
 
     Лимит размера проверяется по мере стрима, а не после полной загрузки,
@@ -109,7 +121,8 @@ def _download_audio(url: str, timeout: int = 30) -> tuple[bytes, str]:
     chunks = []
     size = 0
     try:
-        with httpx.stream("GET", url, timeout=timeout, follow_redirects=True) as resp:
+        with httpx.stream("GET", url, timeout=timeout, follow_redirects=True,
+                          proxy=_net_proxy(session_path)) as resp:
             resp.raise_for_status()
 
             content_type = resp.headers.get("content-type", "").lower()
@@ -240,12 +253,19 @@ def execute(
         if not audio_path and not url:
             return "❌ Error: Specify either audio_path or url"
 
-        if url:
-            audio_bytes, mime_type = _download_audio(url, timeout_sec)
+        # `url` может быть локальным путём или file:// — трактуем как файл, чтобы
+        # модель, назвавшая путь в `url`, не упиралась в «missing protocol».
+        if url and _looks_like_remote(url):
+            audio_bytes, mime_type = _download_audio(url, timeout_sec, session_path)
             source = url
         else:
-            audio_bytes, mime_type = _load_local_audio(audio_path)
-            source = audio_path
+            target = audio_path or url
+            if target and str(target).lower().startswith("file://"):
+                target = str(target)[7:]
+            if not target:
+                return "❌ Error: Specify either audio_path or url"
+            audio_bytes, mime_type = _load_local_audio(target)
+            source = target
 
         processed_bytes, final_mime_type, metadata = _validate_audio(audio_bytes, mime_type)
 

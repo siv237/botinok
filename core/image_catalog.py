@@ -34,6 +34,17 @@ FALLBACK_DIR = os.path.expanduser("~/.botinok/images")
 
 MAX_BYTES = int(os.environ.get("BOTINOK_IMAGE_MAX_BYTES", str(25 * 1024 * 1024)))
 
+# Сколько секунд помнить, что хост не отвечал (защита от зацикливания модели).
+HOST_FAIL_TTL_DEFAULT = float(os.environ.get("BOTINOK_IMAGE_HOST_TTL", "120"))
+
+
+def _host_fail_ttl() -> float:
+    try:
+        return max(0.0, float(os.environ.get("BOTINOK_IMAGE_HOST_TTL",
+                                             str(HOST_FAIL_TTL_DEFAULT))))
+    except Exception:
+        return HOST_FAIL_TTL_DEFAULT
+
 # Нормализация «под терминал»: нет смысла хранить/декодировать 4000x2250, если
 # терминал показывает максимум ~500 клеток (≈1000 px по ширине). Дериватив
 # сохраняется рядом и используется для рендера; даже очень большой файл
@@ -114,12 +125,57 @@ def _looks_like_url(source: str) -> bool:
     return source.lower().startswith(("http://", "https://"))
 
 
-def _download(url: str, timeout: int = 30) -> bytes:
+def _host_of(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _net_proxy(session_path: Optional[str]):
+    try:
+        from core import net_config
+        return net_config.httpx_proxy(session_path)
+    except Exception:
+        return None
+
+
+def _classify_download_error(exc: Exception) -> str:
+    """Понятная агенту причина сетевой/серверной ошибки (без доменной конкретики)."""
+    text = f"{type(exc).__name__}: {exc}"
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status == 403:
+        return ("403 Forbidden — источник блокирует загрузку (политика/геоблок). "
+                "Возьми прямую ссылку с другой страницы или найди картинки "
+                "через `web action=images`.")
+    if status == 404:
+        return ("404 Not Found — ссылка неверна/устарела. "
+                "Проверь адрес или найди актуальные прямые ссылки через "
+                "`web action=images`.")
+    if status == 429:
+        return "429 — слишком много запросов, подожди/смени источник."
+    if status is not None and status >= 500:
+        return f"{status} — ошибка на стороне сервера, попробуй позже."
+    if "Timeout" in type(exc).__name__:
+        return ("Таймаут — хост не отвечает. Возможен прокси: проверь "
+                "`web action=proxy show`, при необходимости задай "
+                "`web action=proxy command=set proxy=\"host:port\"` и `command=test`.")
+    if "Connect" in type(exc).__name__ or "Network" in str(exc):
+        return ("Сеть недоступна. Проверь прокси: `web action=proxy show` / "
+                "`web action=proxy command=set …` + `command=test`.")
+    return text
+
+
+def _download(url: str, timeout: int = 30, session_path: Optional[str] = None) -> bytes:
     import httpx
-    resp = httpx.get(url, timeout=timeout, follow_redirects=True,
-                     headers={"User-Agent": _BROWSER_UA,
-                              "Accept": "image/*,*/*;q=0.8"})
-    resp.raise_for_status()
+    proxy = _net_proxy(session_path)
+    try:
+        resp = httpx.get(url, timeout=timeout, follow_redirects=True, proxy=proxy,
+                         headers={"User-Agent": _BROWSER_UA,
+                                  "Accept": "image/*,*/*;q=0.8"})
+        resp.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(_classify_download_error(e))
     data = resp.content
     if len(data) > MAX_BYTES:
         raise RuntimeError(f"image too large: {len(data)} > {MAX_BYTES} bytes")
@@ -147,9 +203,49 @@ def add_image(source: str, session_path: Optional[str] = None, alt: str = "",
     if not source:
         raise ValueError("source is required (file path or URL)")
     source = source.strip()
+    state = load_catalog(session_path)
 
     if _looks_like_url(source):
-        data = _download(source, timeout_sec)
+        host = _host_of(source)
+        failures = state.get("host_failures", {}) or {}
+        entry = failures.get(host) if host else None
+        if entry:
+            try:
+                age = time.time() - float(entry.get("ts_epoch", 0))
+            except Exception:
+                age = 0
+            if age < _host_fail_ttl():
+                reason = entry.get("reason", "не отвечал ранее")
+                raise RuntimeError(
+                    f"Хост {host} уже не отвечал в этой сессии: {reason}. "
+                    f"Не повторяй тот же адрес — найди прямую ссылку через "
+                    f"`web action=images`, или проверь прокси (`web action=proxy show`).")
+            failures.pop(host, None)
+            try:
+                state["host_failures"] = failures
+                _save_catalog(state, session_path)
+            except Exception:
+                pass
+        try:
+            data = _download(source, timeout_sec, session_path)
+        except Exception as e:
+            if host:
+                state.setdefault("host_failures", {})[host] = {
+                    "reason": str(e)[:200],
+                    "ts_epoch": time.time(),
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+                try:
+                    _save_catalog(state, session_path)
+                except Exception:
+                    pass
+            raise
+        if host and host in (state.get("host_failures", {}) or {}):
+            state["host_failures"].pop(host, None)
+            try:
+                _save_catalog(state, session_path)
+            except Exception:
+                pass
         origin = source
     else:
         path = source if os.path.isabs(source) else resolve_session_path(source, session_path)
@@ -162,8 +258,6 @@ def add_image(source: str, session_path: Optional[str] = None, alt: str = "",
 
     width, height, fmt = _probe(data)
     sha256 = hashlib.sha256(data).hexdigest()
-
-    state = load_catalog(session_path)
 
     if reuse:
         for entry in state.get("entries", {}).values():

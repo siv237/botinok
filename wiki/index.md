@@ -21,11 +21,12 @@
 - [entities/shell_screen.md](entities/shell_screen.md) — `core/shell_screen.py`: встроенный терминал в TUI (свернуть/закрыть)
 - [entities/session_directory.md](entities/session_directory.md) — структура директории сессии
 - [entities/config_system.md](entities/config_system.md) — система конфигов (config.cfg, BOTINOK_CONFIG)
+- [entities/net_config.md](entities/net_config.md) — `core/net_config.py`: единый прокси для веб-инструментов
 
 ### Инструменты ([entities/tools/](entities/tools/))
 | Инструмент | Страница | Краткое описание |
 |-----------|----------|------------------|
-| web | [entities/tools/web.md](entities/tools/web.md) | Единый добыватель данных: search/open/extract/json/download; харнес подсказок |
+| web | [entities/tools/web.md](entities/tools/web.md) | Единый добыватель: search/open/extract/json/images/download/downloads/proxy; помощник-навигатор после fetch; проверка живых картинок |
 | download_manager | [entities/download_manager.md](entities/download_manager.md) | Глобальная память загрузок web: что/куда/целое, докачка, хеши |
 | safe_ops | [entities/safe_ops.md](entities/safe_ops.md) | Каталог безопасных read-only операций + подсказки эквивалента |
 | process_control | [entities/process_control.md](entities/process_control.md) | Реестр процессов и мгновенная остановка по Esc (killpg дерева) |

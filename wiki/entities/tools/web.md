@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [tool, network, integration]
-updated: 2026-09-18
-sources: 4
+updated: 2026-09-21
+sources: 6
 status: stable
 ---
 
@@ -18,11 +18,30 @@ status: stable
 | `auto` | получить URL и выбрать стратегию по content-type (по умолчанию) |
 | `open` | читаемый основной текст страницы в markdown (`_html_to_markdown`) |
 | `extract` | структура: `links` / `images` / `headings` / `meta` / `tables` + `css`-селекторы |
+| `images` | найти прямые картинки (со страницы `url` или из выдачи `query`); каждая ссылка проверяется на живую картинку |
 | `json` | JSON: jq-фильтр (`jq`) или сводка по структуре |
 | `download` | скачать/докачать файл, ISO или торрент (aria2c), проверить тип/хеш |
 | `downloads` | память загрузок: что/куда/целое (глобальная, вне сессий) |
 | `search` | поиск (DuckDuckGo HTML через httpx, fallback — lynx) |
+| `proxy` | прокси: `command=show/set/clear/test` (нормализация, проверка, подтверждение) |
 | `help` | справка |
+
+## Помощник-навигатор после любого fetch
+Любой успешный `open`/`auto`/`extract` добавляет в харнес строку
+`📦 На странице: 🖼 images=N · links=N · headings=N · tables=N · meta=N`
+(`_page_inventory`) и **готовые вызовы** под фактическое содержимое
+(`_inventory_actions`): `extract images`, `image(source=…)`, `extract links/tables`,
+а для JS-страниц без прямых `<img>` — подсказку `action=images`.
+Так модель видит, что есть на странице и как это достать, без угадывания.
+
+## Поиск изображений (`action=images`)
+Провайдер не зашит в код: инструмент берёт **любую** страницу (`url`) или
+выдачу поиска (`query`), собирает прямые картинки generic-парсером
+(`_collect_image_urls`: `img`, ленивые атрибуты, `srcset`, `og:image`/`twitter:image`)
+и **проверяет каждую ссылку** (`_verify_image`: HTTP-код + `content-type` +
+magic-байты). Возвращаются только живые; ранжирование — по размеру (фото обычно
+крупнее иконок), затем по «фотографичности» URL. Готовые `image(source=…)` — в
+«Следующих шагах».
 
 ## Загрузки: aria2c, память, докачка, хеши
 - Действие `download` идёт через **`aria2c`** (`tools/download_manager.py`): докачка
@@ -39,10 +58,35 @@ status: stable
   памяти, если он цел; недокачанные помечаются и предлагаются к `resume=true`.
 - `curl` (legacy) делегирует сюда же, поэтому получает aria2c/память/докачку.
 
+## Движки загрузки: aria2c vs HTTP-клиент
+- **aria2c** — большие файлы, докачка, торренты/magnet, проверка `sha256`.
+- **HTTP-клиент (httpx)** — сложные HTTP-запросы: методы, тело, JSON, заголовки,
+  API (и загрузки, где aria2c не проходит).
+- Если aria2c **упал**, загрузка **автоматически повторяется через httpx**
+  (`_download_file` → `_httpx_download`); ошибка aria2c переводится в
+  человекочитаемый вид (`_aria2c_error_text`). Основание — сессия
+  `20260824_164041_visual_run`: у движков разная маршрутизация (то, что не
+  проходит у aria2c, проходит у httpx, и наоборот).
+
+## Прокси (настраивает агент; без хардкодов)
+`core/net_config.py` — единый источник прокси. Приоритет: параметр вызова >
+файл сессии (`project/.botinok/net.json`) > глобальный `config.cfg [Tools] Proxy`
+> env. **Пустые env-переменные игнорируются** (иначе httpx молча обходит прокси).
+- Ввод прощающий: `17277`, `host:port`, `host:port user pass`,
+  `scheme://user:pass@host:port`, `none` → нормализуется в `scheme://…` (`normalize_proxy`).
+- Раздаётся в нужной движку форме: `httpx_proxy`, `requests_proxies`,
+  `aria2c_args` (`--all-proxy`/`--no-proxy`; aria2c не читает env), `subprocess_env`.
+- Наследуют: `web`, `image`, `vision`, `audio`, `curl` и обёртки. Соединения к
+  LLM-бэкенду прокси **не** получают (отдельная настройка).
+- Действия: `show` (эффективный + источник, пароль маскируется), `set`
+  (`scope=session|global`), `clear`, `test` (TCP + реальный запрос по httpx и
+  aria2c отдельно — подтверждает работоспособность агенту).
+
 ## Параметры
 `url`, `query`, `extract`, `css`, `jq` (алиас `jq_filter`), `output_path`,
 `headers`, `timeout_sec`, `max_bytes`, `follow_redirects`, `max_items`,
-`session_path`, `resume`, `expected_sha256`, `method`, `json_body`/`body`.
+`session_path`, `resume`, `expected_sha256`, `method`, `json_body`/`body`,
+`proxy` (разовый прокси), `no_proxy`, `scope`, `command` (для `action=proxy`).
 
 ### Локальные файлы в теле запроса
 Чтобы отправить файл в API без ручного base64, в `json_body` пишется маркер

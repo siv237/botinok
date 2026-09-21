@@ -48,6 +48,11 @@ try:
 except Exception:  # pragma: no cover
     _pc = None
 
+try:
+    from core import net_config as _net
+except Exception:  # pragma: no cover
+    _net = None
+
 
 def _run(argv, **kwargs):
     """subprocess.run, но прерываемый по Esc (через process_control)."""
@@ -143,7 +148,9 @@ def _image_rank(url: str) -> int:
         rank = 1
     low = url.lower()
     for marker in ("/static/", "logo", "icon", "wordmark", "sprite",
-                   "favicon", "badge", "avatar"):
+                   "favicon", "badge", "avatar", "feedback", "flag",
+                   "spacer", "placeholder", "loading", "blank", "pixel",
+                   "tracking", "analytics", "button"):
         if marker in low:
             rank += 5
     return rank
@@ -154,9 +161,11 @@ def _image_rank(url: str) -> int:
 # --------------------------------------------------------------------------
 
 def _harness(meta: Dict, provenance: str, advice: str,
-             next_actions: List[str]) -> str:
+             next_actions: List[str], inventory: str = "") -> str:
     line = " | ".join(f"{k}={v}" for k, v in meta.items() if v not in (None, "", []))
     out = [f"🧭 web · {line}", f"provenance={provenance}"]
+    if inventory:
+        out.append(f"📦 На странице: {inventory}")
     if advice:
         out.append(f"💡 Совет: {advice}")
     if next_actions:
@@ -166,11 +175,11 @@ def _harness(meta: Dict, provenance: str, advice: str,
 
 
 def _finish(body: str, meta: Dict, provenance: str, advice: str,
-            next_actions: List[str]) -> str:
+            next_actions: List[str], inventory: str = "") -> str:
     parts = [body.rstrip()] if body else []
     parts.append("")
     parts.append("────────────────────────────")
-    parts.append(_harness(meta, provenance, advice, next_actions))
+    parts.append(_harness(meta, provenance, advice, next_actions, inventory))
     return "\n".join(parts)
 
 
@@ -182,21 +191,38 @@ def _help() -> str:
         "  web action=auto url=…                     — сам выберет стратегию\n"
         "  web action=open url=…                     — читаемый текст страницы\n"
         "  web action=extract url=… extract=[links,tables] — структура\n"
+        "  web action=images url=… | query=…         — найти прямые картинки\n"
+        "    (со страницы или из выдачи; каждая ссылка проверяется на живую картинку)\n"
         "  web action=json url=… jq=\".daily\"        — JSON + фильтр\n"
         "    jq применяется к входу '.': '.items[] | .name',\n"
         "    условие: '.items[] | select(.time | startswith(\"2026\"))'\n"
-        "  web action=download url=… [output_path=…] — скачать файл (aria2c, докачка)\n"
+        "  web action=download url=… [output_path=…] — скачать файл (докачка, торренты, sha256)\n"
         "    большие файлы (ISO) и торренты: url=https://….torrent или url=magnet:?…\n"
         "    resume=true — докачать/перекачать; если файл уже цел — вернётся из памяти\n"
         "    expected_sha256=… — проверка хеша (при несовпадении файл удаляется)\n"
         "  web action=downloads                      — память загрузок: что/куда/целое\n"
         "  web action=search query=\"…\"               — поиск в интернете\n"
+        "  web action=proxy [command=show|set|clear|test] — прокси (см. ниже)\n"
         "  web action=help                           — эта справка\n"
         "\n"
         "  web action=json url=… method=POST json_body={…} — веб-API (POST/PUT/…)\n"
         "    для API, требующих тело: method, json_body (объект) или body (строка)\n"
         "\n"
-        "Общее: headers, timeout_sec, max_bytes, follow_redirects, session_path.\n"
+        "Чем качать (движки):\n"
+        "  • большие файлы, докачка, торренты/magnet, проверка sha256 — движок aria2c;\n"
+        "  • сложные HTTP-запросы (методы, тело, JSON, заголовки, API) — HTTP-клиент (httpx).\n"
+        "  Если aria2c не проходит, загрузка автоматически повторяется через HTTP-клиент.\n"
+        "\n"
+        "Прокси (не обязателен, по умолчанию сеть напрямую):\n"
+        "  • задать: web action=proxy command=set proxy=\"host:port\"\n"
+        "      принимается в любом виде: 17277 · host:port · host:port user pass ·\n"
+        "      scheme://user:pass@host:port · none (снять). scope=session|global.\n"
+        "  • проверить: web action=proxy command=test url=\"https://…\"\n"
+        "      (TCP + реальный запрос; для aria2c и HTTP-клиента отдельно; подтверждает работоспособность)\n"
+        "  • посмотреть: web action=proxy command=show · снять: command=clear\n"
+        "  Настройка наследуется всеми сетевыми инструментами (web/image/vision/audio).\n"
+        "\n"
+        "Общее: headers, timeout_sec, max_bytes, follow_redirects, session_path, proxy.\n"
         "Запись вне папки сессии требует dangerous mode.\n"
         "Память загрузок глобальна (~/.botinok/downloads/history.json) и не зависит от сессии.\n"
         "Старые имена (web_search, open_url, web_extract, curl) работают как алиасы.\n"
@@ -244,11 +270,24 @@ def _request_kwargs(method: str, content, json_body, data) -> dict:
     return kwargs
 
 
+def _effective_proxy(session_path: Optional[str], proxy=None) -> Optional[str]:
+    """Прокси из net_config (или None). Без net_config — только явный параметр."""
+    if _net is None:
+        return proxy or None
+    try:
+        return _net.httpx_proxy(session_path, proxy)
+    except Exception:
+        return proxy or None
+
+
 def _fetch(url: str, headers, timeout_sec: int, max_bytes: int,
            follow_redirects: bool, method: str = "GET",
-           content=None, json_body=None, data=None) -> Tuple[bytes, str, str, int, bool]:
+           content=None, json_body=None, data=None,
+           session_path: Optional[str] = None,
+           proxy=None) -> Tuple[bytes, str, str, int, bool]:
     """HTTP-запрос (GET/POST/PUT/PATCH/DELETE) с ограничением размера.
 
+    Прокси берётся у net_config (сессия/конфиг/env) или явного `proxy`.
     -> raw, final_url, content_type, status, truncated.
     """
     hdrs = _build_headers(headers)
@@ -256,7 +295,9 @@ def _fetch(url: str, headers, timeout_sec: int, max_bytes: int,
                             read=max(timeout_sec or 10, 10),
                             write=10, pool=10)
     req_kwargs = _request_kwargs(method, content, json_body, data)
-    with httpx.Client(follow_redirects=follow_redirects, timeout=timeout) as client:
+    px = _effective_proxy(session_path, proxy)
+    with httpx.Client(follow_redirects=follow_redirects, timeout=timeout,
+                      proxy=px) as client:
         with client.stream(method.upper(), url, headers=hdrs, **req_kwargs) as resp:
             chunks: List[bytes] = []
             total = 0
@@ -464,6 +505,41 @@ def _looks_like_html_doc(raw: bytes) -> bool:
     return head.startswith(b"<!doctype html") or head.startswith(b"<html")
 
 
+_IMAGE_MAGIC = (
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+    (b"BM", "bmp"),
+    (b"II*\x00", "tiff"),
+    (b"MM\x00*", "tiff"),
+)
+
+
+def _looks_like_image(raw: bytes) -> bool:
+    """Похоже ли содержимое на изображение (по magic-байтам)."""
+    if not raw:
+        return False
+    head = raw[:16]
+    for magic, _name in _IMAGE_MAGIC:
+        if head.startswith(magic):
+            return True
+    # WebP: RIFF....WEBP
+    if head.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return True
+    return False
+
+
+def _image_kind(raw: bytes) -> str:
+    head = raw[:16]
+    for magic, name in _IMAGE_MAGIC:
+        if head.startswith(magic):
+            return name
+    if head.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "webp"
+    return ""
+
+
 def _aria2c_available() -> bool:
     try:
         return _run(["aria2c", "--version"], capture_output=True,
@@ -502,7 +578,23 @@ def _destination(url: str, output_path: Optional[str], session_path: Optional[st
     return os.path.join(session_path, "downloads", fname)
 
 
-def _aria2c_download(url: str, dest: str, headers, timeout_sec: int) -> Tuple[bool, str]:
+def _aria2c_error_text(msg: str) -> str:
+    """Достать из вывода aria2c человекочитаемую причину."""
+    text = _strip_ansi(msg or "").strip()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()
+             and "CUID#" not in ln]
+    # aria2c печатает локализованные «шапки»; оставляем содержательные строки.
+    noise = ("Использованные обозначения", "aria2 продолжит загрузку",
+             "проверьте log-файл", "Для более подробной информации",
+             "Если возникли какие-либо ошибки", "Смотрите")
+    lines = [ln for ln in lines if not any(n.lower() in ln.lower() for n in noise)]
+    if not lines:
+        return ""
+    return " | ".join(lines[-3:])[:400]
+
+
+def _aria2c_download(url: str, dest: str, headers, timeout_sec: int,
+                     proxy=None, session_path: Optional[str] = None) -> Tuple[bool, str]:
     """Скачать/докачать файл (или торрент) aria2c. -> (ok, error)."""
     torrent = _is_torrent(url)
     if torrent:
@@ -521,6 +613,13 @@ def _aria2c_download(url: str, dest: str, headers, timeout_sec: int) -> Tuple[bo
         f"--timeout={min(max(timeout_sec, 5), 120)}",
         "-d", work_dir,
     ]
+    if _net is not None:
+        try:
+            cmd.extend(_net.aria2c_args(session_path, proxy))
+        except Exception:
+            pass
+    elif proxy:
+        cmd.append(f"--all-proxy={proxy}")
     if torrent:
         cmd.append("--seed-time=0")  # не раздаём после завершения
     else:
@@ -535,9 +634,8 @@ def _aria2c_download(url: str, dest: str, headers, timeout_sec: int) -> Tuple[bo
     except subprocess.TimeoutExpired:
         return False, "aria2c timeout"
     if r.returncode != 0:
-        msg = _strip_ansi(r.stderr or r.stdout or "aria2c error").strip()
-        lines = [ln for ln in msg.splitlines() if ln.strip() and "CUID#" not in ln]
-        return False, " | ".join(lines[-3:])[:400]
+        msg = _aria2c_error_text(r.stderr or r.stdout or "") or "aria2c error"
+        return False, msg
     if torrent:
         if not os.path.isdir(work_dir) or not any(os.scandir(work_dir)):
             return False, "торрент не создал файлов"
@@ -546,31 +644,51 @@ def _aria2c_download(url: str, dest: str, headers, timeout_sec: int) -> Tuple[bo
     return True, ""
 
 
-def _download_file(url: str, dest: str, headers, timeout_sec: int,
-                   resume: bool = False) -> Tuple[bool, str, str]:
-    """Скачать файл надёжно. -> (ok, error, engine).
-
-    aria2c, если доступен (умеет докачку), иначе httpx без обрезки.
-    """
-    if _aria2c_available():
-        ok, err = _aria2c_download(url, dest, headers, timeout_sec)
-        return ok, err, "aria2c"
+def _httpx_download(url: str, dest: str, headers, timeout_sec: int,
+                    proxy=None, session_path: Optional[str] = None) -> Tuple[bool, str]:
+    """Запасной движок загрузки (httpx): без обрезки, с прокси. -> (ok, error)."""
     try:
-        with httpx.Client(follow_redirects=True,
+        px = _effective_proxy(session_path, proxy)
+        with httpx.Client(follow_redirects=True, proxy=px,
                           timeout=httpx.Timeout(connect=15, read=max(timeout_sec, 30),
                                                 write=30, pool=15)) as client:
             with client.stream("GET", url, headers=_build_headers(headers)) as resp:
                 if resp.status_code >= 400:
                     body = b"".join(resp.iter_bytes())[:600]
-                    return False, f"HTTP {resp.status_code}: {_server_reason(body)}", "httpx"
+                    return False, f"HTTP {resp.status_code}: {_server_reason(body)}"
                 with open(dest, "wb") as f:
                     for chunk in resp.iter_bytes():
                         if _pc and _pc.stop_requested():
                             raise httpx.RequestError("остановлено пользователем")
                         f.write(chunk)
-        return True, "", "httpx"
+        return True, ""
     except Exception as e:
-        return False, f"{type(e).__name__}: {e}", "httpx"
+        return False, f"{type(e).__name__}: {e}"
+
+
+def _download_file(url: str, dest: str, headers, timeout_sec: int,
+                   resume: bool = False, proxy=None,
+                   session_path: Optional[str] = None) -> Tuple[bool, str, str]:
+    """Скачать файл надёжно. -> (ok, error, engine).
+
+    Предпочтительно aria2c (докачка, большие файлы). Если он недоступен или
+    упал — автоматический повтор через httpx (у движков разная маршрутизация:
+    то, что не проходит у aria2c, часто проходит у httpx, и наоборот).
+    """
+    if _aria2c_available():
+        ok, err = _aria2c_download(url, dest, headers, timeout_sec,
+                                   proxy=proxy, session_path=session_path)
+        if ok:
+            return True, "", "aria2c"
+        # Запасной движок: не оставляем модель без результата из-за движка.
+        ok2, err2 = _httpx_download(url, dest, headers, timeout_sec,
+                                    proxy=proxy, session_path=session_path)
+        if ok2:
+            return True, "", "httpx (после aria2c)"
+        return False, f"aria2c: {err} | httpx: {err2}", "aria2c+httpx"
+    ok, err = _httpx_download(url, dest, headers, timeout_sec,
+                              proxy=proxy, session_path=session_path)
+    return ok, err, "httpx"
 
 
 def _torrent_files(dest: str, limit: int = 20) -> List[str]:
@@ -588,7 +706,7 @@ def _torrent_files(dest: str, limit: int = 20) -> List[str]:
 
 def _do_download(url: str, output_path: Optional[str], headers, timeout_sec: int,
                  session_path: Optional[str], resume: bool = False,
-                 expected_sha256: Optional[str] = None) -> str:
+                 expected_sha256: Optional[str] = None, proxy=None) -> str:
     """Скачать файл (или торрент), проверить тип/хеш/целостность, записать в историю."""
     torrent = _is_torrent(url)
     dest = _destination(url, output_path, session_path)
@@ -626,7 +744,8 @@ def _do_download(url: str, output_path: Optional[str], headers, timeout_sec: int
         _dlm.record(session_path, url, dest, "in_progress",
                     engine="aria2c" if _aria2c_available() else "httpx")
 
-    ok, err, engine = _download_file(url, dest, headers, timeout_sec, resume)
+    ok, err, engine = _download_file(url, dest, headers, timeout_sec, resume,
+                                     proxy=proxy, session_path=session_path)
     elapsed = f"{time.time() - started:.2f}s"
 
     if not ok:
@@ -708,12 +827,19 @@ def _do_download(url: str, output_path: Optional[str], headers, timeout_sec: int
     if _dlm:
         _dlm.record(session_path, url, dest, "completed", total=size,
                     sha256=sha, file_type=ftype, engine=engine)
+    is_image = _looks_like_image(head)
+    next_actions = []
+    if is_image:
+        next_actions.append(f'image(source="{dest}", alt="…")')
+        advice = "это изображение — покажи его в чате через image(source=…)"
+    else:
+        advice = "файл в папке сессии"
     return _finish(
         f"✅ Скачано: {url}\n📁 Файл: {dest}\n📊 {_human_size(size)}\n"
         f"📝 {ftype}\n🔐 {sha}",
         {"action": "download", "saved": dest, "size": _human_size(size),
          "elapsed": elapsed, "engine": engine},
-        "saved", "файл в папке сессии", [])
+        "saved", advice, next_actions)
 
 
 def _action_downloads(session_path: Optional[str], limit: int = 50) -> str:
@@ -751,6 +877,110 @@ def _action_downloads(session_path: Optional[str], limit: int = 50) -> str:
     return _finish("\n".join(lines), {"action": "downloads", "count": len(entries)},
                    "extracted",
                    f"незавершённых: {len(pending)} — докачай через resume=true", nxt)
+
+
+# --------------------------------------------------------------------------
+# Прокси (настраивает агент; без хардкодов адресов и сервисов)
+# --------------------------------------------------------------------------
+
+def _fmt_proxy_state(st: dict) -> str:
+    lines = []
+    if st.get("proxy"):
+        lines.append(f"Прокси: {st.get('masked')}")
+        lines.append(f"источник: {st.get('source')}")
+        if st.get("no_proxy"):
+            lines.append(f"no_proxy: {st.get('no_proxy')}")
+    else:
+        lines.append("Прокси не задан (сеть напрямую).")
+    if st.get("env_values"):
+        lines.append("env: " + ", ".join(f"{k}={(v or '')[:40]}" for k, v in st["env_values"].items()))
+    if st.get("session_path"):
+        lines.append(f"настройки сессии: {st['session_path']}")
+    if st.get("config_path"):
+        lines.append(f"глобальный конфиг: {st['config_path']}")
+    return "\n".join(lines)
+
+
+def _action_proxy(sub: str, proxy, no_proxy, scope, url, session_path) -> str:
+    if _net is None:
+        return _finish("❌ Сетевой конфиг недоступен (core/net_config).",
+                       {"action": "proxy"}, "error", "", [])
+    sub = (sub or "show").lower()
+    try:
+        if sub == "show":
+            st = _net.show(session_path)
+            return _finish(_fmt_proxy_state(st), {"action": "proxy", "sub": "show"},
+                           "readable",
+                           "чтобы проверить — web action=proxy command=test url=\"https://…\"",
+                           ['web action=proxy command=test url="https://…"',
+                            'web action=proxy command=set proxy="host:port"',
+                            'web action=proxy command=clear'])
+        if sub == "set":
+            if not proxy:
+                return _finish("❌ Укажи proxy (напр. proxy=\"host:port\", "
+                               "proxy=\"scheme://user:pass@host:port\", или proxy=17277).",
+                               {"action": "proxy", "sub": "set"}, "error",
+                               "формат ввода прощающий: host:port / порт / scheme://…",
+                               ['web action=proxy command=set proxy="host:port"'])
+            st = _net.set_proxy(proxy, session_path, no_proxy, scope)
+            return _finish(f"✅ Прокси задан: {st.get('masked')}\n"
+                           f"scope: {st.get('scope')}\nзаписано: {st.get('stored')}",
+                           {"action": "proxy", "sub": "set", "scope": st.get("scope")},
+                           "saved",
+                           "проверь работоспособность — command=test url=\"https://…\"",
+                           ['web action=proxy command=test url="https://…"'])
+        if sub == "clear":
+            st = _net.clear(session_path, scope)
+            return _finish(f"✅ Прокси снят ({st.get('scope')}): {st.get('stored')}",
+                           {"action": "proxy", "sub": "clear"}, "saved",
+                           "запросы пойдут напрямую", [])
+        if sub == "test":
+            res = _net.test(session_path, override=proxy, url=url)
+            if res.get("error"):
+                return _finish(f"❌ {res['error']}", {"action": "proxy", "sub": "test"},
+                               "error", "сначала задай прокси: command=set",
+                               ['web action=proxy command=set proxy="host:port"'])
+            lines = [f"Прокси: {res.get('masked')} (источник: {res.get('source')})"]
+            tcp = res.get("tcp") or {}
+            lines.append(f"{'✅' if tcp.get('ok') else '❌'} TCP {tcp.get('host')}:{tcp.get('port')}"
+                         + (f" — {tcp.get('error')}" if tcp.get('error') else " — доступен"))
+            nxt = []
+            if url:
+                h = res.get("http") or {}
+                if h.get("ok"):
+                    lines.append(f"✅ httpx: HTTP {h.get('status')} "
+                                 f"{h.get('type') or ''} {_human_size(h.get('bytes') or 0)} "
+                                 f"за {h.get('elapsed')}")
+                else:
+                    lines.append(f"❌ httpx: {h.get('error') or ('HTTP ' + str(h.get('status')))}")
+                a = res.get("aria2c")
+                if a is not None:
+                    if a.get("ok"):
+                        lines.append(f"✅ aria2c: получено {_human_size(a.get('bytes') or 0)}")
+                    else:
+                        lines.append(f"❌ aria2c: {a.get('error')}")
+                    if not a.get("ok") and h.get("ok"):
+                        lines.append("(aria2c не проходит — загрузки уйдут через httpx-фолбэк)")
+            else:
+                lines.append("ℹ️ Полная проверка — передай url=\"https://…\".")
+                nxt.append('web action=proxy command=test url="https://…"')
+            ok = res.get("ok")
+            return _finish("\n".join(lines),
+                           {"action": "proxy", "sub": "test",
+                            "result": "работает" if ok else "проблемы"},
+                           "readable",
+                           "прокси подтверждён" if ok else "проверь адрес/сеть",
+                           nxt)
+        return _finish(f"❌ Неизвестная подкоманда proxy: {sub}",
+                       {"action": "proxy"}, "error",
+                       "команды: show | set | clear | test",
+                       ['web action=proxy command=show'])
+    except ValueError as e:
+        return _finish(f"❌ {e}", {"action": "proxy", "sub": sub}, "error",
+                       "формат: host:port, порт, scheme://user:pass@host:port, none",
+                       ['web action=proxy command=show'])
+    except Exception as e:
+        return _finish(f"❌ {type(e).__name__}: {e}", {"action": "proxy"}, "error", "", [])
 
 
 # --------------------------------------------------------------------------
@@ -867,55 +1097,20 @@ def _extract_structure(html_text: str, base_url: str, want: List[str],
         if links:
             out.append("## 🔗 Links")
             out.append("")
-            for text, full in links[:max_items]:
-                out.append(f"- [{text}]({full})")
+            for label, full in links[:max_items]:
+                out.append(f"- [{label}]({full})")
             out.append("")
             total += len(links[:max_items])
 
     if want_all or "images" in want:
-        seen = set()
-        images = []
-        seen_img = set()
-
-        def _add_image(raw_ref: str, caption: str = "") -> None:
-            ref = (raw_ref or "").strip()
-            if not ref or ref.startswith("data:"):
-                return
-            # srcset: берём первый URL (обычно самый крупный/подходящий вариант).
-            if "," in ref and " " in ref:
-                ref = ref.split(",")[0].strip().split(" ")[0]
-            full = urljoin(base_url, ref)
-            if full in seen_img or full.startswith(("#", "javascript:")):
-                return
-            seen_img.add(full)
-            images.append((_escape(caption or "[no caption]", 100), full))
-
-        # Обычные <img>: src + ленивые атрибуты + srcset.
-        for node in tree.css("img"):
-            attrs = node.attributes
-            cap = (attrs.get("alt") or attrs.get("title") or "").strip()
-            for key in ("src", "data-src", "data-original", "data-lazy-src",
-                        "data-srcset", "srcset"):
-                if attrs.get(key):
-                    _add_image(attrs.get(key), cap)
-        # <source srcset> (picture)
-        for node in tree.css("source[srcset], source[data-srcset]"):
-            _add_image(node.attributes.get("srcset") or node.attributes.get("data-srcset"), "")
-        # og:image / twitter:image
-        for node in tree.css("meta[property], meta[name]"):
-            key = (node.attributes.get("property") or node.attributes.get("name") or "").lower()
-            if key in ("og:image", "og:image:url", "twitter:image", "twitter:image:src"):
-                _add_image(node.attributes.get("content") or "", "")
-
+        images = _collect_image_urls(html_text, base_url, max_items)
         if images:
-            # Сначала вероятные фотографии, иконки/логотипы — в конец.
-            images.sort(key=lambda item: _image_rank(item[1]))
             out.append("## 🖼️ Images")
             out.append("")
-            for cap, full in images[:max_items]:
+            for cap, full in images:
                 out.append(f"- {cap}: `{full}`")
             out.append("")
-            total += len(images[:max_items])
+            total += len(images)
 
     if want_all or "tables" in want:
         tables = []
@@ -956,6 +1151,239 @@ def _extract_structure(html_text: str, base_url: str, want: List[str],
             total += len(tables[:max_items])
 
     return "\n".join(out).strip(), total
+
+
+def _collect_image_urls(text: str, base_url: str,
+                        max_items: int = 100) -> List[Tuple[str, str]]:
+    """Прямые картинки со страницы: (подпись, абсолютный url), фото вперёд.
+
+    Generic-парсер: `<img>` (src + ленивые атрибуты + srcset), `<source srcset>`,
+    `og:image`/`twitter:image`. Иконки/логотипы уезжают в конец (см. `_image_rank`).
+    """
+    if HTMLParser is None:
+        return []
+    tree = HTMLParser(text)
+    seen = set()
+    images: List[Tuple[str, str]] = []
+
+    def _add(raw_ref: str, caption: str = "") -> None:
+        ref = (raw_ref or "").strip()
+        if not ref or ref.startswith("data:"):
+            return
+        if "," in ref and " " in ref:  # srcset: первый (обычно крупный) вариант
+            ref = ref.split(",")[0].strip().split(" ")[0]
+        full = urljoin(base_url, ref)
+        if full in seen or full.startswith(("#", "javascript:")):
+            return
+        seen.add(full)
+        images.append((_escape(caption or "[no caption]", 100), full))
+
+    for node in tree.css("img"):
+        attrs = node.attributes
+        cap = (attrs.get("alt") or attrs.get("title") or "").strip()
+        for key in ("src", "data-src", "data-original", "data-lazy-src",
+                    "data-srcset", "srcset"):
+            if attrs.get(key):
+                _add(attrs.get(key), cap)
+    for node in tree.css("source[srcset], source[data-srcset]"):
+        _add(node.attributes.get("srcset") or node.attributes.get("data-srcset"), "")
+    for node in tree.css("meta[property], meta[name]"):
+        key = (node.attributes.get("property") or node.attributes.get("name") or "").lower()
+        if key in ("og:image", "og:image:url", "twitter:image", "twitter:image:src"):
+            _add(node.attributes.get("content") or "", "")
+
+    images.sort(key=lambda item: _image_rank(item[1]))
+    return images[:max_items]
+
+
+_JS_MARKERS = ("__next_data__", "window.__nuxt__", "ng-version", "data-reactroot",
+               "data-v-", "id=\"app\"", "id='app'", "/_next/", "webpack")
+
+
+def _page_inventory(text: str, base_url: str) -> Dict[str, object]:
+    """Дёшево посчитать, что лежит на странице (для навигации модели)."""
+    inv: Dict[str, object] = {"images": 0, "photos": 0, "links": 0, "headings": 0,
+                              "tables": 0, "meta": 0, "js_heavy": False}
+    if HTMLParser is None:
+        return inv
+    try:
+        _, n_images = _extract_structure(text, base_url, ["images"], 500)
+        _, n_links = _extract_structure(text, base_url, ["links"], 500)
+        _, n_heads = _extract_structure(text, base_url, ["headings"], 500)
+        _, n_tables = _extract_structure(text, base_url, ["tables"], 500)
+        _, n_meta = _extract_structure(text, base_url, ["meta"], 500)
+        inv.update(images=n_images, links=n_links, headings=n_heads,
+                   tables=n_tables, meta=n_meta)
+        # Фото — картинки, похожие на фотографии (не иконки/логотипы).
+        inv["photos"] = sum(1 for _cap, u in _collect_image_urls(text, base_url, 500)
+                            if _image_rank(u) <= 1)
+        low = text.lower()
+        inv["js_heavy"] = (n_images == 0 and n_links < 5) or any(
+            m in low for m in _JS_MARKERS)
+    except Exception:
+        pass
+    return inv
+
+
+def _inventory_line(inv: Dict[str, object]) -> str:
+    parts = [f"🖼 images={inv.get('images', 0)}",
+             f"links={inv.get('links', 0)}",
+             f"headings={inv.get('headings', 0)}",
+             f"tables={inv.get('tables', 0)}",
+             f"meta={inv.get('meta', 0)}"]
+    if inv.get("photos"):
+        parts.insert(1, f"фото≈{inv['photos']}")
+    return " · ".join(str(p) for p in parts)
+
+
+def _inventory_actions(inv: Dict[str, object], url: str, query: str = "") -> List[str]:
+    """Готовые вызовы под то, что реально есть на странице (без доменной конкретики)."""
+    acts: List[str] = []
+    if inv.get("images"):
+        acts.append(f'web action=extract url="{url}" extract=["images"] max_items=30')
+        if inv.get("photos"):
+            acts.append(f'web action=images url="{url}" max_items=3')
+    if inv.get("links"):
+        acts.append(f'web action=extract url="{url}" extract=["links"]')
+    if inv.get("tables"):
+        acts.append(f'web action=extract url="{url}" extract=["tables"]')
+    if inv.get("js_heavy") and not inv.get("images"):
+        acts.append('web action=images query="<что нужно найти>" — прямых картинок нет, это JS-страница')
+    if not acts:
+        acts.append(f'web action=json url="{url}"')
+    return acts
+
+
+# --------------------------------------------------------------------------
+# Поиск и проверка изображений (generic, без привязки к сервисам)
+# --------------------------------------------------------------------------
+
+IMAGE_PROBE_BYTES = 400_000
+
+
+def _search_result_urls(query: str, headers, timeout_sec: int, max_bytes: int,
+                        limit: int, session_path: Optional[str] = None,
+                        proxy=None) -> List[str]:
+    """URL-ы результатов поиска (перебирает доступные провайдеры web)."""
+    for tmpl in SEARCH_URLS:
+        urls: List[str] = []
+        try:
+            raw, final, ctype, status, _ = _fetch(
+                tmpl.format(q=quote(query)), headers, timeout_sec, max_bytes,
+                True, session_path=session_path, proxy=proxy)
+            if status < 400 and raw:
+                for item in _parse_ddg_html(raw.decode("utf-8", errors="replace"), limit):
+                    urls.append(item["url"])
+        except Exception:
+            urls = []
+        if urls:
+            return urls[:limit]
+    return []
+
+
+def _verify_image(url: str, headers, timeout_sec: int, session_path=None,
+                  proxy=None) -> Tuple[bool, str, int]:
+    """Проверить, что ссылка отдаёт реальную картинку. -> (ok, info, bytes)."""
+    try:
+        raw, _final, ctype, status, _tr = _fetch(
+            url, headers, min(max(timeout_sec, 5), 20), IMAGE_PROBE_BYTES, True,
+            session_path=session_path, proxy=proxy)
+        if status >= 400:
+            return False, f"HTTP {status}", 0
+        kind = _image_kind(raw)
+        if kind or ctype.startswith("image/"):
+            return True, kind or ctype, len(raw)
+        return False, "не картинка", len(raw)
+    except Exception as e:
+        return False, type(e).__name__, 0
+
+
+def _action_images(query: str, url: str, headers, timeout_sec: int, max_bytes: int,
+                   max_items: int, session_path: Optional[str] = None,
+                   proxy=None, max_pages: int = 4) -> Tuple[str, str, List[str], Dict]:
+    """Найти прямые изображения (со страницы `url` или из выдачи по `query`).
+
+    Провайдер не зашит: берём любую страницу/выдачу и разбираем generic-парсером
+    прямых картинок; каждую ссылку проверяем на реальную картинку и отдаём только
+    живые. -> (body, provenance, next_actions, meta)
+    """
+    max_items = max(1, min(int(max_items or 3), 20))
+    candidates: List[Tuple[str, str, str]] = []  # (caption, url, source_page)
+
+    if url:
+        pages = [url]
+    elif query:
+        pages = _search_result_urls(query, headers, timeout_sec, max_bytes, max_pages,
+                                    session_path, proxy)
+        if not pages:
+            return ("❌ Поиск не дал страниц (провайдер недоступен или заблокировал).",
+                    "error", ['web action=images url="<адрес страницы с картинками>"'], {})
+    else:
+        return ("❌ Укажи url (страница с картинками) или query (что искать).",
+                "error", ["web action=help"], {})
+
+    pages_tried = 0
+    for page in pages[:max_pages]:
+        pages_tried += 1
+        try:
+            raw, final, ctype, status, _tr = _fetch(
+                page, headers, timeout_sec, max_bytes, True,
+                session_path=session_path, proxy=proxy)
+        except Exception:
+            continue
+        if status >= 400 or not raw:
+            continue
+        if not (ctype.startswith("text/") or ctype.startswith("image/")
+                or b"<" in raw[:512]):
+            continue
+        text = raw.decode("utf-8", errors="replace")
+        for cap, u in _collect_image_urls(text, final or page, max_items * 10):
+            candidates.append((cap, u, final or page))
+        if len(candidates) >= max_items * 8:
+            break
+
+    verified: List[Tuple[str, str, str, int]] = []
+    seen = set()
+    for cap, u, page in candidates:
+        if u in seen:
+            continue
+        seen.add(u)
+        ok, _info, size = _verify_image(u, headers, timeout_sec, session_path, proxy)
+        if ok:
+            verified.append((cap, u, page, size))
+            if len(verified) >= max_items * 3:
+                break
+
+    # Фото обычно крупнее служебных иконок: сначала размер (generic-признак),
+    # затем «фотографичность» URL.
+    verified.sort(key=lambda t: (-t[3], _image_rank(t[1])))
+    verified = verified[:max_items]
+
+    meta = {"action": "images", "query": _escape(query, 60) if query else None,
+            "pages": pages_tried, "found": len(candidates),
+            "working": len(verified)}
+    if not verified:
+        return (f"❌ Рабочих прямых картинок не найдено (проверено кандидатов: "
+                f"{len(candidates)} с {pages_tried} стр.).",
+                "error",
+                ['web action=images query="<иной запрос>"',
+                 'web action=open url="<страница>"',
+                 'web action=proxy show — если сеть недоступна'],
+                meta)
+
+    lines = [f"🖼 Найдено рабочих изображений: {len(verified)}"]
+    if query:
+        lines[0] += f" по запросу «{_escape(query, 60)}»"
+    lines.append("")
+    nxt: List[str] = []
+    for i, (cap, u, page, size) in enumerate(verified, 1):
+        lines.append(f"{i}. {cap} — {_human_size(size)}")
+        lines.append(f"   {u}")
+        lines.append(f"   источник: {page}")
+        if i <= 3:
+            nxt.append(f'image(source="{u}", alt="{cap if cap != "[no caption]" else ""}")')
+    nxt.append(f'web action=images query="{_escape(query or "<запрос>", 60)}"')
+    return "\n".join(lines), "extracted", nxt, meta
 
 
 # --------------------------------------------------------------------------
@@ -1050,8 +1478,15 @@ def _parse_ddg_html(html_text: str, max_items: int) -> List[Dict[str, str]]:
     return results
 
 
-def _search_lynx(query: str, timeout_sec: int, max_chars: int) -> Optional[str]:
+def _search_lynx(query: str, timeout_sec: int, max_chars: int,
+                 session_path: Optional[str] = None, proxy=None) -> Optional[str]:
     encoded = quote(query)
+    env = None
+    if _net is not None:
+        try:
+            env = _net.subprocess_env(session_path, proxy)
+        except Exception:
+            env = None
     for tmpl in SEARCH_URLS:
         url = tmpl.format(q=encoded)
         try:
@@ -1060,6 +1495,7 @@ def _search_lynx(query: str, timeout_sec: int, max_chars: int) -> Optional[str]:
                  f"-connect_timeout={min(timeout_sec, 60)}",
                  f"-read_timeout={min(timeout_sec, 120)}", url],
                 capture_output=True, text=True, timeout=min(timeout_sec + 10, 130),
+                env=env,
             )
         except Exception:
             continue
@@ -1070,19 +1506,21 @@ def _search_lynx(query: str, timeout_sec: int, max_chars: int) -> Optional[str]:
 
 
 def _action_search(query: str, headers, timeout_sec: int, max_bytes: int,
-                   max_items: int) -> Tuple[str, List[str]]:
+                   max_items: int, session_path: Optional[str] = None,
+                   proxy=None) -> Tuple[str, List[str]]:
     cfg = _config()
     results: List[Dict[str, str]] = []
     try:
         raw, final_url, ctype, status, _ = _fetch(
-            SEARCH_URLS[0].format(q=quote(query)), headers, timeout_sec, max_bytes, True)
+            SEARCH_URLS[0].format(q=quote(query)), headers, timeout_sec, max_bytes, True,
+            session_path=session_path, proxy=proxy)
         if status < 400 and raw:
             results = _parse_ddg_html(raw.decode("utf-8", errors="replace"), max_items)
     except Exception:
         results = []
     if not results:
         # fallback: lynx
-        text = _search_lynx(query, timeout_sec, cfg["max_chars"])
+        text = _search_lynx(query, timeout_sec, cfg["max_chars"], session_path, proxy)
         if text:
             return text, [
                 f'web action=open url="<ссылка из результата>"',
@@ -1112,7 +1550,7 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
         timeout_sec: int, max_bytes: int, follow_redirects: bool, max_items: int,
         session_path: Optional[str], resume: bool = False,
         expected_sha256: Optional[str] = None, method: str = "GET",
-        content=None, json_body=None, data=None) -> str:
+        content=None, json_body=None, data=None, proxy=None) -> str:
     if not url or not str(url).strip():
         return _finish("❌ Не указан url.",
                        {"action": action}, "error",
@@ -1133,13 +1571,14 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
     # aria2c умеет только GET; запросы с телом идут обычным HTTP-путём.
     if action == "download" and method == "GET" and not has_body:
         return _do_download(url, output_path, headers, timeout_sec, session_path,
-                            resume, expected_sha256)
+                            resume, expected_sha256, proxy=proxy)
 
     started = time.time()
 
     def _try(u):
         return _fetch(u, headers, timeout_sec, max_bytes, follow_redirects,
-                      method=method, content=content, json_body=json_body, data=data)
+                      method=method, content=content, json_body=json_body, data=data,
+                      session_path=session_path, proxy=proxy)
 
     try:
         raw, final_url, ctype, status, truncated = _try(url)
@@ -1235,7 +1674,7 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
     if action == "download":
         if method == "GET" and not has_body:
             return _do_download(final_url or url, output_path, headers, timeout_sec,
-                                session_path, resume, expected_sha256)
+                                session_path, resume, expected_sha256, proxy=proxy)
         path, ftype = _save_bytes(raw, output_path, session_path, final_url or url)
         if not path:
             return _finish(
@@ -1297,10 +1736,16 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
         want = [w for w in (extract or ["all"]) if w in SAFE_EXTRACT] or ["all"]
         body, total = _extract_structure(text, final_url or url, want, max_items, css)
         meta["items"] = total
-        nxt = [f'web action=open url="{url}"',
-               f'web action=json url="{url}"']
+        inv = _page_inventory(text, final_url or url)
+        nxt = []
+        if "images" in want:
+            for _cap, u in _collect_image_urls(text, final_url or url, 3):
+                nxt.append(f'image(source="{u}", alt="…")')
+        nxt.append(f'web action=images url="{url}" max_items=3')
+        nxt.append(f'web action=open url="{url}"')
         return _finish(body, meta, "extracted",
-                       "нужен текст страницы — action=open; API — action=json", nxt)
+                       "нужен текст страницы — action=open; прямые картинки — image(source=…)",
+                       nxt, inventory=_inventory_line(inv))
 
     # open (по умолчанию для html)
     body = _html_to_markdown(text)
@@ -1314,11 +1759,15 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
                               (urlparse(final_url or url).path.split("/")[-1] or "page") + ".html")
         if path:
             meta["saved"] = path
-    nxt = [f'web action=extract url="{url}" extract=["links","tables"]']
+    inv = _page_inventory(text, final_url or url)
+    nxt = _inventory_actions(inv, final_url or url)
     if meta.get("saved"):
         nxt.insert(0, f'file_system action=read path="{meta["saved"]}"')
-    return _finish(body, meta, "readable",
-                   "структура (ссылки/таблицы) — action=extract; API — action=json", nxt)
+    advice = ("на странице есть картинки — их можно показать/скачать"
+              if inv.get("images") else
+              "структура (ссылки/картинки/таблицы) — action=extract; API — action=json")
+    return _finish(body, meta, "readable", advice, nxt,
+                   inventory=_inventory_line(inv))
 
 
 def execute(
@@ -1346,13 +1795,21 @@ def execute(
     json_data=None,
     progress_callback=None,
     format: str = None,
+    proxy: str = None,
+    no_proxy: str = None,
+    scope: str = None,
+    command: str = None,
 ) -> str:
     """Единый вход web. См. action=help."""
     action = (action or "auto").strip().lower()
     aliases = {"get": "auto", "fetch": "auto", "read": "open", "text": "open",
                "links": "extract", "parse": "extract", "project": "json",
                "filter": "json", "save": "download", "find": "search",
-               "history": "downloads", "list": "downloads"}
+               "history": "downloads", "list": "downloads",
+               "images": "images", "photos": "images", "photo": "images",
+               "download_image": "images", "proxy_show": "proxy",
+               "proxy_set": "proxy", "proxy_clear": "proxy", "proxy_test": "proxy"}
+    raw_action = action
     action = aliases.get(action, action)
     jq_filter = jq_filter or jq
     expected_sha256 = expected_sha256 or sha256
@@ -1364,10 +1821,23 @@ def execute(
 
     if action == "help":
         return _help()
+    if action == "proxy":
+        sub = (command or "").strip().lower()
+        if not sub:
+            sub = {"proxy_show": "show", "proxy_set": "set",
+                   "proxy_clear": "clear", "proxy_test": "test"}.get(raw_action, "show")
+        return _action_proxy(sub, proxy, no_proxy, scope, url, session_path)
     if action == "downloads":
         return _action_downloads(session_path)
+    if action == "images":
+        body, provenance, nxt, meta = _action_images(
+            query, url, headers, timeout_sec, max_bytes, max_items or 3,
+            session_path, proxy)
+        return _finish(body, meta, provenance,
+                       "готовые image(source=…) — вставь token в ответ, чтобы показать картинку",
+                       nxt)
     if not url and not query:
-        return _finish("❌ Укажи url (или query для action=search).",
+        return _finish("❌ Укажи url (или query для action=search/images).",
                        {"action": action}, "error",
                        "web action=help — список возможностей",
                        ["web action=help"])
@@ -1375,13 +1845,14 @@ def execute(
         if not query:
             return _finish("❌ Для action=search нужен query.",
                            {"action": action}, "error", "укажи query", ["web action=help"])
-        body, nxt = _action_search(query, headers, timeout_sec, max_bytes, max_items)
+        body, nxt = _action_search(query, headers, timeout_sec, max_bytes, max_items,
+                                   session_path, proxy)
         return _finish(body, {"action": "search", "query": _escape(query, 60)}, "extracted",
                        "открой верхний результат, чтобы получить содержание", nxt)
 
     return _go(url, action, extract, css, jq_filter, output_path, headers,
                timeout_sec, max_bytes, follow_redirects, max_items, session_path,
-               resume, expected_sha256, method, None, json_body, data)
+               resume, expected_sha256, method, None, json_body, data, proxy=proxy)
 
 
 # Alias

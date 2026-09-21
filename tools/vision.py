@@ -48,11 +48,20 @@ _BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 
-def _download_image(url: str, timeout: int = 30) -> tuple[bytes, str]:
+def _net_proxy(session_path):
+    try:
+        from core import net_config
+        return net_config.httpx_proxy(session_path)
+    except Exception:
+        return None
+
+
+def _download_image(url: str, timeout: int = 30, session_path: str = None) -> tuple[bytes, str]:
     """Скачивает изображение по URL, возвращает (data, mime_type)."""
     try:
         # Многие CDN/хостинги отдают 403 без User-Agent — представляемся браузером.
         resp = httpx.get(url, timeout=timeout, follow_redirects=True,
+                         proxy=_net_proxy(session_path),
                          headers={"User-Agent": _BROWSER_UA,
                                   "Accept": "image/*,*/*;q=0.8"})
         resp.raise_for_status()
@@ -287,7 +296,7 @@ def execute(
         
         # Загружаем данные
         if url:
-            image_bytes, mime_type = _download_image(url, timeout_sec)
+            image_bytes, mime_type = _download_image(url, timeout_sec, session_path)
             source = url
         else:
             image_bytes, mime_type = _load_local_image(image_path)

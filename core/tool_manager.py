@@ -128,15 +128,20 @@ class ToolManager:
                     "name": "web",
                     "description": ("Единый добыватель данных из сети. Один инструмент вместо web_search/open_url/web_extract/curl. "
                                     "action: auto — сам выберет стратегию по типу данных; open — читаемый текст страницы; "
-                                    "extract — структура (links/images/headings/meta/tables/css); json — JSON + jq-фильтр; "
-                                    "download — скачать файл (aria2c, докачка, торренты/magnet, проверка sha256; память загрузок action=downloads); "
-                                    "search — поиск в интернете; help — справка. "
+                                    "extract — структура (links/images/headings/meta/tables/css); "
+                                    "images — найти прямые картинки (со страницы url=… или из выдачи query=…; ссылки проверяются на живую картинку); "
+                                    "json — JSON + jq-фильтр; "
+                                    "download — скачать файл (докачка, торренты/magnet, проверка sha256; память загрузок action=downloads); "
+                                    "search — поиск в интернете; proxy — настройка/проверка прокси (command=show|set|clear|test); help — справка. "
+                                    "После любого получения страницы инструмент сообщает, что на ней есть (images/links/tables), и как это достать. "
+                                    "Чем качать: большие файлы/докачка/торренты — aria2c; сложные HTTP-запросы (методы, тело, JSON) — HTTP-клиент; "
+                                    "при сбое aria2c загрузка автоматически повторяется HTTP-клиентом. "
                                     "Возвращает мета-данные, совет и следующие шаги. Запись вне папки сессии требует dangerous mode."),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "action": {"type": "string", "enum": ["auto", "open", "extract", "json", "download", "downloads", "search", "help"],
-                                       "description": "Что сделать (по умолчанию auto). downloads — память загрузок (что/куда/целое)"},
+                            "action": {"type": "string", "enum": ["auto", "open", "extract", "json", "images", "download", "downloads", "search", "proxy", "help"],
+                                       "description": "Что сделать (по умолчанию auto). downloads — память загрузок; images — найти прямые картинки; proxy — прокси"},
                             "url": {"type": "string", "description": "URL http/https (для auto/open/extract/json/download)"},
                             "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP-метод (по умолчанию GET). Для API, требующих POST (например Ollama /api/generate), задай method=POST"},
                             "json_body": {"type": "object", "description": ("Тело запроса как JSON-объект (POST/PUT/PATCH) — для веб-API. "
@@ -161,7 +166,15 @@ class ToolManager:
                             "timeout_sec": {"type": "integer", "description": "Таймаут в секундах (по умолчанию 30)"},
                             "max_bytes": {"type": "integer", "description": "Максимальный размер ответа в байтах"},
                             "follow_redirects": {"type": "boolean", "description": "Следовать за редиректами (по умолчанию true)"},
-                            "max_items": {"type": "integer", "description": "Максимум элементов на категорию (action=extract/search)"}
+                            "max_items": {"type": "integer", "description": "Максимум элементов на категорию (action=extract/search/images)"},
+                            "proxy": {"type": "string", "description": ("Прокси для этого запроса или для настройки. Прощающий формат: 17277, host:port, "
+                                       "host:port user pass, scheme://user:pass@host:port, none. action=proxy command=set — записать; "
+                                       "иначе используется как разовый прокси для текущего запроса")},
+                            "no_proxy": {"type": "string", "description": "Список хостов в обход прокси (через запятую), для action=proxy command=set"},
+                            "scope": {"type": "string", "enum": ["session", "global"],
+                                      "description": "Куда записать прокси (action=proxy command=set/clear): session (по умолчанию) или global"},
+                            "command": {"type": "string", "enum": ["show", "set", "clear", "test"],
+                                        "description": "Подкоманда для action=proxy: show, set, clear, test"}
                         },
                         "required": []
                     }

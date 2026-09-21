@@ -104,6 +104,42 @@ def main() -> int:
     except Exception:
         check("missing_url_raises", True)
 
+    # --- классификация сетевых/серверных ошибок (без доменной конкретики) ---
+    import httpx as _httpx
+
+    def _status(code):
+        req = _httpx.Request("GET", "http://h/x")
+        return _httpx.HTTPStatusError("e", request=req,
+                                      response=_httpx.Response(code, request=req))
+
+    c403 = image_catalog._classify_download_error(_status(403))
+    check("classify_403", "403" in c403 and "web action=images" in c403, c403)
+    c404 = image_catalog._classify_download_error(_status(404))
+    check("classify_404", "404" in c404, c404)
+    cto = image_catalog._classify_download_error(_httpx.ReadTimeout("t"))
+    check("classify_timeout", "Таймаут" in cto and "proxy" in cto, cto)
+
+    # --- негативная память хостов: повтор к упавшему хосту отбивается коротко ---
+    fails = image_catalog.load_catalog(session).get("host_failures", {}) or {}
+    check("host_failure_recorded", "127.0.0.1" in fails, str(fails))
+    try:
+        image_catalog.add_image(f"{base}/missing.png", session_path=session)
+        check("host_failure_shortcircuit", False, "ожидался отказ из памяти")
+    except Exception as e:
+        check("host_failure_shortcircuit", "уже не отвечал" in str(e), str(e)[:200])
+
+    # TTL=0 отключает память → тот же хост снова доступен, память очищается
+    os.environ["BOTINOK_IMAGE_HOST_TTL"] = "0"
+    try:
+        again = image_catalog.add_image(f"{base}/a.png", session_path=session)
+        check("host_failure_recovery", bool(ID_RE.match(again["id"])), str(again)[:120])
+        check("host_failure_cleared_on_success",
+              "127.0.0.1" not in (image_catalog.load_catalog(session).get("host_failures", {}) or {}))
+    except Exception as ex:
+        check("host_failure_recovery", False, str(ex))
+    finally:
+        os.environ.pop("BOTINOK_IMAGE_HOST_TTL", None)
+
     # --- фолбэк без session_path ---
     ef = image_catalog.add_image(a)
     check("fallback_dir", ef["path"].startswith(os.path.expanduser("~/.botinok")))

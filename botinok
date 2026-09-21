@@ -17,7 +17,8 @@ if [[ "${1:-}" == "--update-packages" || "${1:-}" == "-U" ]]; then
     echo "Error: requirements.txt not found: $REQ" >&2
     exit 1
   fi
-  exec "$PY" -m pip install --upgrade pip setuptools wheel -r "$REQ"
+  "$PY" -m pip install --upgrade pip setuptools wheel -r "$REQ" || exit 1
+  exec "$PY" "$APP" --ensure-deps
 fi
 
 exec "$PY" "$APP" "$@"

@@ -159,7 +159,7 @@ def _check_remote_version():
         return None, str(e)
 
 
-# Системные бинарники, которые нужны инструментам (web/downloader и др.).
+# Системные бинарники, которые нужны инструментам и рендеру.
 _SYSTEM_TOOLS = (
     ("curl", "curl"),
     ("lynx", "lynx"),
@@ -167,6 +167,16 @@ _SYSTEM_TOOLS = (
     ("aria2c", "aria2"),
     ("file", "file"),
     ("git", "git"),
+    ("chafa", "chafa"),      # рендер изображений в чате и пейджере
+    ("ffmpeg", "ffmpeg"),    # транскод аудио для omni-моделей
+)
+
+# Пакетный менеджер -> (команда установки, команда обновления индексов).
+_PKG_MANAGERS = (
+    ("apt-get", ["apt-get", "install", "-y"], ["apt-get", "update", "-y"]),
+    ("dnf", ["dnf", "install", "-y"], None),
+    ("yum", ["yum", "install", "-y"], None),
+    ("brew", ["brew", "install"], None),
 )
 
 
@@ -175,42 +185,83 @@ def _missing_system_tools() -> list:
     return [(binary, pkg) for binary, pkg in _SYSTEM_TOOLS if shutil.which(binary) is None]
 
 
+def _missing_packages() -> list:
+    seen, out = set(), []
+    for _binary, pkg in _missing_system_tools():
+        if pkg not in seen:
+            seen.add(pkg)
+            out.append(pkg)
+    return out
+
+
+def _pkg_manager():
+    for name, install, update in _PKG_MANAGERS:
+        if shutil.which(name):
+            return name, install, update
+    return None, None, None
+
+
+def _run_priv(cmd: list, timeout: int = 900):
+    """Запустить команду установки: root — напрямую, иначе sudo -n (без пароля)."""
+    if os.geteuid() != 0:
+        if shutil.which("sudo"):
+            cmd = ["sudo", "-n"] + cmd
+        else:
+            return None
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+
+
 def _system_deps_warning() -> str:
     missing = _missing_system_tools()
     if not missing:
         return ""
     items = ", ".join(f"{b} (пакет {p})" for b, p in missing)
     return ("\n[!] Не хватает системных зависимостей: " + items +
-            "\n    Установи их и/или повторно запусти install.sh "
-            "(sudo bash install.sh) — он доставит aria2/file.")
+            "\n    Поставь их: `botinok --ensure-deps` (или `bash update.sh`), "
+            "либо повторно запусти install.sh (sudo bash install.sh).")
 
 
-def _ensure_chafa() -> str:
-    """Best-effort: поставить chafa (детализированный логотип баннера).
+def _ensure_system_deps(verbose: bool = True) -> str:
+    """Проверить и доустановить ВСЕ системные компоненты.
 
-    Не критично: если не вышло — логотип рисуется встроенным рендером.
+    Ключевое отличие от прежнего `_ensure_chafa`: ставит весь список
+    `_SYSTEM_TOOLS` (curl/lynx/jq/aria2c/file/git/chafa/ffmpeg), а не только
+    chafa, и вызывается независимо от факта обновления git.
     """
-    if shutil.which("chafa"):
-        return ""
-    candidates = []
-    if shutil.which("apt-get"):
-        candidates.append(["apt-get", "install", "-y", "chafa"])
-    elif shutil.which("dnf"):
-        candidates.append(["dnf", "install", "-y", "chafa"])
-    elif shutil.which("yum"):
-        candidates.append(["yum", "install", "-y", "chafa"])
-    elif shutil.which("brew"):
-        candidates.append(["brew", "install", "chafa"])
-    for base in candidates:
-        cmd = base if os.geteuid() == 0 else (["sudo", "-n"] + base)
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        except Exception:
-            continue
-        if result.returncode == 0 and shutil.which("chafa"):
-            return "[+] chafa установлен — логотип будет детализированным."
-    return ("[i] chafa не установлен — логотип во встроенном рендере "
-            "(можно поставить: sudo apt install chafa).")
+    if not _missing_system_tools():
+        return "[+] Системные зависимости на месте."
+    name, install, update = _pkg_manager()
+    pkgs = _missing_packages()
+    if not install:
+        return ("[!] Не найден пакетный менеджер. Установи вручную: "
+                + ", ".join(pkgs))
+    if os.geteuid() != 0 and not shutil.which("sudo"):
+        return ("[!] Нужны права root для установки: " + ", ".join(pkgs)
+                + " (запусти под root: `sudo botinok --ensure-deps`).")
+
+    lines = [f"[i] Ставлю системные компоненты: {', '.join(pkgs)}"]
+    # apt без свежих индексов часто не находит пакет — обновляем индекс.
+    if update and name == "apt-get":
+        r = _run_priv(update)
+        if r is not None and r.returncode != 0:
+            lines.append("[i] apt-get update не прошёл — пробую установку как есть.")
+    r = _run_priv(install + pkgs)
+    if r is None:
+        lines.append("[!] Не удалось выполнить установщик (нет прав/timeout).")
+    elif r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip().splitlines()
+        lines.append("[!] Ошибка установки: " + " | ".join(err[-3:])[:300])
+    still = _missing_packages()
+    if still:
+        lines.append("[!] Не удалось поставить: " + ", ".join(still)
+                     + " — поставь вручную и перезапусти.")
+    else:
+        lines.append("[+] Все системные компоненты установлены.")
+    return "\n".join(lines)
+
 
 
 def _perform_update():
@@ -258,9 +309,9 @@ def _perform_update():
                     pip_output = pip_result.stdout if pip_result.returncode == 0 else pip_result.stderr
                     return True, (f"{pull_result.stdout}\n[Обнаружено изменение requirements.txt]"
                                   f"\nОбновление зависимостей:\n{pip_output}{_system_deps_warning()}"
-                                  f"\n{_ensure_chafa()}")
+                                  f"\n{_ensure_system_deps()}")
         
-        return True, pull_result.stdout + _system_deps_warning() + "\n" + _ensure_chafa()
+        return True, pull_result.stdout + _system_deps_warning() + "\n" + _ensure_system_deps()
     except Exception as e:
         return False, str(e)
 
@@ -772,9 +823,15 @@ def main():
     parser.add_argument("--proofread", action="store_true", help="Включить режим корректора (цикл: Исполнитель -> Корректор)")
     parser.add_argument("--debug", action="store_true", help="Включить отладочный вывод")
     parser.add_argument("--update", action="store_true", help="Проверить и установить обновления из git")
+    parser.add_argument("--ensure-deps", action="store_true", help="Проверить и установить системные зависимости (chafa, ffmpeg, aria2 и др.)")
     parser.add_argument("--view-history", metavar="SESSION_PATH", help="Просмотр истории сессии через Textual (с прокруткой)")
     
     args = parser.parse_args()
+
+    # Установка системных зависимостей (без обновления кода).
+    if args.ensure_deps:
+        out(_ensure_system_deps())
+        return
 
     # Обработка просмотра истории через Textual
     if args.view_history:
@@ -792,7 +849,11 @@ def main():
     # Обработка обновления
     if args.update:
         out("[bold cyan]Проверка обновлений BOTINOK...[/bold cyan]")
-        
+
+        # Компоненты ставим ВСЕГДА, независимо от того, есть ли новый коммит:
+        # иначе обновление на актуальной версии не доустанавливает chafa/ffmpeg.
+        out(_ensure_system_deps())
+
         result, error = _check_remote_version()
         
         if error:

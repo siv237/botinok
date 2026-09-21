@@ -929,3 +929,57 @@ Esc не прерывает: `is_streaming` остаётся True, сервер 
   (16 мс vs 15 мс), подготовка 10 мс (кэш 0.04 мс).
 - Тест `tests/test_image_scaling.py`; набор 37 зелёный.
 - Страницы: `concepts/image_rendering.md`.
+
+## [2026-09-21] ingest | web: помощник-навигатор, поиск картинок, прокси, движки
+Диагностика сессии `20260824_164041_visual_run` (поиск/показ фото оркестров:
+~45 вызовов, ноль картинок, переполнение контекста). Корень — у модели не было
+способа получить прямые URL картинок, а провайдеры/прокси не были учтены.
+- **Помощник-навигатор**: после любого fetch — `📦 На странице` (images/links/
+  headings/tables/meta, `_page_inventory`) и готовые вызовы под содержимое
+  (`_inventory_actions`), включая `image(source=…)`; JS-страницы без картинок
+  отправляют в `action=images`.
+- **`web action=images`** (generic, без сервисов в коде): собирает прямые
+  картинки со страницы/выдачи (`_collect_image_urls`: img/lazy/srcset/og/twitter),
+  проверяет каждую (`_verify_image`: код + content-type + magic), ранжирует по
+  размеру. Проверено live: из выдачи получены только живые ссылки, фото впереди
+  иконок.
+- **`core/net_config.py`** — единый прокси: прощающий ввод + нормализация,
+  приоритет call>session>global>env, игнор пустых env, раздача в httpx/requests/
+  aria2c(--all-proxy)/env-subprocess. `web action=proxy show/set/clear/test`;
+  `test` проверяет TCP и реальный запрос по httpx и aria2c и подтверждает агенту.
+  Без хардкодов адресов и без навязывания. Проверено live через локальный прокси:
+  `httpx` и `aria2c` оба 200 через прокси; пустая `https_proxy=""` раньше молча
+  отключала рабочий `HTTPS_PROXY`.
+- **Движки**: help/харнес объясняют aria2c (большие файлы/докачка/торренты) vs
+  HTTP-клиент (методы/тело/JSON/API); при сбое aria2c — авто-повтор через httpx
+  (`_download_file`→`_httpx_download`), ошибка aria2c читаема (`_aria2c_error_text`).
+- **image**: классификация ошибок (403/404/429/5xx/timeout/сеть) и память неудач
+  хоста на TTL (`catalog.json → host_failures`, `BOTINOK_IMAGE_HOST_TTL`) против
+  зацикливания; прокси в `core/image_catalog._download`.
+- **download**: картинка в ответе предлагает `image(source=…)`.
+- **audio**: локальный путь/`file://` в `url` (сорвало «повтори анализ» в сессии);
+  прокси в загрузке.
+- **vision/audio**: загрузка по URL через прокси.
+- **Схемы/промпты**: `images`/`proxy` в enum `web`, новые параметры
+  (`proxy/no_proxy/scope/command`), правила в `tool_policy.txt`/`tool_reminder.txt`.
+- **Тесты**: `tests/test_web_kit.py` (+инвентарь, images, fallback движка,
+  наследование прокси, action=proxy), новые `tests/test_net_config.py`,
+  `tests/test_audio_local.py`, дополнен `tests/test_image_catalog.py` (классификация
+  ошибок, память хостов). Страницы: `entities/tools/web.md`,
+  `entities/net_config.md`, `concepts/web_kit.md`, `entities/tools/image.md`,
+  `entities/tools/audio.md`, `index.md`.
+
+## [2026-09-21] fix/ingest | обновление: chafa/ffmpeg ставятся всегда + update.sh
+Повод: после `--update` под root фото качались, но не отображались — не был
+установлен `chafa` (рендер картинок), а обновление на актуальном коммите делало
+ранний `return` до установки зависимостей.
+- `botinok.py`: `_SYSTEM_TOOLS` += `chafa`, `ffmpeg`; `_ensure_system_deps()`
+  доустанавливает весь набор через пакетный менеджер (root — напрямую, иначе
+  `sudo -n`), с `apt-get update -y`; вызывается из `--update` **всегда** и из
+  `_perform_update`. Новый флаг `--ensure-deps`. Предупреждение `_system_deps_warning`
+  теперь называет chafa/ffmpeg.
+- launcher `botinok`: `-U/--update-packages` после pip запускает `--ensure-deps`.
+- Новый `update.sh` (git pull с `safe.directory` → pip → `--ensure-deps`).
+- `install.sh`: `ffmpeg` в списках пакетов (apt/dnf/yum/brew).
+- Тест `tests/test_system_deps.py`; страницы `concepts/self_update.md`,
+  `entities/botinok_cli.md`; CHANGELOG (Unreleased).
