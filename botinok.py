@@ -17,52 +17,81 @@ from core.textual_integration import ask_ollama_textual
 import subprocess
 import shutil
 
-def _get_version_info():
-    """Получает версию из файла .version (если установлен) или из git."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    version_file = os.path.join(script_dir, ".version")
-    
-    # Сначала пробуем прочитать из файла (для установленных версий)
+def _git_version_info(script_dir: str):
+    """Версия из git (date, hash) или None, если это не git-репозиторий."""
     try:
-        if os.path.exists(version_file):
-            with open(version_file, "r") as f:
-                version = f.read().strip()
-                if version:
-                    # Парсим формат: "0.2 | DD.MM.YYYY | HASH"
-                    parts = version.split(" | ")
-                    if len(parts) >= 3:
-                        return parts[1], parts[2]
-                    return "unknown", "????"
-    except Exception:
-        pass
-    
-    # Fallback на git (для разработки)
-    try:
-        # Проверяем что git доступен
         git_check = subprocess.run(
             ['git', '--version'],
             capture_output=True, text=True, cwd=script_dir, timeout=5
         )
         if git_check.returncode != 0:
-            return "unknown", "????"
-        
-        # Дата последнего коммита в формате DD.MM.YYYY
+            return None
+        inside = subprocess.run(
+            ['git', 'rev-parse', '--is-inside-work-tree'],
+            capture_output=True, text=True, cwd=script_dir, timeout=5
+        )
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return None
         date_result = subprocess.run(
             ['git', 'log', '-1', '--format=%cd', '--date=format:%d.%m.%Y'],
             capture_output=True, text=True, cwd=script_dir, timeout=5
         )
-        commit_date = date_result.stdout.strip() if date_result.returncode == 0 else "unknown"
-        
-        # Первые 4 символа хэша коммита
+        commit_date = date_result.stdout.strip() if date_result.returncode == 0 else ""
         hash_result = subprocess.run(
             ['git', 'log', '-1', '--format=%h'],
             capture_output=True, text=True, cwd=script_dir, timeout=5
         )
-        commit_hash = hash_result.stdout.strip()[:4] if hash_result.returncode == 0 else "????"
-        
-        return commit_date, commit_hash
+        commit_hash = hash_result.stdout.strip() if hash_result.returncode == 0 else ""
+        if commit_date and commit_hash:
+            return commit_date, commit_hash[:4]
     except Exception:
-        return "unknown", "????"
+        return None
+    return None
+
+
+def _read_version_file(script_dir: str):
+    """Fallback: версия из файла `.version` (для не-git установок)."""
+    version_file = os.path.join(script_dir, ".version")
+    try:
+        if os.path.exists(version_file):
+            with open(version_file, "r") as f:
+                version = f.read().strip()
+            parts = version.split(" | ")
+            if len(parts) >= 3:
+                return parts[1], parts[2]
+    except Exception:
+        pass
+    return None
+
+
+def _write_version_file(script_dir: str) -> None:
+    """Обновить `.version` по текущему git-коммиту (после обновления)."""
+    info = _git_version_info(script_dir)
+    if not info:
+        return
+    try:
+        with open(os.path.join(script_dir, ".version"), "w", encoding="utf-8") as f:
+            f.write(f"0.4 | {info[0]} | {info[1]}\n")
+    except Exception:
+        pass
+
+
+def _get_version_info(script_dir: str = None):
+    """Версия: git — источник истины, `.version` — только fallback.
+
+    Раньше приоритет был у `.version`, но `git pull` его не обновляет — баннер
+    навсегда застревал на версии момента установки (напр. `10.06.2026 | cd57`).
+    """
+    script_dir = script_dir or os.path.dirname(os.path.abspath(__file__))
+
+    info = _git_version_info(script_dir)
+    if info:
+        return info
+
+    info = _read_version_file(script_dir)
+    if info:
+        return info
+    return "unknown", "????"
 
 
 def _check_remote_version():
@@ -291,6 +320,9 @@ def _perform_update():
         
         if pull_result.returncode != 0:
             return False, pull_result.stderr
+
+        # Обновляем .version, иначе баннер останется на версии установки.
+        _write_version_file(script_dir)
         
         # Проверяем, изменился ли requirements.txt
         if old_hash:
