@@ -54,6 +54,7 @@ def execute(
         json_body=json_body,
         resume=resume,
         expected_sha256=expected_sha256,
+        progress_callback=progress_callback,
     )
 
 

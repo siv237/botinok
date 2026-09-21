@@ -1010,3 +1010,13 @@ band-рендер передавал `--animate off`, которого нет в
 - `botinok.py`: git — источник истины (`_git_version_info`), `.version` —
   fallback (`_read_version_file`); `_perform_update` перезаписывает `.version`
   (`_write_version_file`). Тест `tests/test_version.py`.
+
+## [2026-09-21] feat | живой прогресс в панели «Инструменты» + реальный сервер в шапке
+- `progress_callback` теперь идёт в `web` (и `curl` его больше не теряет):
+  `ToolManager.call_tool` → `web.execute` → aria2c-readout/httpx-чанки/поиск/images.
+- Карточка инструмента: поле `detail` (видно в заголовке свёрнутой карточки и
+  строкой «Прогресс»), `update_tool_detail`/`update_tool_activity(..., detail=)`,
+  `_tools_signature` учитывает detail.
+- Шапка «Сервер» — фактический адрес (`_server_label`), не «Ollama (локальный)».
+- Тест `tests/test_web_progress.py`; CHANGELOG; entities/textual_ui.md.
+(Изменения локальные, не закоммичены по просьбе.)

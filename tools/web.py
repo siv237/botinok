@@ -270,6 +270,21 @@ def _request_kwargs(method: str, content, json_body, data) -> dict:
     return kwargs
 
 
+def _emit_progress(cb, text: str, force: bool = False) -> None:
+    """Сообщить живому прогрессу (панель инструментов) одну строку."""
+    if not cb or not text:
+        return
+    try:
+        cb(text, force=force)
+    except TypeError:
+        try:
+            cb(text)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _effective_proxy(session_path: Optional[str], proxy=None) -> Optional[str]:
     """Прокси из net_config (или None). Без net_config — только явный параметр."""
     if _net is None:
@@ -593,8 +608,55 @@ def _aria2c_error_text(msg: str) -> str:
     return " | ".join(lines[-3:])[:400]
 
 
+_ARIA_READOUT_RE = re.compile(
+    r"\[#[0-9a-fA-F]+\s+([0-9.]+[KMG]?i?B)/([0-9.]+[KMG]?i?B)\((\d+)%\)"
+    r"(?:[^\]]*?DL:([0-9.]+[KMG]?i?B))?")
+
+
+def _aria2c_download_streaming(cmd, dest, torrent, work_dir, hard_timeout,
+                               progress_callback) -> Tuple[bool, str]:
+    """Загрузка aria2c со стримингом прогресса (для живой панели)."""
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+    lines: List[str] = []
+    deadline = time.time() + hard_timeout
+    last = 0.0
+    try:
+        for line in proc.stdout:
+            lines.append(line)
+            if len(lines) > 300:
+                del lines[:200]
+            m = _ARIA_READOUT_RE.search(line)
+            now = time.time()
+            if m and now - last >= 0.2:
+                done, total, pct, dl = m.group(1), m.group(2), m.group(3), m.group(4)
+                text = f"⬇ {pct}% ({done}/{total})" + (f" · {dl}/s" if dl else "")
+                _emit_progress(progress_callback, text)
+                last = now
+            if now > deadline:
+                proc.kill()
+                return False, "aria2c timeout"
+    except Exception:
+        pass
+    rc = proc.wait()
+    output = "".join(lines)
+    if rc != 0:
+        return False, _aria2c_error_text(output) or "aria2c error"
+    if torrent:
+        if not os.path.isdir(work_dir) or not any(os.scandir(work_dir)):
+            return False, "торрент не создал файлов"
+    elif not os.path.exists(dest):
+        return False, "aria2c не создал файл"
+    _emit_progress(progress_callback, "✅ скачано", force=True)
+    return True, ""
+
+
 def _aria2c_download(url: str, dest: str, headers, timeout_sec: int,
-                     proxy=None, session_path: Optional[str] = None) -> Tuple[bool, str]:
+                     proxy=None, session_path: Optional[str] = None,
+                     progress_callback=None) -> Tuple[bool, str]:
     """Скачать/докачать файл (или торрент) aria2c. -> (ok, error)."""
     torrent = _is_torrent(url)
     if torrent:
@@ -629,6 +691,16 @@ def _aria2c_download(url: str, dest: str, headers, timeout_sec: int,
     cmd.append(url)
     # Большие файлы/раздачи: жёсткий лимит до 6 часов.
     hard_timeout = min(max(timeout_sec, 30) * 720, 21600)
+
+    # С живым прогрессом стримим readout aria2c и разбираем строки вида
+    # `[#abc 1.2MiB/3.4MiB(35%) CN:4 DL:850KiB ETA:3s]`.
+    if progress_callback is not None:
+        cmd = [("--show-console-readout=true" if c.startswith("--show-console-readout")
+                else "--summary-interval=1" if c.startswith("--summary-interval") else c)
+               for c in cmd]
+        return _aria2c_download_streaming(cmd, dest, torrent, work_dir, hard_timeout,
+                                          progress_callback)
+
     try:
         r = _run(cmd, capture_output=True, text=True, timeout=hard_timeout)
     except subprocess.TimeoutExpired:
@@ -645,7 +717,8 @@ def _aria2c_download(url: str, dest: str, headers, timeout_sec: int,
 
 
 def _httpx_download(url: str, dest: str, headers, timeout_sec: int,
-                    proxy=None, session_path: Optional[str] = None) -> Tuple[bool, str]:
+                    proxy=None, session_path: Optional[str] = None,
+                    progress_callback=None) -> Tuple[bool, str]:
     """Запасной движок загрузки (httpx): без обрезки, с прокси. -> (ok, error)."""
     try:
         px = _effective_proxy(session_path, proxy)
@@ -656,11 +729,29 @@ def _httpx_download(url: str, dest: str, headers, timeout_sec: int,
                 if resp.status_code >= 400:
                     body = b"".join(resp.iter_bytes())[:600]
                     return False, f"HTTP {resp.status_code}: {_server_reason(body)}"
+                try:
+                    total = int(resp.headers.get("content-length") or 0)
+                except Exception:
+                    total = 0
+                done = 0
+                started = time.time()
+                last = 0.0
                 with open(dest, "wb") as f:
                     for chunk in resp.iter_bytes():
                         if _pc and _pc.stop_requested():
                             raise httpx.RequestError("остановлено пользователем")
                         f.write(chunk)
+                        done += len(chunk)
+                        now = time.time()
+                        if progress_callback and now - last >= 0.2:
+                            spd = int(done / max(now - started, 1e-6))
+                            txt = f"⬇ {_human_size(done)}"
+                            if total:
+                                txt += f" / {_human_size(total)} ({done / total * 100:.0f}%)"
+                            txt += f" · {_human_size(spd)}/s"
+                            _emit_progress(progress_callback, txt)
+                            last = now
+        _emit_progress(progress_callback, "✅ скачано", force=True)
         return True, ""
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
@@ -668,7 +759,8 @@ def _httpx_download(url: str, dest: str, headers, timeout_sec: int,
 
 def _download_file(url: str, dest: str, headers, timeout_sec: int,
                    resume: bool = False, proxy=None,
-                   session_path: Optional[str] = None) -> Tuple[bool, str, str]:
+                   session_path: Optional[str] = None,
+                   progress_callback=None) -> Tuple[bool, str, str]:
     """Скачать файл надёжно. -> (ok, error, engine).
 
     Предпочтительно aria2c (докачка, большие файлы). Если он недоступен или
@@ -677,17 +769,20 @@ def _download_file(url: str, dest: str, headers, timeout_sec: int,
     """
     if _aria2c_available():
         ok, err = _aria2c_download(url, dest, headers, timeout_sec,
-                                   proxy=proxy, session_path=session_path)
+                                   proxy=proxy, session_path=session_path,
+                                   progress_callback=progress_callback)
         if ok:
             return True, "", "aria2c"
         # Запасной движок: не оставляем модель без результата из-за движка.
         ok2, err2 = _httpx_download(url, dest, headers, timeout_sec,
-                                    proxy=proxy, session_path=session_path)
+                                    proxy=proxy, session_path=session_path,
+                                    progress_callback=progress_callback)
         if ok2:
             return True, "", "httpx (после aria2c)"
         return False, f"aria2c: {err} | httpx: {err2}", "aria2c+httpx"
     ok, err = _httpx_download(url, dest, headers, timeout_sec,
-                              proxy=proxy, session_path=session_path)
+                              proxy=proxy, session_path=session_path,
+                              progress_callback=progress_callback)
     return ok, err, "httpx"
 
 
@@ -706,7 +801,8 @@ def _torrent_files(dest: str, limit: int = 20) -> List[str]:
 
 def _do_download(url: str, output_path: Optional[str], headers, timeout_sec: int,
                  session_path: Optional[str], resume: bool = False,
-                 expected_sha256: Optional[str] = None, proxy=None) -> str:
+                 expected_sha256: Optional[str] = None, proxy=None,
+                 progress_callback=None) -> str:
     """Скачать файл (или торрент), проверить тип/хеш/целостность, записать в историю."""
     torrent = _is_torrent(url)
     dest = _destination(url, output_path, session_path)
@@ -721,6 +817,7 @@ def _do_download(url: str, output_path: Optional[str], headers, timeout_sec: int
         elif not os.path.isdir(dest):
             dest = os.path.dirname(dest) or dest
     started = time.time()
+    _emit_progress(progress_callback, "⬇ подключение…")
 
     # Уже скачано и целое — не качаем повторно (если не просят resume).
     prev = _dlm.find(session_path, url, dest) if _dlm else None
@@ -745,7 +842,8 @@ def _do_download(url: str, output_path: Optional[str], headers, timeout_sec: int
                     engine="aria2c" if _aria2c_available() else "httpx")
 
     ok, err, engine = _download_file(url, dest, headers, timeout_sec, resume,
-                                     proxy=proxy, session_path=session_path)
+                                     proxy=proxy, session_path=session_path,
+                                     progress_callback=progress_callback)
     elapsed = f"{time.time() - started:.2f}s"
 
     if not ok:
@@ -1300,7 +1398,8 @@ def _verify_image(url: str, headers, timeout_sec: int, session_path=None,
 
 def _action_images(query: str, url: str, headers, timeout_sec: int, max_bytes: int,
                    max_items: int, session_path: Optional[str] = None,
-                   proxy=None, max_pages: int = 4) -> Tuple[str, str, List[str], Dict]:
+                   proxy=None, max_pages: int = 4,
+                   progress_callback=None) -> Tuple[str, str, List[str], Dict]:
     """Найти прямые изображения (со страницы `url` или из выдачи по `query`).
 
     Провайдер не зашит: берём любую страницу/выдачу и разбираем generic-парсером
@@ -1312,7 +1411,9 @@ def _action_images(query: str, url: str, headers, timeout_sec: int, max_bytes: i
 
     if url:
         pages = [url]
+        _emit_progress(progress_callback, "🖼 сбор картинок со страницы…")
     elif query:
+        _emit_progress(progress_callback, f"🖼 поиск страниц: {_escape(query, 40)}…")
         pages = _search_result_urls(query, headers, timeout_sec, max_bytes, max_pages,
                                     session_path, proxy)
         if not pages:
@@ -1344,11 +1445,19 @@ def _action_images(query: str, url: str, headers, timeout_sec: int, max_bytes: i
 
     verified: List[Tuple[str, str, str, int]] = []
     seen = set()
+    if candidates:
+        _emit_progress(progress_callback,
+                       f"🖼 кандидатов {len(candidates)} — проверяю…")
+    checked = 0
     for cap, u, page in candidates:
         if u in seen:
             continue
         seen.add(u)
         ok, _info, size = _verify_image(u, headers, timeout_sec, session_path, proxy)
+        checked += 1
+        if checked % 3 == 0:
+            _emit_progress(progress_callback,
+                           f"🖼 проверено {checked}/{len(candidates)}, живых {len(verified)}")
         if ok:
             verified.append((cap, u, page, size))
             if len(verified) >= max_items * 3:
@@ -1383,6 +1492,7 @@ def _action_images(query: str, url: str, headers, timeout_sec: int, max_bytes: i
         if i <= 3:
             nxt.append(f'image(source="{u}", alt="{cap if cap != "[no caption]" else ""}")')
     nxt.append(f'web action=images query="{_escape(query or "<запрос>", 60)}"')
+    _emit_progress(progress_callback, f"🖼 живых {len(verified)}", force=True)
     return "\n".join(lines), "extracted", nxt, meta
 
 
@@ -1507,8 +1617,9 @@ def _search_lynx(query: str, timeout_sec: int, max_chars: int,
 
 def _action_search(query: str, headers, timeout_sec: int, max_bytes: int,
                    max_items: int, session_path: Optional[str] = None,
-                   proxy=None) -> Tuple[str, List[str]]:
+                   proxy=None, progress_callback=None) -> Tuple[str, List[str]]:
     cfg = _config()
+    _emit_progress(progress_callback, f"🔎 поиск: {_escape(query, 40)}…")
     results: List[Dict[str, str]] = []
     try:
         raw, final_url, ctype, status, _ = _fetch(
@@ -1528,6 +1639,7 @@ def _action_search(query: str, headers, timeout_sec: int, max_bytes: int,
             ]
         return ("❌ Поиск не дал результатов (DuckDuckGo недоступен или заблокировал).",
                 ['web action=open url="<прямая ссылка>"'])
+    _emit_progress(progress_callback, f"🔎 найдено {len(results)}", force=True)
     lines = [f"🔎 {query} — {len(results)} результатов", ""]
     nxt = []
     for i, r in enumerate(results, 1):
@@ -1550,7 +1662,8 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
         timeout_sec: int, max_bytes: int, follow_redirects: bool, max_items: int,
         session_path: Optional[str], resume: bool = False,
         expected_sha256: Optional[str] = None, method: str = "GET",
-        content=None, json_body=None, data=None, proxy=None) -> str:
+        content=None, json_body=None, data=None, proxy=None,
+        progress_callback=None) -> str:
     if not url or not str(url).strip():
         return _finish("❌ Не указан url.",
                        {"action": action}, "error",
@@ -1571,9 +1684,11 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
     # aria2c умеет только GET; запросы с телом идут обычным HTTP-путём.
     if action == "download" and method == "GET" and not has_body:
         return _do_download(url, output_path, headers, timeout_sec, session_path,
-                            resume, expected_sha256, proxy=proxy)
+                            resume, expected_sha256, proxy=proxy,
+                            progress_callback=progress_callback)
 
     started = time.time()
+    _emit_progress(progress_callback, "🌐 загрузка…")
 
     def _try(u):
         return _fetch(u, headers, timeout_sec, max_bytes, follow_redirects,
@@ -1598,6 +1713,9 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
     # повторяем запрос один раз. Семантические замены значений не делаются —
     # они предлагаются модели в «Следующих шагах» по тексту ошибки сервера.
     fixed_note = ""
+    if raw:
+        _emit_progress(progress_callback,
+                       f"🌐 {_human_size(len(raw))} · {(ctype or '—').split(';')[0]}")
     if status >= 400:
         # 1) Беззнаковая правка: декодировать безопасные процент-экранирования.
         fixed_url, note = _repair_url(url)
@@ -1674,7 +1792,8 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
     if action == "download":
         if method == "GET" and not has_body:
             return _do_download(final_url or url, output_path, headers, timeout_sec,
-                                session_path, resume, expected_sha256, proxy=proxy)
+                                session_path, resume, expected_sha256, proxy=proxy,
+                                progress_callback=progress_callback)
         path, ftype = _save_bytes(raw, output_path, session_path, final_url or url)
         if not path:
             return _finish(
@@ -1832,7 +1951,7 @@ def execute(
     if action == "images":
         body, provenance, nxt, meta = _action_images(
             query, url, headers, timeout_sec, max_bytes, max_items or 3,
-            session_path, proxy)
+            session_path, proxy, progress_callback=progress_callback)
         return _finish(body, meta, provenance,
                        "готовые image(source=…) — вставь token в ответ, чтобы показать картинку",
                        nxt)
@@ -1846,13 +1965,14 @@ def execute(
             return _finish("❌ Для action=search нужен query.",
                            {"action": action}, "error", "укажи query", ["web action=help"])
         body, nxt = _action_search(query, headers, timeout_sec, max_bytes, max_items,
-                                   session_path, proxy)
+                                   session_path, proxy, progress_callback)
         return _finish(body, {"action": "search", "query": _escape(query, 60)}, "extracted",
                        "открой верхний результат, чтобы получить содержание", nxt)
 
     return _go(url, action, extract, css, jq_filter, output_path, headers,
                timeout_sec, max_bytes, follow_redirects, max_items, session_path,
-               resume, expected_sha256, method, None, json_body, data, proxy=proxy)
+               resume, expected_sha256, method, None, json_body, data, proxy=proxy,
+               progress_callback=progress_callback)
 
 
 # Alias

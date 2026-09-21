@@ -18,6 +18,7 @@ def execute(
     timeout_sec: int = 15,
     headers: List[str] = None,
     session_path: str = None,
+    progress_callback=None,
 ) -> str:
     """Структурированное извлечение через единый web-кит."""
     return _web.execute(
@@ -28,6 +29,7 @@ def execute(
         timeout_sec=timeout_sec,
         headers=headers,
         session_path=session_path,
+        progress_callback=progress_callback,
     )
 
 

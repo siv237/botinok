@@ -9,12 +9,13 @@ open_url — legacy-обёртка над единым веб-добывател
 from tools import web as _web
 
 
-def open_url(url: str, session_path: str = None) -> str:
+def open_url(url: str, session_path: str = None, progress_callback=None) -> str:
     """Читаемый текст страницы через единый web-кит."""
     target = (url or "").strip()
     if target and "://" not in target:
         target = "https://" + target
-    return _web.execute(url=target, action="open", session_path=session_path)
+    return _web.execute(url=target, action="open", session_path=session_path,
+                        progress_callback=progress_callback)
 
 
 if __name__ == "__main__":

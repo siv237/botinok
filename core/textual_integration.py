@@ -533,7 +533,7 @@ def ask_ollama_textual(
     app = BotinokTextualApp(session_path=session_path, version=version,
                             initial_prompt=initial_prompt)
     app.set_model_info(model, dangerous=dangerous_mode,
-                       server="openai" if is_openai_backend(sm) else "ollama")
+                       server=_server_label(sm))
 
     # Регистрируем приложение глобально: инструменты (shell_exec) вызываются из
     # рабочего потока, где ContextVar active_app не наследуется. Без этой
@@ -567,8 +567,33 @@ def ask_ollama_textual(
     def _add_tool(name, query, status="running", size_kb=0):
         _call_from_thread(app.add_tool_activity, name, query, status, size_kb)
 
-    def _update_tool(name, status="completed", size_kb=0, query=""):
-        _call_from_thread(app.update_tool_activity, name, status, size_kb, query)
+    def _update_tool(name, status="completed", size_kb=0, query="", detail=None):
+        _call_from_thread(app.update_tool_activity, name, status, size_kb, query, detail)
+
+    def _tool_progress(tn, min_interval=0.2):
+        """Живой прогресс инструмента: строка или (bytes, total) → detail."""
+        last = [0.0]
+
+        def cb(*args, **kwargs):
+            text = ""
+            if kwargs.get("detail"):
+                text = str(kwargs["detail"])
+            elif len(args) == 1 and isinstance(args[0], str):
+                text = args[0]
+            elif len(args) >= 2 and isinstance(args[0], (int, float)):
+                done, total = args[0], args[1] or 0
+                text = f"⬇ {done/1024:.1f} KB"
+                if total:
+                    text += f" / {total/1024:.1f} KB ({done/total*100:.0f}%)"
+            if not text:
+                return
+            now = time.time()
+            force = bool(kwargs.get("force"))
+            if not force and now - last[0] < min_interval:
+                return
+            last[0] = now
+            _call_from_thread(app.update_tool_detail, tn, text[:120])
+        return cb
 
     def _append_user(text):
         _call_from_thread(app.append_user_message, text)
@@ -1375,25 +1400,8 @@ def ask_ollama_textual(
                 sm.log_tool_call(session_path, tool_name, tool_args, "STARTED", status="running", call_id=tc_id)
 
                 progress_callback = None
-                if tool_name == "curl":
-
-                    def _make_curl_cb(tn=tool_name):
-                        last_reported = [0.0]
-
-                        def cb(bytes_downloaded, total_bytes):
-                            size_kb = bytes_downloaded / 1024
-                            if total_bytes > 0:
-                                pct = (bytes_downloaded / total_bytes) * 100
-                                query = f"{size_kb:.1f} KB / {total_bytes/1024:.1f} KB ({pct:.0f}%)"
-                                _update_tool(tn, status="running", size_kb=size_kb, query=query)
-                            else:
-                                if bytes_downloaded - last_reported[0] > 10240:
-                                    query = f"{size_kb:.1f} KB downloaded"
-                                    _update_tool(tn, status="running", size_kb=size_kb, query=query)
-                                    last_reported[0] = bytes_downloaded
-                        return cb
-
-                    progress_callback = _make_curl_cb()
+                if tool_name in ("curl", "web", "web_search", "open_url", "web_extract"):
+                    progress_callback = _tool_progress(tool_name)
 
                 effective_session_path = session_path
                 if tool_name == "code_editor" and isinstance(tool_args, dict):
