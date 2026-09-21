@@ -16,7 +16,7 @@ status: stable
 - `botinok --ensure-deps` — только проверка/установка системных компонентов (без обновления кода).
 - `botinok --update-packages` / `-U` (launcher `botinok`) — pip-зависимости **и затем** `--ensure-deps`.
 - `update.sh` в корне репозитория — единая команда обновления под root: `git pull` (с `safe.directory`) → pip → `--ensure-deps`.
-- `--version` / `_get_version_info()` — текущая версия (напр. `0.4 | дата | хеш`).
+- `--version` / `_get_version_info()` — текущая версия (напр. `0.4 | дата | хеш`). Источник истины — **git**; файл `.version` (его пишет `install.sh`) используется только как fallback для не-git установок. Раньше приоритет был у `.version`, а `git pull` его не обновлял — баннер застревал на версии установки. `_perform_update` теперь перезаписывает `.version` после pull.
 - `install.sh` ставит системные пакеты, включая `chafa` и `ffmpeg`.
 
 ## Диагностика (почему chafa не ставился)

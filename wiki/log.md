@@ -1003,3 +1003,10 @@ band-рендер передавал `--animate off`, которого нет в
   не пишутся в PNG-кэш (`prepare_scaled`, `_crop_source`).
 - Тест `tests/test_image_icc.py`; проверено на реальном файле: band 40 строк.
   CHANGELOG, `concepts/image_rendering.md`.
+
+## [2026-09-21] fix | версия в баннере не обновлялась
+`_get_version_info` предпочитал файл `.version` (его пишет install.sh), а
+`git pull` его не трогал — баннер показывал `10.06.2026 | cd57`.
+- `botinok.py`: git — источник истины (`_git_version_info`), `.version` —
+  fallback (`_read_version_file`); `_perform_update` перезаписывает `.version`
+  (`_write_version_file`). Тест `tests/test_version.py`.

@@ -13,6 +13,7 @@
 - `_ensure_system_deps()` ставит **весь** набор (`curl`, `lynx`, `jq`, `aria2c`, `file`, `git`, `chafa`, `ffmpeg`) и вызывается из `--update` **всегда**, независимо от наличия нового коммита; `chafa`/`ffmpeg` добавлены в `_SYSTEM_TOOLS`, поэтому предупреждение о зависимостях их показывает
 - Новый флаг `botinok --ensure-deps`; `botinok -U`/`--update-packages` теперь после pip ставит и системные компоненты; `update.sh` — единая команда обновления под root (`git pull` с `safe.directory` → pip → `--ensure-deps`)
 - `install.sh` доустанавливает `ffmpeg` (транскод аудио); тест `tests/test_system_deps.py`
+- Исправлена «застывшая» версия в баннере: `_get_version_info` читал `.version` (его пишет `install.sh`), а `git pull` его не обновлял — показывалось `10.06.2026 | cd57`. Теперь источник истины — git (`.version` только fallback для не-git установок), а `_perform_update` перезаписывает `.version` после pull. Тест `tests/test_version.py`
 
 ### Веб-кит: помощник-навигатор, поиск картинок, прокси, движки загрузки
 - **Помощник-навигатор**: после любого fetch — `📦 На странице` (images/links/headings/tables/meta) и готовые вызовы под содержимое, включая `image(source=…)`; для JS-страниц без картинок — подсказка `action=images`
