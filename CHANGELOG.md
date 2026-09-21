@@ -6,6 +6,7 @@
 - Причина: рендер передавал chafa флаг `--animate`, которого **нет в chafa 1.8.0** (Ubuntu 22.04) → команда падала (rc=1), `render_image_band` возвращал `None`, `ImageBlock` оставался пустым placeholder'ом даже при установленном chafa
 - Флаги chafa теперь формируются по возможностям установленной версии (`chafa_caps()` из `chafa --help`, кэш): `--animate off` добавляется только если поддерживается
 - Тест `tests/test_chafa_args.py` (проверяет аргументы для старой/новой версии и реальный полосовой рендер); `test_image_scaling`, `test_image_in_chat`, `test_lazy_images` снова зелёные
+- Ещё одна причина невидимых картинок: у профессиональных/CMYK-фото (напр. Canon) огромный ICC-профиль, и PNG-кэш уменьшенной копии содержал iCCP-чанк больше `PngImagePlugin.MAX_TEXT_CHUNK` → PIL не мог переоткрыть кэш (`ValueError`), `render_image_band` возвращал `None`. Лимит поднят, а ICC/EXIF больше не пишутся в PNG-кэш копий (`prepare_scaled`, `_crop_source`); тест `tests/test_image_icc.py`
 
 ### Обновление и системные компоненты (chafa/ffmpeg)
 - Исправлено: `botinok --update` на актуальной версии делал ранний `return` и не доустанавливал системные компоненты — из-за этого отсутствие `chafa` не лечилось и картинки в чате не рисовались (`render_image_band` без chafa возвращает `None`)

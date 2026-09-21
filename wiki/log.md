@@ -994,3 +994,12 @@ band-рендер передавал `--animate off`, которого нет в
 - Тест `tests/test_chafa_args.py`; `test_image_scaling`, `test_image_in_chat`,
   `test_lazy_images` снова зелёные. Страница `concepts/image_rendering.md`,
   CHANGELOG.
+
+## [2026-09-21] fix | PNG-кэш с тяжёлым ICC ломал полосовой рендер
+Фото philharmonia.spb.ru (Canon, CMYK, большой ICC) не отображалось: PNG-кэш
+уменьшенной копии нёс iCCP-чанк больше `PngImagePlugin.MAX_TEXT_CHUNK`, PIL
+падал `ValueError`, `_crop_source` → None, `render_image_band` → None.
+- `core/image_render.py`: поднят `MAX_TEXT_CHUNK` (лечит старые кэши) и ICC/EXIF
+  не пишутся в PNG-кэш (`prepare_scaled`, `_crop_source`).
+- Тест `tests/test_image_icc.py`; проверено на реальном файле: band 40 строк.
+  CHANGELOG, `concepts/image_rendering.md`.
