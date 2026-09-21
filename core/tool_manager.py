@@ -590,7 +590,7 @@ class ToolManager:
 
         args может быть dict или JSON-строкой (как в tool_calls от моделей).
         session_path прокидывается в инструменты, которые его поддерживают (например code_editor).
-        progress_callback используется для curl чтобы обновлять прогресс скачивания.
+        progress_callback используется для curl/web чтобы обновлять прогресс (скорость, найдено и т.п.).
         """
         if args is None:
             args = {}
@@ -646,8 +646,8 @@ class ToolManager:
         try:
             if session_path is not None:
                 try:
-                    # Для curl передаем progress_callback
-                    if name == "curl" and progress_callback is not None:
+                    # Для curl/web передаем progress_callback (живой прогресс в панели)
+                    if name in ("curl", "web", "web_search", "open_url", "web_extract") and progress_callback is not None:
                         return func(session_path=session_path, progress_callback=progress_callback, **args)
                     # Для file_system/code_editor передаем dangerous_mode
                     if name in ("file_system", "code_editor"):
@@ -655,8 +655,8 @@ class ToolManager:
                     return func(session_path=session_path, **args)
                 except TypeError:
                     return func(**args)
-            # Для curl без session_path тоже передаем progress_callback
-            if name == "curl" and progress_callback is not None:
+            # Для curl/web без session_path тоже передаем progress_callback
+            if name in ("curl", "web", "web_search", "open_url", "web_extract") and progress_callback is not None:
                 return func(progress_callback=progress_callback, **args)
             # Для file_system без session_path тоже передаем dangerous_mode
             if name == "file_system":

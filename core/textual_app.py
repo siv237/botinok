@@ -2026,8 +2026,15 @@ class BotinokTextualApp(App):
             return f"[cyan]{label:<{L}}[/cyan]{value}"
 
         status_ru = self._ru_status(s.get("status", ""), printing=printing)
+        server_raw = str(s.get("server", "") or "")
+        if server_raw in ("", "ollama"):
+            server_text = "Ollama"
+        elif server_raw == "openai":
+            server_text = "OpenAI-совместимый сервер"
+        else:
+            server_text = server_raw  # реальный адрес из конфига (см. _server_label)
         lines = [
-            row("Сервер:", "OpenAI-совместимый" if not full else "Ollama (локальный)"),
+            row("Сервер:", normalize_cells(server_text)),
             row("Что сейчас:", f"[bold]{status_ru}[/bold]{activity}"),
             row("Всего прошло:", self._fmt_secs(s.get("elapsed", 0))),
             row("Этап:", self._fmt_secs(now - self._phase_started_at)),
@@ -2117,6 +2124,9 @@ class BotinokTextualApp(App):
             f"[bold cyan]Инструмент:[/bold cyan] {normalize_cells(t.get('name', ''))}",
             f"[bold cyan]Время:[/bold cyan] {started}  [bold cyan]Статус:[/bold cyan] [{ss}]{t['status']}[/{ss}]  [bold cyan]Размер:[/bold cyan] {sz}",
         ]
+        detail = self._rich_escape(t.get("detail", ""))
+        if detail:
+            lines.append(f"[bold cyan]Прогресс:[/bold cyan] {detail}")
         query = self._rich_escape(t.get("query", ""))
         if query:
             lines += ["", "[bold cyan]Запрос:[/bold cyan]", query]
@@ -2125,9 +2135,24 @@ class BotinokTextualApp(App):
             lines += ["", "[bold cyan]Результат:[/bold cyan]", result]
         return "\n".join(lines)
 
+    def _tools_panel_width(self) -> int:
+        """Внутренняя ширина панели инструментов (для прижатия к правому краю)."""
+        for getter in ("content_size", "size"):
+            try:
+                w = int(getattr(self.tools_list, getter).width)
+                if w > 0:
+                    return w
+            except Exception:
+                pass
+        try:
+            return int(self.size.width)
+        except Exception:
+            return 0
+
     def _tools_signature(self) -> str:
-        return "|".join(
-            f"{self._tool_key(t)}:{t['status']}:{round(t.get('size_kb', 0), 3)}:{len(t.get('result', ''))}"
+        width = self._tools_panel_width()
+        return f"w{width}|" + "|".join(
+            f"{self._tool_key(t)}:{t['status']}:{round(t.get('size_kb', 0), 3)}:{len(t.get('result', ''))}:{t.get('detail', '')}"
             for t in self.active_tools
         )
 
@@ -2159,6 +2184,8 @@ class BotinokTextualApp(App):
                     w.remove()
                 except Exception:
                     pass
+        # Ширина панели для прижатия «состояния» к правому краю свёрнутой карточки.
+        panel_width = self._tools_panel_width()
         # Создаём новые и обновляем существующие карточки (без пересоздания —
         # иначе шторм remove/mount и зависание обработки сообщений).
         for t in self.active_tools:  # старые -> новые; новые вставляем наверх
@@ -2171,8 +2198,7 @@ class BotinokTextualApp(App):
             except Exception:
                 started = "--:--:--"
             ss = "yellow" if t["status"] == "running" else "green" if t["status"] == "completed" else "red"
-            title = (f"[dim]{started}[/dim]  [cyan]{normalize_cells(t.get('name', ''))}[/cyan]  "
-                     f"[{ss}]{t['status']}[/{ss}]")
+            title = self._build_tool_title(t, panel_width)
             body = self._tool_details(t)
             widget = self._tool_widgets.get(key)
             if widget is None:
@@ -3051,21 +3077,166 @@ class BotinokTextualApp(App):
         self._stats_dirty = True
         self.update_stats_display()
 
+    def update_tool_detail(self, name: str, detail: str) -> None:
+        """Обновить только живое свойство инструмента (не трогая size/status)."""
+        for t in reversed(self.active_tools):
+            if t["name"] == name:
+                t["detail"] = detail
+                break
+        self._tools_dirty = True
+
     def add_tool_activity(self, name: str, query: str, status: str = "running", size_kb: float = 0) -> None:
-        self.active_tools.append({"name": name, "query": query, "status": status, "size_kb": size_kb, "start_time": time.time()})
+        self.active_tools.append({"name": name, "query": query, "status": status, "size_kb": size_kb,
+                                  "detail": "", "start_time": time.time(), "end_time": None})
         self._tools_dirty = True
         self.update_stats_display()
 
-    def update_tool_activity(self, name: str, status: str = "completed", size_kb: float = 0, query: str = "") -> None:
+    def update_tool_activity(self, name: str, status: str = "completed", size_kb: float = 0,
+                             query: str = "", detail: str = None) -> None:
+        """Обновить карточку инструмента. `detail` — живое свойство (скорость,
+        число найденных и т.п.), показывается в заголовке и в теле карточки."""
         for t in reversed(self.active_tools):
             if t["name"] == name:
                 t["status"] = status
                 t["size_kb"] = size_kb
                 if query:
                     t["query"] = query
+                if detail is not None:
+                    t["detail"] = detail
+                if status != "running" and not t.get("end_time"):
+                    t["end_time"] = time.time()
                 break
         self._tools_dirty = True
         self.update_stats_display()
+
+    @staticmethod
+    def _fmt_dur(sec: float) -> str:
+        try:
+            d = float(sec)
+        except Exception:
+            return ""
+        if d < 0:
+            d = 0
+        if d < 1:
+            return "<1с"
+        if d < 60:
+            return f"{int(d)}с"
+        if d < 3600:
+            return f"{int(d // 60)}м{int(d % 60):02d}с"
+        return f"{int(d // 3600)}ч{int((d % 3600) // 60):02d}м"
+
+    @staticmethod
+    def _fmt_kb(kb: float) -> str:
+        try:
+            kb = float(kb)
+        except Exception:
+            return ""
+        if kb <= 0:
+            return ""
+        if kb < 1024:
+            return f"{kb:.2f} KB"
+        if kb < 1024 * 1024:
+            return f"{kb / 1024:.2f} MB"
+        return f"{kb / (1024 * 1024):.2f} GB"
+
+    def _tool_state(self, t: dict) -> str:
+        """Короткое «состояние» инструмента для правого края свёрнутой карточки.
+
+        Приоритет: живой прогресс (`detail`) → размер → время работы. Так
+        состояние видно всегда, а у завершённых виден и размер.
+        """
+        detail = normalize_cells(str(t.get("detail", ""))).strip()
+        size = self._fmt_kb(t.get("size_kb") or 0)
+        try:
+            st = float(t.get("start_time") or 0)
+        except Exception:
+            st = 0
+        dur = ""
+        if st:
+            if t.get("status") == "running":
+                dur = self._fmt_dur(time.time() - st)
+            else:
+                end = float(t.get("end_time") or 0)
+                if end and end >= st:
+                    dur = self._fmt_dur(end - st)
+        if t.get("status") == "running":
+            if detail:
+                return detail
+            return f"⏱ {dur}" if dur else size
+        # Завершён: показываем и результат, и размер (его раньше не было видно).
+        parts = [p for p in (detail, size) if p]
+        if size and detail and size in detail:
+            parts = [detail]  # не дублируем размер, если он уже в прогрессе
+        if not detail and dur:
+            parts.append(dur)
+        return " · ".join(parts) or dur
+
+    @staticmethod
+    def _truncate(text: str, limit: int) -> str:
+        text = str(text)
+        if limit <= 0:
+            return ""
+        if len(text) <= limit:
+            return text
+        if limit == 1:
+            return "…"
+        return text[:limit - 1] + "…"
+
+    def _build_tool_title(self, t: dict, panel_width: int) -> str:
+        """Однострочный заголовок карточки: слева время/имя/статус, справа
+        «состояние», прижатое к правому краю. Никогда не переносится."""
+        started = ""
+        try:
+            started = datetime.fromtimestamp(float(t.get("start_time", 0))).strftime("%H:%M:%S")
+        except Exception:
+            started = "--:--:--"
+        name = normalize_cells(t.get("name", ""))
+        status = str(t.get("status", ""))
+        ss = "yellow" if status == "running" else "green" if status == "completed" else "red"
+        state = self._tool_state(t)
+
+        # -5: стрелка Collapsible + её отступы, чтобы строка гарантированно не переносилась.
+        W = max(16, int(panel_width or 0) - 5) if panel_width else 0
+        sep = "  "
+        left_base = started + sep
+        right_base = sep + status
+
+        if W <= 0:
+            # Ширина неизвестна — компактно, без выравнивания.
+            title = f"[dim]{started}[/dim]{sep}[cyan]{self._rich_escape(name)}[/cyan]{sep}[{ss}]{status}[/{ss}]"
+            if state:
+                title += f"{sep}[dim]{self._rich_escape(self._truncate(state, 40))}[/dim]"
+            return title
+
+        # Сколько места осталось под имя + «состояние».
+        budget = W - len(left_base) - len(right_base)
+        if budget < 4:
+            return f"[dim]{started}[/dim]{sep}[cyan]{self._rich_escape(self._truncate(name, max(3, W - len(left_base) - len(right_base))))}[/cyan]{sep}[{ss}]{status}[/{ss}]"
+
+        gap = 2
+        # Сначала ужимаем «состояние» (минимум ~6 символов), потом имя —
+        # чтобы подробности не терялись целиком на узкой панели.
+        if state:
+            max_state = budget - 3 - gap
+            if max_state >= 6:
+                state = self._truncate(state, max_state)
+            else:
+                state = ""
+        name_avail = budget - (len(state) + gap if state else 0)
+        name = self._truncate(name, max(3, name_avail))
+        left_plain = left_base + name + right_base
+
+        free = W - len(left_plain)
+        if state and free >= gap + 4:
+            state = self._truncate(state, free - gap)
+            pad = max(1, free - gap - len(state) + gap)
+            title = (f"[dim]{started}[/dim]{sep}[cyan]{self._rich_escape(name)}[/cyan]"
+                     f"{sep}[{ss}]{status}[/{ss}]" + (" " * pad)
+                     + f"[dim]{self._rich_escape(state)}[/dim]")
+        else:
+            title = (f"[dim]{started}[/dim]{sep}[cyan]{self._rich_escape(name)}[/cyan]"
+                     f"{sep}[{ss}]{status}[/{ss}]")
+        return title
 
     def flush_tool_buffer(self) -> None:
         self._flush_tool_spoilers()

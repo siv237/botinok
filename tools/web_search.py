@@ -9,9 +9,10 @@ web_search — legacy-обёртка над единым веб-добывате
 from tools import web as _web
 
 
-def ddg_search(query: str, session_path: str = None) -> str:
+def ddg_search(query: str, session_path: str = None, progress_callback=None) -> str:
     """Поиск в интернете через единый web-кит."""
-    return _web.execute(query=query, action="search", session_path=session_path)
+    return _web.execute(query=query, action="search", session_path=session_path,
+                        progress_callback=progress_callback)
 
 
 if __name__ == "__main__":

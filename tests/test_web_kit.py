@@ -355,7 +355,7 @@ def main() -> int:
         cached = web_search_tool._web._action_search
 
         def fake_search(query, headers, timeout_sec, max_bytes, max_items,
-                        session_path=None, proxy=None):
+                        session_path=None, proxy=None, progress_callback=None):
             return ("🔎 fake — 1 результатов\n\n1. Result\n   https://example.com",
                     ['web action=open url="https://example.com"'])
         web_search_tool._web._action_search = fake_search
