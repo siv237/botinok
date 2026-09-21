@@ -18,6 +18,20 @@ import tempfile
 from collections import OrderedDict
 from typing import Optional
 
+# У части фото (профессиональные/CMYK, напр. Canon) ICC-профиль настолько
+# большой, что PIL отказывается открывать PNG с таким iCCP-чанком:
+#   ValueError: Decompressed data too large for PngImagePlugin.MAX_TEXT_CHUNK
+# PNG-кэш уменьшенных копий пишется нами же, поэтому поднимаем лимит (и не
+# тащим профиль в кэш — см. prepare_scaled). Иначе полосовой рендер падает,
+# и картинка не показывается.
+try:  # pragma: no cover - зависит от версии Pillow
+    from PIL import PngImagePlugin
+    if PngImagePlugin.MAX_TEXT_CHUNK is not None:
+        PngImagePlugin.MAX_TEXT_CHUNK = max(PngImagePlugin.MAX_TEXT_CHUNK,
+                                            128 * 1024 * 1024)
+except Exception:
+    pass
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 DEFAULT_SYMBOLS = "sextant"
@@ -194,6 +208,11 @@ def _crop_source(path: str, y0: int, y1: int) -> Optional[str]:
             y0c = max(0, min(h - 1, int(y0)))
             y1c = max(y0c + 1, min(h, int(y1)))
             band = im.crop((0, y0c, w, y1c))
+        try:
+            band.info.pop("icc_profile", None)
+            band.info.pop("exif", None)
+        except Exception:
+            pass
         band.save(out, "PNG")
         return out
     except Exception:
@@ -259,6 +278,13 @@ def prepare_scaled(path: str, width: int, rows: int,
             if im.size != (target_w, target_h):
                 resample = getattr(Image, "Resampling", Image).BILINEAR
                 im = im.resize((target_w, target_h), resample)
+            # Не тащим тяжёлый ICC/EXIF в PNG-кэш: иначе PIL не может переоткрыть
+            # файл (MAX_TEXT_CHUNK) и полосовой рендер ломается на CMYK-фото.
+            try:
+                im.info.pop("icc_profile", None)
+                im.info.pop("exif", None)
+            except Exception:
+                pass
         im.save(out, "PNG")
     except Exception:
         return None
