@@ -97,6 +97,39 @@ def chafa_path() -> Optional[str]:
     return shutil.which("chafa")
 
 
+_CHAFA_CAPS: Optional[set] = None
+
+
+def chafa_caps() -> set:
+    """Кэшированный набор поддерживаемых chafa-флагов (по `chafa --help`).
+
+    Нужен из-за разницы версий: Ubuntu 22.04 даёт chafa 1.8.0, где нет
+    `--animate` — с ним команда падает (rc=1) и картинки не рендерятся.
+    """
+    global _CHAFA_CAPS
+    if _CHAFA_CAPS is None:
+        caps: set = set()
+        chafa = chafa_path()
+        if chafa:
+            try:
+                proc = subprocess.run([chafa, "--help"], capture_output=True,
+                                      text=True, timeout=5)
+                caps = set(re.findall(r"--([A-Za-z0-9-]+)",
+                                      (proc.stdout or "") + (proc.stderr or "")))
+            except Exception:
+                caps = set()
+        _CHAFA_CAPS = caps
+    return _CHAFA_CAPS
+
+
+def _chafa_base_args(symbols: str) -> list:
+    """Общие аргументы chafa, совместимые с установленной версией."""
+    args = ["--format", "symbols", "--symbols", symbols, "--colors", "full"]
+    if "animate" in chafa_caps():
+        args += ["--animate", "off"]  # в старых chafa (1.8) флага нет
+    return args
+
+
 def render_with_chafa(path: str, width: int,
                       symbols: Optional[str] = None,
                       timeout: float = 15.0,
@@ -114,9 +147,7 @@ def render_with_chafa(path: str, width: int,
     size = f"{int(width)}x" if max_height <= 0 else f"{int(width)}x{int(max_height)}"
     try:
         proc = subprocess.run(
-            [chafa, "--format", "symbols", "--symbols", symbols,
-             "--colors", "full", "--animate", "off", "--size", size,
-             path],
+            [chafa] + _chafa_base_args(symbols) + ["--size", size, path],
             capture_output=True, timeout=timeout,
         )
     except Exception:
@@ -275,9 +306,8 @@ def render_image_band(path: str, width: int, rows: int, y0: int, y1: int,
     sym = symbols or os.environ.get("BOTINOK_LOGO_SYMBOLS", DEFAULT_SYMBOLS)
     try:
         proc = subprocess.run(
-            [chafa, "--format", "symbols", "--symbols", sym,
-             "--colors", "full", "--animate", "off",
-             "--size", f"{int(width)}x{int(rows)}", "--stretch", band_file],
+            [chafa] + _chafa_base_args(sym) + [
+                "--size", f"{int(width)}x{int(rows)}", "--stretch", band_file],
             capture_output=True, timeout=timeout,
         )
     except Exception:
