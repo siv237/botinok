@@ -18,13 +18,13 @@ status: stable
 Выбранный путь сохраняется в `config_path`, источник — в `config_source` («personal» / «local» / «system»).
 
 ## Секции (см. `sources/config_cfg.md`)
-- `[Ollama]` — бэкенд (`Backend`: `ollama`/`openai`), baseurl, model, context, таймауты, сэмплинг, `ApiKey` (Bearer-токен для OpenAI-совместимых API).
+- `[Ollama]` — бэкенд (`Backend`: `ollama`/`openai`), baseurl, model, context, таймауты, сэмплинг, `ApiKey` (Bearer-токен для OpenAI-совместимых API), `VerifySSL` (проверка TLS-сертификата; мастер задаёт её по согласию пользователя).
 - `[Storage]` — `SessionsDir`, `StepsSubDir`.
 - `[Tools]` — lynx (useragent, лимиты, таймауты).
 - `[UI]` — showvram, showtps.
 
 ## Работа
-- `--wizard` (`core/config_wizard.py`, класс `ConfigWizard`) — интерактивный мастер: выбор бэкенда (Ollama / OpenAI-совместимый), проверка подключения, список моделей, контекст по умолчанию, `ApiKey`. → `concepts/config_priority.md`, `entities/openai_compat.md`
+- `--wizard` (`core/config_wizard.py`, класс `ConfigWizard`) — интерактивный мастер: выбор бэкенда (Ollama / OpenAI-совместимый), проверка подключения, список моделей, контекст по умолчанию, `ApiKey`. Для `https` проверяется TLS-сертификат; при ошибке — предупреждение и запрос согласия игнорировать сертификат (тогда `VerifySSL=false` и работа продолжается). → `concepts/config_priority.md`, `entities/openai_compat.md`
 - `save_config()` — запись выбранного пути; обработка ошибок сохранения.
 - Fallback-дефолты, если файл не найден.
 
