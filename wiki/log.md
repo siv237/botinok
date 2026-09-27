@@ -1020,3 +1020,16 @@ band-рендер передавал `--animate off`, которого нет в
 - Шапка «Сервер» — фактический адрес (`_server_label`), не «Ollama (локальный)».
 - Тест `tests/test_web_progress.py`; CHANGELOG; entities/textual_ui.md.
 (Изменения локальные, не закоммичены по просьбе.)
+
+## [2026-09-27] feat | проверка сертификата и согласие игнорировать в мастере
+`core/config_wizard.py` всегда ходил с `verify=False`. Теперь проверка TLS
+включена по умолчанию для Ollama и OpenAI-совместимого API; при ошибке
+сертификата по `https` мастер показывает предупреждение (MITM) и спрашивает
+согласие на игнорирование. Согласился → повтор с `verify=False` и запись
+`[Ollama] VerifySSL=false`; отказался → предлагается другой URL.
+- `check_ollama`/`check_openai` принимают `verify`, возвращают `cert_error`
+  (через `_cert_error`, `requests.exceptions.SSLError`); `_server_context`
+  тоже уважает `verify`; хелперы `_is_https`, `_consent_ignore_cert`.
+- Runtime уже читал `VerifySSL` (`botinok.py`, `session_manager.py`,
+  `textual_integration.py`, `openai_compat.py`) — мастер теперь его задаёт.
+- Тест `tests/test_wizard_ssl.py`; entities/config_system.md.

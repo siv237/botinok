@@ -22,15 +22,46 @@ class ConfigWizard:
             value = 'ollama'
         return BACKEND_OPENAI if value in ('openai', 'openai-compatible') else BACKEND_OLLAMA
 
-    def check_ollama(self, url):
-        """Проверка доступности Ollama по указанному URL."""
+    @staticmethod
+    def _is_https(url):
+        return str(url or "").strip().lower().startswith("https://")
+
+    @staticmethod
+    def _cert_error(exc):
+        """Определяет, что ошибка связана с проверкой TLS-сертификата."""
+        if isinstance(exc, requests.exceptions.SSLError):
+            return str(exc)
+        text = str(exc).lower()
+        if "certificate" in text or "ssl" in text or "tls" in text:
+            return str(exc)
+        return None
+
+    def _consent_ignore_cert(self, url, err):
+        """Предупреждение и согласие на игнорирование сертификата.
+
+        Возвращает True (согласен), False (не согласен) или None (отмена).
+        """
+        out(f"⚠ Не удалось проверить SSL-сертификат: {url}")
+        out(f"  Причина: {err}")
+        out("  Игнорирование сертификата делает соединение уязвимым к MITM-атакам.")
+        return textual_confirm(
+            "Игнорировать проверку сертификата и продолжить работу?", default=False)
+
+    def check_ollama(self, url, verify=True):
+        """Проверка доступности Ollama по указанному URL.
+
+        Возвращает (success, models, cert_error), где cert_error — текст
+        ошибки TLS-сертификата, если соединение не удалось именно из-за
+        проверки сертификата (иначе None).
+        """
+        cert_error = None
         try:
-            response = requests.get(f"{url}/api/tags", timeout=5, verify=False)
+            response = requests.get(f"{url}/api/tags", timeout=5, verify=verify)
             if response.status_code == 200:
-                return True, response.json().get("models", [])
-        except Exception:
-            pass
-        return False, []
+                return True, response.json().get("models", []), None
+        except Exception as e:
+            cert_error = self._cert_error(e)
+        return False, [], cert_error
 
     @staticmethod
     def _candidate_model_urls(url):
@@ -102,7 +133,7 @@ class ConfigWizard:
                     ladder.append(int(current_ctx))
         return ladder
 
-    def _server_context(self, url, headers):
+    def _server_context(self, url, headers, verify=True):
         """Для llama.cpp-подобных серверов пробует вытащить контекст из `/props`
         (значение сервера по умолчанию). Иначе None."""
         base = url.rstrip('/')
@@ -110,7 +141,7 @@ class ConfigWizard:
             base = base[:-3]
         for path in (f"{base}/props",):
             try:
-                r = requests.get(path, timeout=5, verify=False, headers=headers)
+                r = requests.get(path, timeout=5, verify=verify, headers=headers)
                 if r.status_code != 200:
                     continue
                 data = r.json()
@@ -124,23 +155,26 @@ class ConfigWizard:
                 continue
         return None
 
-    def check_openai(self, url, api_key=""):
+    def check_openai(self, url, api_key="", verify=True):
         """Проверка доступности OpenAI-совместимого API по указанному URL.
 
         Пробует GET списка моделей (стандартный эндпоинт) по нескольким
         возможным путям: {@base}/v1/models, {@base}/models, и с учётом
         уже указанного пути /v1. Опционально передаёт Bearer-токен.
 
-        Возвращает (True, list[dict]) — список моделей вида
+        Возвращает (success, list[dict], cert_error) — список моделей вида
         {'id': str, 'context': int|None}, где context — максимальный
         контекст, сообщаемый провайдером (или None, если провайдер его
         не отдаёт). Если ни у одной модели контекста нет, но сервер
         отдаёт его через /props — подставляем серверное значение.
+        cert_error — текст ошибки TLS-сертификата, если соединение не
+        удалось именно из-за проверки сертификата (иначе None).
         """
         headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
+        cert_error = None
         for path in self._candidate_model_urls(url):
             try:
-                response = requests.get(path, timeout=5, verify=False, headers=headers)
+                response = requests.get(path, timeout=5, verify=verify, headers=headers)
                 if response.status_code == 200:
                     data = response.json()
                     models = []
@@ -150,33 +184,47 @@ class ConfigWizard:
                             continue
                         models.append({'id': mid, 'context': self._model_context(m)})
                     if models:
-                        server_ctx = self._server_context(url, headers)
+                        server_ctx = self._server_context(url, headers, verify=verify)
                         if server_ctx:
                             for entry in models:
                                 if not entry.get('context'):
                                     entry['context'] = server_ctx
-                    return True, models
-            except Exception:
-                pass
-        return False, []
+                    return True, models, None
+            except Exception as e:
+                cert_error = cert_error or self._cert_error(e)
+        return False, [], cert_error
 
     def _configure_ollama(self):
         """Настройка подключения к Ollama. Возвращает список имён моделей или None."""
         current_url = self.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
         out("\n1. Проверка Ollama API")
 
+        base_verify = self.config.getboolean('Ollama', 'VerifySSL', fallback=True)
         url = current_url
+        verify = base_verify
         models = []
         while True:
-            success, models = self.check_ollama(url)
+            success, models, cert_error = self.check_ollama(url, verify=verify)
             if success:
                 out(f"✓ Подключение к Ollama установлено: {url}")
-                out("⚠ SSL верификация отключена (небезопасно для продакшена)")
+                if self._is_https(url):
+                    if verify:
+                        out("🔒 Проверка SSL-сертификата включена")
+                    else:
+                        out("⚠ SSL верификация отключена (небезопасно для продакшена)")
                 use = textual_confirm("Использовать этот адрес сервера?", default=True)
                 if use is None:
                     return None
                 if use:
+                    self.config.set('Ollama', 'VerifySSL', 'true' if verify else 'false')
                     break
+            elif cert_error:
+                consent = self._consent_ignore_cert(url, cert_error)
+                if consent is None:
+                    return None
+                if consent:
+                    verify = False
+                    continue
             else:
                 out(f"✗ Не удалось подключиться к Ollama по адресу: {url}")
 
@@ -184,7 +232,9 @@ class ConfigWizard:
                 "Введите URL Ollama (например, http://localhost:11434)", default=url)
             if new_url is None:
                 return None
-            url = new_url
+            if new_url.strip() != url:
+                verify = base_verify
+            url = new_url.strip()
 
         self.config.set('Ollama', 'BaseUrl', url)
         return [{'id': m['name'], 'context': self._model_context(m)} for m in models]
@@ -232,16 +282,31 @@ class ConfigWizard:
 
         # 3. И только потом обязательная проверка списка моделей.
         hint = " (без ключа)" if not api_key else ""
+        base_verify = self.config.getboolean('Ollama', 'VerifySSL', fallback=True)
+        verify = base_verify
         while True:
-            success, models = self.check_openai(url, api_key)
+            success, models, cert_error = self.check_openai(url, api_key, verify=verify)
             if success:
                 out(f"✓ Подключение установлено{hint}: {url}")
                 out(f"  Найдено моделей: {len(models)}")
+                if self._is_https(url):
+                    if verify:
+                        out("🔒 Проверка SSL-сертификата включена")
+                    else:
+                        out("⚠ SSL верификация отключена (небезопасно для продакшена)")
                 use = textual_confirm("Использовать этот адрес сервера?", default=True)
                 if use is None:
                     return None
                 if use:
+                    self.config.set('Ollama', 'VerifySSL', 'true' if verify else 'false')
                     break
+            elif cert_error:
+                consent = self._consent_ignore_cert(url, cert_error)
+                if consent is None:
+                    return None
+                if consent:
+                    verify = False
+                    continue
             else:
                 out(f"✗ Не удалось получить список моделей{hint}: {url}")
 
@@ -249,9 +314,12 @@ class ConfigWizard:
                                      default=url)
             if new_url is None:
                 return None
-            url = new_url.strip().rstrip('/')
-            if not url:
-                url = current_url
+            new_url = new_url.strip().rstrip('/')
+            if not new_url:
+                new_url = current_url
+            if new_url != url:
+                verify = base_verify
+            url = new_url
 
         self.config.set('Ollama', 'BaseUrl', url)
         return models
