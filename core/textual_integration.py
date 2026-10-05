@@ -1677,6 +1677,21 @@ def ask_ollama_textual(
     _request_timeout = request_timeout
 
     def _get_ollama_models():
+        # OpenAI-совместимый бэкенд: список берём из /v1/models с Bearer-ключом.
+        if is_openai_backend(sm):
+            try:
+                from core.openai_compat import _api_url, _api_headers
+                r = requests.get(_api_url(sm, '/v1/models'),
+                                 headers=_api_headers(sm), timeout=5,
+                                 verify=_verify_ssl)
+                if r.status_code == 200:
+                    data = r.json()
+                    return [m.get("id") or m.get("name")
+                            for m in data.get("data", [])
+                            if m.get("id") or m.get("name")]
+            except Exception:
+                pass
+            return []
         try:
             url = ollama_base_url.rstrip("/") + "/api/tags"
             r = requests.get(url, timeout=5, verify=_verify_ssl)
