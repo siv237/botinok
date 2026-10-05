@@ -34,6 +34,7 @@ from core.tool_manager import (
 )
 from core.path_utils import resolve_session_path
 from core.openai_compat import is_openai_backend, chat_stream_request, chat_once
+from core.api_key_gate import is_auth_error, key_entry_url, save_api_key
 from core.textual_app import BotinokTextualApp
 from core.terminal_keys import install as install_terminal_keys
 
@@ -534,6 +535,14 @@ def ask_ollama_textual(
                             initial_prompt=initial_prompt)
     app.set_model_info(model, dangerous=dangerous_mode,
                        server=_server_label(sm))
+    # Первый запуск с openai-бэкендом без ключа — окошко ключа сразу при старте.
+    try:
+        app.require_api_key = (
+            is_openai_backend(sm)
+            and not (sm.config.get('Ollama', 'ApiKey', fallback='') or '').strip())
+        app.key_url_hint = key_entry_url(sm)
+    except Exception:
+        pass
 
     # Регистрируем приложение глобально: инструменты (shell_exec) вызываются из
     # рабочего потока, где ContextVar active_app не наследуется. Без этой
@@ -734,6 +743,7 @@ def ask_ollama_textual(
         turn_prompt = user_text
         http_retries = 0
         error_logged = False
+        key_gate_retried = False
         retry_waited = 0.0
         # «Держим сессию зубами»: при сбоях API не сдаёмся после пары попыток,
         # а ждём сервер с растущей паузой в пределах бюджета времени.
@@ -909,6 +919,31 @@ def ask_ollama_textual(
                 if not error_logged:
                     _write_log(f"[red]{server_label} вернул {response.status_code}: {error_msg}[/red]")
                     error_logged = True
+
+                # Проблема с API-ключом: показываем окошко ввода (со ссылкой на
+                # выдачу ключа), сохраняем в персональный конфиг и повторяем ход.
+                if is_auth_error(response.status_code, f"{error_msg} {error_text}") \
+                        and not key_gate_retried:
+                    key_gate_retried = True
+                    _call_from_thread(
+                        app.show_api_key_prompt,
+                        server_label,
+                        key_entry_url(sm),
+                        str(error_msg)[:200],
+                    )
+                    app._api_key_event.wait(timeout=1800)
+                    new_key = app._api_key_result
+                    if new_key:
+                        try:
+                            saved_path = save_api_key(sm, new_key)
+                            _call_from_thread(
+                                app.append_log,
+                                f"[green]API-ключ сохранён: {saved_path}[/green]")
+                            continue
+                        except Exception as e:
+                            _call_from_thread(
+                                app.append_log,
+                                f"[red]Не удалось сохранить API-ключ: {e}[/red]")
 
                 ts = int(time.time())
                 try:

@@ -569,6 +569,7 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
     verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
 
     try:
+        key_gate_retried = False
         while True:
             if model in MODELS_NO_TOOLS:
                 _ensure_chat_only_system_message(messages)
@@ -617,6 +618,30 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
                     _ensure_chat_only_system_message(messages)
                     payload.pop("tools", None)
                     continue
+
+                # Проблема с API-ключом: просим ввести (если терминал
+                # интерактивный), сохраняем и повторяем ход один раз.
+                if is_auth_error(response.status_code, str(error_msg)):
+                    key = None
+                    if not key_gate_retried:
+                        key_gate_retried = True
+                        key = prompt_key_console(key_entry_url(sm),
+                                                 str(error_msg)[:160])
+                    if key:
+                        try:
+                            save_api_key(sm, key)
+                            print("[botinok] API-ключ сохранён.", file=sys.stderr)
+                            continue
+                        except Exception as e:
+                            print(f"[botinok] Не удалось сохранить API-ключ: {e}",
+                                  file=sys.stderr)
+                    else:
+                        url = key_entry_url(sm)
+                        print("[botinok] LLM-сервер отклонил API-ключ. Пропишите "
+                              "ApiKey в ~/.config/botinok/config.cfg"
+                              + (f" (получить ключ: {url})" if url else ""),
+                              file=sys.stderr)
+                    return messages
 
                 if os.environ.get("BOTINOK_DEBUG"):
                     import traceback as _tb
