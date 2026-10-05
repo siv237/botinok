@@ -93,7 +93,8 @@ class ConfigWizard:
         if not isinstance(m, dict):
             return None
         top_keys = ('context_length', 'context_window', 'max_context_length',
-                    'max_model_len', 'context_len', 'n_ctx')
+                    'max_model_len', 'context_len', 'n_ctx',
+                    'max_total_tokens', 'max_input_tokens')
         meta = m.get('meta') or {}
         meta_keys = ('context_length', 'context_window', 'max_model_len', 'n_ctx')
         llama = meta.get('llama') if isinstance(meta, dict) else None
@@ -309,6 +310,22 @@ class ConfigWizard:
                     continue
             else:
                 out(f"✗ Не удалось получить список моделей{hint}: {url}")
+                # Типичная причина — гейтвей требует ключ, а он не введён.
+                if not api_key:
+                    add_key = textual_confirm(
+                        "Попробовать ввести API-ключ (гейтвей может требовать его)?",
+                        default=True)
+                    if add_key is None:
+                        return None
+                    if add_key:
+                        k = textual_prompt("API-ключ (Bearer токен)", default="")
+                        if k is None:
+                            return None
+                        api_key = (k or "").strip()
+                        if api_key:
+                            self.config.set('Ollama', 'ApiKey', api_key)
+                            hint = ""
+                        continue
 
             new_url = textual_prompt("Введите BaseUrl (например, http://localhost:8080)",
                                      default=url)
