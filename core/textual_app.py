@@ -256,6 +256,59 @@ class ConfirmationScreen(ModalScreen):
             event.stop()
 
 
+class ApiKeyScreen(ModalScreen):
+    """Окошко ввода API-ключа.
+
+    Показывается, когда LLM-сервер вернул 401/403 (ключ не задан, отозван,
+    неверный) или при первом запуске с пустым ApiKey. Содержит ссылку на
+    страницу выдачи ключа (клик открывает браузер) и поле ввода.
+    """
+
+    def __init__(self, server_label: str = "", key_url: str = "", reason: str = "",
+                 on_resolve: Optional[Callable] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.server_label = server_label
+        self.key_url = key_url
+        self.reason = reason
+        self.on_resolve = on_resolve
+
+    def compose(self) -> ComposeResult:
+        server = (self.server_label or "LLM-сервер").replace("[", r"\[")
+        reason = (str(self.reason or '')[:200]).replace("[", r"\[")
+        reason = f"\n[dim]{reason}[/dim]" if reason else ""
+        link = f'[link="{self.key_url}"]{self.key_url}[/link]' if self.key_url else ""
+        link_line = f"Получить ключ (клик откроет браузер): {link}\n" if link else ""
+        yield Static(
+            "[bold yellow]🔑 Требуется API-ключ[/bold yellow]\n"
+            f"{server} отклонил запрос.{reason}\n"
+            f"{link_line}"
+            "[dim]Вставьте ключ и нажмите Enter · esc — отмена[/dim]",
+            id="apikey_body")
+        yield Input(password=True, placeholder="вставьте API-ключ…",
+                    id="apikey_input")
+
+    def on_mount(self) -> None:
+        try:
+            self.query_one("#apikey_input", Input).focus()
+        except Exception:
+            pass
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._resolve((event.value or "").strip() or None)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self._resolve(None)
+            event.stop()
+
+    def _resolve(self, key) -> None:
+        try:
+            if self.on_resolve:
+                self.on_resolve(key)
+        finally:
+            self.app.pop_screen()
+
+
 class ConfirmInline(Vertical):
     """Встроенное в окно вывода подтверждение опасного действия.
 
@@ -765,6 +818,11 @@ class BotinokTextualApp(App):
         self._confirmation_started_at = 0.0
         self._confirmation_result: bool = False
         self._confirmation_kind: str = "confirm"
+        # Запрос API-ключа (ApiKeyScreen): событие + результат для рабочего потока.
+        self._api_key_event: Optional[threading.Event] = None
+        self._api_key_result = None
+        self.require_api_key = False
+        self.key_url_hint = ""
         # Автосогласие на опасные действия до конца сессии (галочка в окне
         # подтверждения dangerous mode).
         self.dangerous_auto_confirm = False
@@ -1236,6 +1294,14 @@ class BotinokTextualApp(App):
         # автоматически, когда приложение готово.
         if self.initial_prompt:
             self.call_after_refresh(self._submit_initial_prompt)
+        # Первый запуск без ключа: сразу предлагаем ввести его (ссылка на выдачу).
+        if getattr(self, 'require_api_key', False):
+            def _ask_key_on_start():
+                self.show_api_key_prompt(
+                    self.stats_data.get("server", ""),
+                    getattr(self, 'key_url_hint', ''),
+                    "Ключ ещё не настроен.")
+            self.call_after_refresh(_ask_key_on_start)
 
     def _disable_mouse_motion(self) -> None:
         """Мышь нужна прежде всего для ПРОКРУТКИ чата — её не трогаем.
@@ -3319,6 +3385,20 @@ class BotinokTextualApp(App):
             on_resolve=self._apply_confirmation,
             kind=kind,
         ))
+
+    def show_api_key_prompt(self, server_label: str = "", key_url: str = "",
+                            reason: str = "") -> None:
+        """Показать окошко ввода API-ключа (вызывается из рабочего потока
+        через call_from_thread; результат — в _api_key_event/_api_key_result)."""
+        self._api_key_event = threading.Event()
+        self._api_key_result = None
+        self.push_screen(ApiKeyScreen(
+            server_label, key_url, reason, on_resolve=self._apply_api_key))
+
+    def _apply_api_key(self, key) -> None:
+        self._api_key_result = key or None
+        if self._api_key_event is not None:
+            self._api_key_event.set()
 
     def hide_inline_confirmation(self) -> None:
         """Убрать встроенное подтверждение (после выбора/таймаута)."""
