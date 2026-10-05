@@ -6,11 +6,41 @@ import requests
 import argparse
 import re
 from datetime import datetime
+
+# --- Truecolor: терминалы, которые его поддерживают, но не объявляют --------
+# rich/Textual включают 24-битный цвет только когда видят COLORTERM=truecolor,
+# а ssh COLORTERM не пробрасывает. В итоге картинки (chafa отдаёт truecolor)
+# кванризуются в 256-палитру и цвета «уезжают». Если терминал не plain
+# console — объявляем truecolor сами. BOTINOK_TRUECOLOR=0 отключает, =1 forcит.
+def _ensure_truecolor_env() -> None:
+    override = os.environ.get("BOTINOK_TRUECOLOR", "").strip().lower()
+    if override in ("0", "off", "no"):
+        return
+    if override in ("1", "on", "yes", "truecolor"):
+        os.environ["COLORTERM"] = "truecolor"
+        return
+    if os.environ.get("COLORTERM", "").strip().lower() in ("truecolor", "24bit"):
+        return
+    term = os.environ.get("TERM", "").strip().lower()
+    if term in ("", "dumb", "linux") or term.startswith("screen"):
+        return
+    try:
+        if not sys.stdout.isatty():
+            return
+    except Exception:
+        return
+    os.environ["COLORTERM"] = "truecolor"
+
+
+_ensure_truecolor_env()
+
 from core.cli_io import out, term_width
 from core.textual_prompts import textual_confirm
 from core.session_manager import SessionManager
 from core.tool_manager import ToolManager
 from core.openai_compat import is_openai_backend, chat_stream_request
+from core.api_key_gate import (is_auth_error, key_entry_url, save_api_key,
+                               prompt_key_console)
 from core.textual_history_viewer import view_history
 from core.textual_integration import ask_ollama_textual
 
