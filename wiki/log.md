@@ -1070,3 +1070,27 @@ test_pressure_inject.py, test_memory_small_fixes.py, test_sign_step.py,
 test_length_stitch.py — все зелёные; полный прогон 56 тестов: единственное падение
 (test_perf_panel) воспроизводится на HEAD — предсуществующее. pymorphy3 добавлен в
 requirements.txt.
+
+## [2026-10-07] learn | План испытания скользящего окна (harness-абляция)
+
+Создана страница concepts/memory_harness_test_plan.md: испытание идеи «механическая память
+не хуже биг-бенга при слабой модели». Методология — PawBench (fix model, vary harness),
+Harness-Bench (общие бюджеты), LongMemEval/LoCoMo (формат QA, включая unanswerable),
+RULER (калибровка длины контекста). Дизайн: модели заморожены (gemma4:e2b, qwen3.5:9b),
+три руки харнеса (A — FORGOTTEN_INDEX, B — биг-бенг, C — наивный тримм), материал —
+sample-сессии 223242/230600 + боевые, 20–30 QA-пар, Pass^3 по SCORECARD. Критерии принятия/
+отклонения (отклонение → goal/done в каждую строку + микро-LLM над остовом, план §6).
+Предшественник — токен-прокси /tmp/kilo/recall_audit.py (показал: прокси мерит не то,
+блок предназначен для чтения моделью).
+
+## [2026-10-07] learn | План измерения харнеса целиком (переделан из memory-плана)
+
+concepts/memory_harness_test_plan.md переименован в concepts/harness_eval_plan.md и
+переписан: предмет — весь харнес ботинка, память лишь один слайс. Методология PawBench
+(fix model, vary harness; reuse&tag, срезы), Harness-Bench (общие бюджеты),
+Terminal-Bench/SWE-bench-2026 (свинг скаффолда 22 балла при модели ±1). Набор: selfcheck
+15 задач + новые слайсы web/shell-dangerous/skills/multimodal/safety(LongMemEval-формат).
+Эксперимент 1 — базовая линия (e2b/9b, Pass^3, SCORECARD). Эксперимент 2 — абляции узлов
+(ступенчатое раскрытие, FORGOTTEN_INDEX/биг-бенг/тримм, pressure, sign_step, tool_policy,
+шимы подсказок): узел без движения слайса — кандидат на удаление. Внешний контур —
+ботинок как харнес-адаптер в PawBench.
