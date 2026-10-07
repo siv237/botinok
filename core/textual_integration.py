@@ -931,13 +931,9 @@ def ask_ollama_textual(
         _call_from_thread(app.update_stats, **s)
 
     def _add_tool(name, query, status="running", size_kb=0):
-        if name == "sign_step":
-            return
         _call_from_thread(app.add_tool_activity, name, query, status, size_kb)
 
     def _update_tool(name, status="completed", size_kb=0, query="", detail=None):
-        if name == "sign_step":
-            return
         _call_from_thread(app.update_tool_activity, name, status, size_kb, query, detail)
 
     def _tool_progress(tn, min_interval=0.2):
@@ -993,8 +989,6 @@ def ask_ollama_textual(
         _finalize_turn("", "")
 
     def _append_tool_result(tool_name, result):
-        if tool_name == "sign_step":
-            return
         _call_from_thread(app.append_tool_result, tool_name, result)
 
     def _write_log(text):
@@ -1768,11 +1762,11 @@ def ask_ollama_textual(
                     length_stitches += 1
                     stitched_parts.append(full_response)
                     messages.append({"role": "assistant", "content": full_response})
-                    sm.update_context(session_path, "assistant", full_response)
                     cont = ("Продолжи строго с места обрыва: без повторов уже сказанного, "
                             "без нового начала, сразу с следующего слова/строки.")
                     messages.append({"role": "user", "content": cont})
-                    sm.update_context(session_path, "user", cont)
+                    # Обрубки и служебный досыл — только в messages (API-история);
+                    # в context.json идёт единый сшитый ответ, не фрагменты.
                     full_response = ""
                     full_thinking = ""
                     continue
@@ -1796,7 +1790,9 @@ def ask_ollama_textual(
                              "entities — только что реально встречалось в ходе (пути, URL, имена; ≤6). "
                              "Ничего больше не вызывай и не повторяй ответ.")
                     messages.append({"role": "user", "content": nudge})
-                    sm.update_context(session_path, "user", nudge)
+                    # Пинк — служебный: в messages он есть (модель его видит),
+                    # в context.json его нет — иначе session_memory показывает
+                    # фантомный «ход» с текстом пинка вместо реальных ходов.
                     full_response = ""
                     full_thinking = ""
                     continue
