@@ -118,6 +118,8 @@ class ToolManager:
             "image": ("tools.image_show", "image"),
             "audio": ("tools.audio", "execute"),
             "session_memory": ("tools.session_memory", "session_memory_tool"),
+            "sign_step": ("tools.sign_step", "sign_step_tool"),
+            "tools": ("tools.tools_catalog", "tools_catalog_tool"),
         }
         
         # Базовые описания (пока tool не загружен)
@@ -464,6 +466,46 @@ class ToolManager:
                             "include_thinking": {"type": "boolean", "description": "Включать полный thinking (иначе только preview)"}
                         },
                         "required": ["action"]
+                    }
+                }
+            },
+            "tools": {
+                "type": "function",
+                "function": {
+                    "name": "tools",
+                    "description": ("Менеджер инструментов: краткий каталог всех инструментов (action=list) и "
+                                    "ступенчатое раскрытие схем. В запросе всегда доступны только tools и sign_step; "
+                                    "нужен инструмент из каталога — tools(action=enable, name=…), его полная схема "
+                                    "появится в следующем запросе и останется на сессию. Включай только то, чем "
+                                    "будешь пользоваться в этом ходе."),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["list", "enable", "disable"], "description": "list — каталог; enable/disable — включить/выключить инструмент по имени"},
+                            "name": {"type": "string", "description": "Имя инструмента для enable/disable"}
+                        },
+                        "required": ["action"]
+                    }
+                }
+            },
+            "sign_step": {
+                "type": "function",
+                "function": {
+                    "name": "sign_step",
+                    "description": ("Короткая подпись текущего хода — вызови ОДИН раз перед финальным ответом. "
+                                    "goal — что делал за ход (≤15 слов), done — что сделано (≤15 слов), "
+                                    "status: progress|blocked|decision|answered, "
+                                    "entities — только то, что реально встречалось в ходе (пути, URL, имена инструментов; ≤6). "
+                                    "Свободная проза запрещена; служебный инструмент, в ответе человеку его не упоминай."),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "goal": {"type": "string", "description": "Цель хода, ≤15 слов"},
+                            "done": {"type": "string", "description": "Что сделано, ≤15 слов"},
+                            "status": {"type": "string", "enum": ["progress", "blocked", "decision", "answered"], "description": "Итог хода"},
+                            "entities": {"type": "array", "items": {"type": "string"}, "description": "Сущности, реально встречавшиеся в ходе (≤6)"}
+                        },
+                        "required": ["goal", "done", "status"]
                     }
                 }
             },

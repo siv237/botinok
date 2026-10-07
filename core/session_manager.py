@@ -668,6 +668,17 @@ class SessionManager:
 
             history = context.setdefault("history", [])
 
+            # Дедуп user-реплик (этап 8): повтор той же реплики, на которую модель
+            # ещё не дала содержательного ответа, — артефакт auto-continue/resume,
+            # а не новый запрос. Настоящий повтор после ответа остаётся в raw.
+            if role == "user" and content and not tool_calls:
+                for prev in reversed(history):
+                    if (prev.get("role") == "assistant"
+                            and str(prev.get("content") or "").strip()):
+                        break
+                    if prev.get("role") == "user" and prev.get("content") == content:
+                        return
+
             # Дедупликация подряд идущих одинаковых записей (напр. повторный
             # логинг одного и того же user-запроса при auto-continue/resume).
             # Не трогаем assistant-записи с tool_calls — они значимы сами по себе.

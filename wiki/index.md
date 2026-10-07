@@ -52,6 +52,7 @@
 - [concepts/session_resume.md](concepts/session_resume.md) — возобновление и точное восстановление контекста (EXACT/DERIVED/HINT), устойчивость к обрывам API
 - [concepts/scrollback.md](concepts/scrollback.md) — бесконечная прокрутка истории сессии (TUI); draft
 - [concepts/context_management.md](concepts/context_management.md) — обрезка, переполнение, SESSION_PROTOCOL, детекция зацикливания
+- [concepts/context_memory_research.md](concepts/context_memory_research.md) — изыскания: механическая память сессии без LLM-суммаризации, окна-дайджесты, sign_step; draft
 - [concepts/function_calling.md](concepts/function_calling.md) — механика tool-calls в потоке агента
 - [concepts/dangerous_mode.md](concepts/dangerous_mode.md) — безопасность: dangerous mode и подтверждения
 - [concepts/web_kit.md](concepts/web_kit.md) — единый веб-кит: один добыватель, харнес подсказок, контекстная дисциплина
