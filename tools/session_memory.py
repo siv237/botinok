@@ -14,6 +14,13 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any, Union
 from dataclasses import dataclass, field
 
+try:
+    from core.session_digest import lemmatize as _lemmatize
+except Exception:
+    _lemmatize = None
+
+_CYR_WORD_RE = re.compile(r'[а-яё]{4,}')
+
 
 @dataclass
 class ToolCall:
@@ -463,19 +470,35 @@ class SessionIndex:
                 self.word_index[word].append(turn.turn_id)
     
     def _extract_words(self, text: str) -> set:
-        """Извлекает слова из текста"""
+        """Извлекает слова из текста: ASCII-идентификаторы + кириллица + леммы."""
         words = set()
-        for match in re.finditer(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', text.lower()):
+        text_lower = text.lower()
+        for match in re.finditer(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', text_lower):
             words.add(match.group())
+        for match in _CYR_WORD_RE.finditer(text_lower):
+            w = match.group()
+            words.add(w)
+            if _lemmatize is not None:
+                try:
+                    lem = _lemmatize(w)
+                    if lem:
+                        words.add(lem)
+                except Exception:
+                    pass
         return words
     
     def _save_index(self):
         """Сохраняет индекс на диск"""
         try:
             os.makedirs(os.path.dirname(self.index_path), exist_ok=True)
+            lemmas_index = {
+                w: ids for w, ids in self.word_index.items()
+                if _CYR_WORD_RE.search(w)
+            }
             data = {
                 "turns_count": len(self.turns),
                 "word_index": self.word_index,
+                "lemmas_index": lemmas_index,
                 "turns_meta": [
                     {
                         "turn_id": t.turn_id,
@@ -562,6 +585,7 @@ def session_memory_tool(
         "help": "help", "?": "help", "actions": "help", "man": "help", "capabilities": "help",
         "restore": "restore", "rebuild": "restore", "exact": "restore",
         "load": "restore", "resume_exact": "restore", "snapshot": "restore",
+        "windows": "windows", "digest": "windows", "окна": "windows",
     }
     _VALID = set(_ALIASES.values())
     raw_action = str(action if isinstance(action, str) else "").strip().lower()
@@ -670,10 +694,13 @@ def session_memory_tool(
         from_turn = kwargs.get("from_turn", 0)
         to_turn = kwargs.get("to_turn", len(turns))
         result = _action_chain(turns, from_turn, to_turn, include_content, include_thinking)
-    
+
+    elif action == "windows":
+        result = _action_windows(session_path, limit, offset)
+
     else:
         result = {"error": f"Unknown action: {action}", "available_actions": [
-            "resume_brief", "summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain"
+            "resume_brief", "summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain", "windows"
         ]}
     
     # Архивариус не молчит: контекст, совет и следующие шаги — всегда.
@@ -719,6 +746,7 @@ def _help_text(session_path: str) -> str:
         "  • action=search query=кулер                — гибкий поиск (части слов, RU)\n"
         "  • action=turns limit=20 offset=0           — список ходов\n"
         "  • action=timeline limit=30                 — хронология\n"
+        "  • action=windows limit=20                  — окна вызовов модели (облака терминов, указатели)\n"
         "  • action=help                              — эта справка\n"
         "\n"
         "Можно звать усечённо: action=turn/123, action=list, action=find query=...\n"
@@ -1313,6 +1341,43 @@ def _action_chain(turns: List[Turn], from_turn: int, to_turn: int, include_conte
         "to_turn": to_turn,
         "chain_length": len(chain),
         "chain": [t.to_dict(include_content, include_thinking) for t in chain]
+    }
+
+
+def _action_windows(session_path: str, limit: int = 20, offset: int = 0) -> Dict:
+    """Окна вызовов модели (механический дайджест, тот же код, что и FORGOTTEN_INDEX)."""
+    try:
+        from core import session_digest
+    except Exception as e:
+        return {"error": f"session_digest недоступен: {e}"}
+    try:
+        windows = session_digest.build_windows(session_path)
+    except Exception as e:
+        return {"error": f"Не удалось построить окна: {e}"}
+    if not windows:
+        return {"windows": [], "count": 0, "hint": "Нет metrics-событий в session_raw.log."}
+    all_lines = session_digest.build_digest_lines(windows)
+    limit = max(1, limit or 20)
+    offset = max(0, offset or 0)
+    sel = windows[offset:offset + limit]
+    sel_lines = all_lines[2 * offset:2 * (offset + len(sel))]
+    return {
+        "count": len(windows),
+        "offset": offset,
+        "returned": len(sel),
+        "windows": [
+            {
+                "window_id": w.window_id,
+                "ts_start": w.ts_start,
+                "ts_end": w.ts_end,
+                "ctx": w.ctx_used,
+                "cloud": w.cloud,
+                "turn_ids": w.turn_ids,
+                "tools": [t.get("tool") for t in w.tools],
+            }
+            for w in sel
+        ],
+        "lines": sel_lines,
     }
 
 

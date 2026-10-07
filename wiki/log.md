@@ -1033,3 +1033,40 @@ band-рендер передавал `--animate off`, которого нет в
 - Runtime уже читал `VerifySSL` (`botinok.py`, `session_manager.py`,
   `textual_integration.py`, `openai_compat.py`) — мастер теперь его задаёт.
 - Тест `tests/test_wizard_ssl.py`; entities/config_system.md.
+
+## [2026-10-07] query→learn | Исследования: память сессии без LLM-суммаризации
+Разбор текущего механизма (trim/SESSION_PROTOCOL/session_memory), оценка внешнего whitepaper,
+эксперименты на реальных сессиях (223242, 230600): детерминированные дайджесты и облака
+терминов по окнам-LLM-ходам (границы — metrics-события session_raw.log, лемматизация
+pymorphy3, установлен в venv). Сформулированы: блок «скользящее окно о забытого»
+(mechanical skeleton + облако + указатели session_memory), sign_step (принудительная
+подпись хода самой моделью с верификацией по skeleton), калибровка оценщика токенов.
+Новая страница concepts/context_memory_research.md (draft); найдены проблемы данных
+(дубли user-реплик в context.json, steps/ пишется не на всех путях, word-индекс ASCII-only).
+
+## [2026-10-07] ingest | План доработки памяти сессии
+context_memory_research.md: убрана персональная специфика экспериментов, добавлен
+детальный план доработки (8 этапов: session_digest.py, сегментный тримм, блок «забытое»,
+калибровка оценщика, pressure-инжект, sign_step, length-stitching, мелочи памяти)
+с зависимостями, порядком коммитов, метриками и рисками. Реализация — следующая сессия.
+
+## [2026-10-07] ingest | Реализация плана памяти сессии (8 этапов)
+По плану context_memory_research.md реализовано (без коммитов, по указанию человека):
+новый core/session_digest.py (окна по metrics-событиям, облака лемм pymorphy3 со
+stemmer-fallback, строки индекса, иерархическое слияние); сегментно-границевый тримм
+_prepare_messages_for_ollama (пары tool_calls↔tool не рвутся); system-блок
+FORGOTTEN_INDEX (бюджет 600 токенов, регенерация на запрос, notice — fallback) вместо
+старой notice, с директивой в prompts/tool_policy.txt и context_overflow_protocol.txt;
+калибровка оценщика токенов (EMA k per-model, персист/восстановление через
+performance.log); pressure-инжект 70/85% с гистерезисом в TOOL_RESULT_SUMMARY;
+tools/sign_step.py (жёсткая схема, верификация entities по observed, signatures.json →
+Window.sign → goal/done в строке блока, пинк на финальном пути); добивка обрыва по
+finish_reason=length (done_reason проброшен из openai_compat, скрытый досыл, сшивка
+со снятием шва, лимит 2). Мелочи: кириллица+леммы в word_index, lemmas_index в .idx,
+action=windows в session_memory, дедуп user-реплик в update_context (настоящий повтор
+после ответа сохраняется). Тесты: tests/test_session_digest.py,
+test_context_trim_segments.py, test_forgotten_index.py, test_token_calibration.py,
+test_pressure_inject.py, test_memory_small_fixes.py, test_sign_step.py,
+test_length_stitch.py — все зелёные; полный прогон 56 тестов: единственное падение
+(test_perf_panel) воспроизводится на HEAD — предсуществующее. pymorphy3 добавлен в
+requirements.txt.

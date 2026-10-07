@@ -165,6 +165,7 @@ class OpenAIStreamResponse:
     def iter_lines(self):
         tool_calls_acc = {}
         usage = {}
+        finish_reason = None
 
         for raw in self._resp.iter_lines():
             if not raw:
@@ -191,6 +192,9 @@ class OpenAIStreamResponse:
             if choices:
                 c = choices[0] or {}
                 delta = c.get('delta') or {}
+                fr = c.get('finish_reason')
+                if fr:
+                    finish_reason = fr
                 # НЕ выходим по finish_reason: чанк с usage приходит следующим
 
             for tc in delta.get('tool_calls') or []:
@@ -235,6 +239,7 @@ class OpenAIStreamResponse:
         yield json.dumps({
             'message': final_msg,
             'done': True,
+            'done_reason': finish_reason or 'stop',
             'prompt_eval_count': usage.get('prompt_tokens', 0),
             'eval_count': usage.get('completion_tokens', 0),
             'eval_duration': 0,

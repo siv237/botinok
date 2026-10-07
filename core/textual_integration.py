@@ -83,10 +83,25 @@ def _tool_stream_has_payload(text: str) -> bool:
     return any(ch.isalnum() for ch in s)
 
 
-def _estimate_tokens(text: str) -> int:
+# Калибровка оценщика токенов (этап 4): len//4 — грубая прикидка; после каждого
+# ответа сравниваем её с фактическим prompt_eval_count и ведём EMA-поправку k
+# per-model. HARD_CTX_PCT и бюджет тримма начинают означать реальные токены.
+_TOKEN_K_EMA_ALPHA = 0.3
+_token_k_state = {"by_model": {}, "current": 1.0}
+
+
+def _estimate_tokens_uncalibrated(text: str) -> int:
     if not text:
         return 0
     return max(1, len(str(text)) // 4)
+
+
+def _estimate_tokens(text: str) -> int:
+    base = _estimate_tokens_uncalibrated(text)
+    k = _token_k_state.get("current", 1.0)
+    if k == 1.0:
+        return base
+    return max(1, int(base * k))
 
 
 def _estimate_message_tokens(msg: dict) -> int:
@@ -107,30 +122,254 @@ def _estimate_messages_tokens(msgs: list) -> int:
     return sum(_estimate_message_tokens(m) for m in msgs)
 
 
+def _estimate_messages_tokens_raw(msgs: list) -> int:
+    """Оценка без калибровочного коэффициента — знаменатель для замера k."""
+    if not msgs:
+        return 0
+    total = 0
+    for m in msgs:
+        total += 8 + _estimate_tokens_uncalibrated(m.get("content", ""))
+        if m.get("tool_calls"):
+            try:
+                s = json.dumps(m["tool_calls"], ensure_ascii=False)
+            except Exception:
+                s = str(m["tool_calls"])
+            total += _estimate_tokens_uncalibrated(s)
+    return total
+
+
+def calibrate_token_estimator(model, prompt_eval_count, prepared_messages, persist_path=None):
+    """EMA-поправка оценщика: k ← (1−α)·k + α·(prompt_eval_count / raw_estimate).
+
+    Возвращает новый k или None, если замер неприменим (нет метрик/оценка нулевая,
+    выброс за пределами 0.2–5.0). Деление на ноль защищено.
+    """
+    try:
+        raw_est = _estimate_messages_tokens_raw(prepared_messages or [])
+        if not model or not prompt_eval_count or raw_est <= 0:
+            return None
+        k_obs = float(prompt_eval_count) / float(raw_est)
+        if not (0.2 <= k_obs <= 5.0):
+            return None
+        prev = float(_token_k_state["by_model"].get(model, 1.0))
+        k = (1.0 - _TOKEN_K_EMA_ALPHA) * prev + _TOKEN_K_EMA_ALPHA * k_obs
+        _token_k_state["by_model"][model] = k
+        _token_k_state["current"] = k
+        if persist_path:
+            try:
+                with open(persist_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "type": "token_calibration",
+                        "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "model": model,
+                        "k": round(k, 4),
+                        "prompt_eval_count": int(prompt_eval_count),
+                        "est_raw": int(raw_est),
+                    }, ensure_ascii=False) + "\n")
+            except OSError:
+                pass
+        return k
+    except Exception:
+        return None
+
+
+def restore_token_calibration(persist_path, model):
+    """Восстанавливает k модели из последней записи token_calibration в performance.log."""
+    try:
+        last = None
+        with open(persist_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("type") == "token_calibration" and ev.get("model") == model:
+                    last = ev
+        if last:
+            k = float(last.get("k") or 1.0)
+            if 0.2 <= k <= 5.0:
+                _token_k_state["by_model"][model] = k
+                _token_k_state["current"] = k
+                return k
+    except Exception:
+        pass
+    return None
+
+
+def _segment_indices(msgs: list) -> list:
+    """Сегменты истории: блоки от user-сообщения до следующего user-сообщения.
+
+    Всё, что до первого user, — отдельный сегмент. Границы вытеснения проходят
+    только по границам сегментов, поэтому пары assistant.tool_calls ↔ tool
+    никогда не разрываются.
+    """
+    segs = []
+    cur = []
+    for i, m in enumerate(msgs):
+        if m.get("role") == "user" and cur:
+            segs.append(cur)
+            cur = []
+        cur.append(i)
+    if cur:
+        segs.append(cur)
+    return segs
+
+
+def _unit_indices(msgs: list, seg: list) -> list:
+    """Неделимые единицы внутри сегмента: assistant с tool_calls + его tool-ответы."""
+    units = []
+    j = 0
+    while j < len(seg):
+        i = seg[j]
+        m = msgs[i]
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            unit = [i]
+            k = j + 1
+            while k < len(seg) and msgs[seg[k]].get("role") == "tool":
+                unit.append(seg[k])
+                k += 1
+            units.append(unit)
+            j = k
+        else:
+            units.append([i])
+            j += 1
+    return units
+
+
+FORGOTTEN_BLOCK_BUDGET = 600
+FORGOTTEN_BLOCK_HEADER = (
+    "FORGOTTEN_INDEX — каталог автоматически вытеснённых из контекста ходов "
+    "(механический индекс, не пересказ). Это указатели, а не история: "
+    "строка = время, облако терминов вызова модели, указатель turn_id, "
+    "подписи инструментов, размер контекста. Детали старого хода — "
+    "session_memory get_turn turn_id=… или search; полное содержимое — "
+    "артефакты в папке сессии. Не догадывайся, что было забыто, — смотри по указателю."
+)
+
+
+def _build_forgotten_block(session_path, first_kept_ts):
+    """Одна system-реплика «скользящее окно о забытом» (регенерируется целиком).
+
+    Строки — окна вызовов модели (core.session_digest), вытесненные из контекста;
+    древние строки иерархически сворачиваются в одну. Бюджет — FORGOTTEN_BLOCK_BUDGET
+    токенов. Пустая строка — Digest недоступен или вытеснять нечего.
+    """
+    try:
+        from core import session_digest
+    except Exception:
+        return ""
+    try:
+        windows = session_digest.build_windows(session_path)
+    except Exception:
+        return ""
+    forgotten = [
+        w for w in windows
+        if w.ts_end and (not first_kept_ts or w.ts_end <= first_kept_ts)
+    ]
+    if not forgotten:
+        return ""
+    lines = session_digest.build_digest_lines(forgotten)
+    entries = [lines[i] + "\n" + lines[i + 1] for i in range(0, len(lines) - 1, 2)]
+    if len(lines) % 2:
+        entries.append(lines[-1])
+    budget = max(100, FORGOTTEN_BLOCK_BUDGET - _estimate_tokens(FORGOTTEN_BLOCK_HEADER))
+    kept = []
+    used = 0
+    merged_src = []
+    for entry in reversed(entries):
+        t = _estimate_tokens(entry)
+        if kept and used + t > budget:
+            merged_src.append(entry)
+            continue
+        kept.insert(0, entry)
+        used += t
+    def _assemble():
+        parts = [FORGOTTEN_BLOCK_HEADER]
+        if merged_src:
+            try:
+                parts.append(session_digest.merge_old_lines(list(reversed(merged_src))))
+            except Exception:
+                pass
+        parts.extend(kept)
+        return "\n".join(parts)
+
+    result = _assemble()
+    # округление оценки по частям может дать перебор — подгоняем по собранному блоку
+    while len(kept) > 1 and _estimate_tokens(result) > FORGOTTEN_BLOCK_BUDGET:
+        merged_src.append(kept.pop(0))
+        result = _assemble()
+    return result
+
+
 def _prepare_messages_for_ollama(sm, session_path, messages, num_ctx, reserve_tokens=1200):
     if num_ctx <= 0:
         return messages
     budget = max(256, num_ctx - max(0, reserve_tokens))
     system_msgs = [m for m in messages if m.get("role") == "system"]
     other_msgs = [m for m in messages if m.get("role") != "system"]
-    kept = []
     used = sum(_estimate_message_tokens(m) for m in system_msgs)
-    dropped = []
-    for m in reversed(other_msgs):
-        mt = _estimate_message_tokens(m)
-        if used + mt <= budget:
-            kept.append(m)
-            used += mt
-        else:
-            dropped.append(m)
-    kept.reverse()
+    keep = [False] * len(other_msgs)
+    segs = _segment_indices(other_msgs)
+    # держим целые сегменты от самых свежих к старым
+    i = len(segs) - 1
+    while i >= 0:
+        seg_cost = sum(_estimate_message_tokens(other_msgs[x]) for x in segs[i])
+        if used + seg_cost > budget:
+            break
+        for x in segs[i]:
+            keep[x] = True
+        used += seg_cost
+        i -= 1
+    # ни один сегмент не влезает — держим хотя бы последние неделимые единицы
+    # самого свежего сегмента (инвариант пар tool_calls ↔ tool сохраняется)
+    if not any(keep) and segs:
+        for unit in reversed(_unit_indices(other_msgs, segs[-1])):
+            unit_cost = sum(_estimate_message_tokens(other_msgs[x]) for x in unit)
+            if any(keep) and used + unit_cost > budget:
+                break
+            for x in unit:
+                keep[x] = True
+            used += unit_cost
+    # Гарантии: в prepared обязан остаться хотя бы один непустой user —
+    # OpenAI-совместимые шлюзы (LiteLLM) отвечают 400 "No user query found in
+    # messages", если тримм выжил все user-реплики. Держим самую свежую.
+    if other_msgs and not any(
+            keep[i] and other_msgs[i].get("role") == "user"
+            and str(other_msgs[i].get("content") or "").strip()
+            for i in range(len(other_msgs))):
+        for i in range(len(other_msgs) - 1, -1, -1):
+            m = other_msgs[i]
+            if m.get("role") == "user" and str(m.get("content") or "").strip():
+                keep[i] = True
+                break
+    kept = [m for idx, m in enumerate(other_msgs) if keep[idx]]
+    dropped = [m for idx, m in enumerate(other_msgs) if not keep[idx]]
     trimmed = system_msgs + kept
+    artifact_path = ""
     if dropped:
         artifact_name = f"context_trim_{int(time.time())}.json"
         try:
             artifact_path = sm.save_artifact(session_path, artifact_name, json.dumps(list(reversed(dropped)), ensure_ascii=False, indent=2))
         except Exception:
             artifact_path = f"./artifacts/{artifact_name}"
+    # блок «забытого» вместо старой notice: собирается по границам вытеснения,
+    # регенерируется на каждый запрос целиком (в историю не пишется)
+    first_kept_ts = ""
+    for m in kept:
+        ts = str(m.get("timestamp") or "")
+        if ts:
+            first_kept_ts = ts
+            break
+    if kept and not first_kept_ts:
+        dts = [str(m.get("timestamp") or "") for m in dropped if m.get("timestamp")]
+        first_kept_ts = max(dts) if dts else ""
+    block = _build_forgotten_block(session_path, first_kept_ts)
+    if block:
+        trimmed = system_msgs + [{"role": "system", "content": block}] + kept
+    elif dropped:
         notice = {
             "role": "system",
             "content": (
@@ -163,6 +402,36 @@ def _detect_repetition(full_response: str) -> bool:
     if not last:
         return False
     return sum(1 for l in tail if l == last) >= REPEAT_LINE_MIN_OCCURRENCES
+
+
+def _stitch_response(parts: list) -> str:
+    """Склейка частей ответа, прерванных по finish_reason=length.
+
+    На стыке убирается дословное перекрытие (модель часто повторяет последние
+    слова обрывка) и дублирующая первая строка — шов проверяется как повтор.
+    """
+    out = ""
+    for part in parts:
+        part = str(part or "")
+        if not part:
+            continue
+        if not out:
+            out = part
+            continue
+        max_ov = min(len(out), len(part), 200)
+        ov = 0
+        for k in range(max_ov, 0, -1):
+            if out[-k:] == part[:k]:
+                ov = k
+                break
+        nxt = part[ov:]
+        out_lines = out.splitlines(keepends=True)
+        nxt_lines = nxt.splitlines(keepends=True)
+        if out_lines and nxt_lines and out_lines[-1].strip() and \
+                out_lines[-1].strip() == nxt_lines[0].strip():
+            nxt = "".join(nxt_lines[1:])
+        out += nxt
+    return out
 
 
 def _ollama_error_indicates_no_tools(error_msg: str) -> bool:
@@ -251,6 +520,79 @@ def _ensure_chat_only_system_message(messages: list) -> None:
     })
 
 
+# Мемо каталогов: skills/experience action=list тянут ~12KB; после overflow-reset
+# модель по директиве tool_policy берёт их заново каждый раз и снова выбивает
+# бюджет. Харнес один раз за сессию кэширует дамп в артефакт, повтор отдаёт
+# короткой памяткой с указателем — каталог не «перечитывается» бесконечно.
+_catalog_memo: Dict[str, Dict] = {}
+
+
+def _catalog_memo_key(tool_name, tool_args):
+    if tool_name not in ("skills", "experience"):
+        return None
+    if not isinstance(tool_args, dict) or str(tool_args.get("action", "")).lower() != "list":
+        return None
+    try:
+        return (tool_name, json.dumps(tool_args, sort_keys=True, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return None
+
+
+def _catalog_memo_check(session_path, tool_name, tool_args):
+    prev = _catalog_memo.get(str(session_path), {}).get(_catalog_memo_key(tool_name, tool_args)) if tool_name else None
+    if not prev:
+        return None
+    ts, artifact = prev
+    return (f"CATALOG_CACHED: каталог {tool_name} уже брался в этой сессии в {ts}. "
+            f"Полный список: {artifact}. Повторно list не запрашивай — работай по нему.")
+
+
+def _catalog_memo_store(session_path, tool_name, tool_args, result, sm):
+    key = _catalog_memo_key(tool_name, tool_args)
+    if not key or not result:
+        return
+    try:
+        artifact = sm.save_artifact(session_path, f"catalog_{tool_name}_{int(time.time())}.txt", str(result))
+    except Exception:
+        artifact = "(артефакт не сохранён)"
+    _catalog_memo.setdefault(str(session_path), {})[key] = (time.strftime("%H:%M:%S"), artifact)
+
+
+# Pressure-инжект (этап 5): при пересечении вверх 70%/85% заполненности контекста
+# один раз дописывается строка в конец TOOL_RESULT_SUMMARY. Без отдельных
+# сообщений; не повторяется, пока уровень не сброшен (финальный ответ хода / reset).
+PRESSURE_LEVELS = (
+    (0.85, "критично, завершай ход: не начинай новых разведок, фиксируй результат"),
+    (0.70, "сворачивай рассуждения: не пересказывай известное, думай короче"),
+)
+_pressure_state = {"ratio": 0.0, "notified": 0}
+
+
+def set_context_pressure(ratio) -> None:
+    try:
+        _pressure_state["ratio"] = max(0.0, min(1.5, float(ratio or 0.0)))
+    except (TypeError, ValueError):
+        pass
+
+
+def reset_context_pressure() -> None:
+    _pressure_state["ratio"] = 0.0
+    _pressure_state["notified"] = 0
+
+
+def _pressure_note() -> str:
+    """Строка уровня с гистерезисом: каждый уровень объявляется один раз до сброса."""
+    ratio = _pressure_state["ratio"]
+    for idx, (thr, text) in enumerate(PRESSURE_LEVELS):
+        if ratio >= thr:
+            level = len(PRESSURE_LEVELS) - idx
+            if level <= _pressure_state["notified"]:
+                return ""
+            _pressure_state["notified"] = level
+            return f"CONTEXT_PRESSURE: контекст ~{int(thr * 100)}% — {text}."
+    return ""
+
+
 def _compact_tool_message(tool_name, tool_args, result, artifact_path):
     res_str = "" if result is None else str(result)
     size_kb = len(res_str.encode('utf-8', errors='ignore')) / 1024
@@ -297,6 +639,9 @@ def _compact_tool_message(tool_name, tool_args, result, artifact_path):
     )
     if truncated:
         msg += f"\n...[TRUNCATED {len(res_str) - TOOL_OUTPUT_MAX_CHARS} chars]"
+    note = _pressure_note()
+    if note:
+        msg += f"\n{note}"
     return msg
 
 
@@ -417,6 +762,7 @@ def _ollama_summarize_and_reset_context(
 
     messages.clear()
     messages.extend(system_msgs + [protocol_msg])
+    reset_context_pressure()
 
     return protocol_msg["content"], artifact_path
 
@@ -531,6 +877,17 @@ def ask_ollama_textual(
         if identity_content:
             messages.insert(0, {"role": "system", "content": identity_content})
 
+    # Ступенчатое раскрытие инструментов: в payload всегда только tools/sign_step
+    # и включённые; остальные — кратким каталогом здесь, схемы по tools(enable).
+    if messages and not any(m.get("role") == "system" and "TOOLS_CATALOG" in str(m.get("content", "")) for m in messages):
+        try:
+            from tools.tools_catalog import catalog_text
+            _cat = catalog_text(tm)
+            if _cat:
+                messages.insert(1, {"role": "system", "content": "TOOLS_CATALOG\n" + _cat})
+        except Exception:
+            pass
+
     app = BotinokTextualApp(session_path=session_path, version=version,
                             initial_prompt=initial_prompt)
     app.set_model_info(model, dangerous=dangerous_mode,
@@ -611,6 +968,8 @@ def ask_ollama_textual(
         _call_from_thread(app.append_assistant_chunk, content, thinking, tool_stream_json)
 
     def _finalize_turn(content, thinking="", tool_calls=None):
+        if not tool_calls:
+            reset_context_pressure()
         _call_from_thread(app.finalize_assistant_turn, content, thinking, tool_calls)
 
     def _persist_connection_failure(reason: str, user_prompt: str = "") -> None:
@@ -739,6 +1098,14 @@ def ask_ollama_textual(
         auto_recoveries = 0
         empty_retries = 0
         proof_rounds = 0
+        sign_nudges = 0
+        length_stitches = 0
+        stitched_parts = []
+        try:
+            from tools import sign_step as _sign_step
+            _sign_step.reset_turn(session_path)
+        except Exception:
+            _sign_step = None
         stopped_by_user = False
         turn_prompt = user_text
         http_retries = 0
@@ -835,12 +1202,25 @@ def ask_ollama_textual(
                 sm.update_context(session_path, "user", cont_user["content"])
                 continue
 
+            if current_model and current_model not in _token_k_state["by_model"]:
+                restore_token_calibration(os.path.join(session_path, "performance.log"), current_model)
             prepared = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=current_ctx)
             session_ctx_est = _estimate_messages_tokens(prepared)
             _update_stats(session_ctx=session_ctx_est, session_ctx_max=current_ctx)
 
             tools = tm.get_tool_definitions()
-            tools_list = list(tools.values()) if isinstance(tools, dict) else (tools or [])
+            try:
+                from tools.tools_catalog import enabled_tools
+                _allowed = enabled_tools(session_path)
+            except Exception:
+                _allowed = None
+            if _allowed is not None:
+                tools_list = [
+                    t for t in (tools.values() if isinstance(tools, dict) else (tools or []))
+                    if ((t or {}).get("function") or {}).get("name") in _allowed
+                ]
+            else:
+                tools_list = list(tools.values()) if isinstance(tools, dict) else (tools or [])
 
             payload = {
                 "model": current_model,
@@ -963,6 +1343,7 @@ def ask_ollama_textual(
             full_thinking = ""
             tool_calls = []
             metrics = {}
+            done_reason = ""
             start_time = time.time()
             first_token_time = None
             thinking_ended = False
@@ -1133,6 +1514,7 @@ def ask_ollama_textual(
                         tool_calls.extend(tc_list)
 
                     if chunk.get("done"):
+                        done_reason = str(chunk.get("done_reason") or "")
                         metrics = {
                             "total_duration_ms": chunk.get("total_duration", 0) / 1_000_000,
                             "load_duration_ms": chunk.get("load_duration", 0) / 1_000_000,
@@ -1199,6 +1581,12 @@ def ask_ollama_textual(
             ttft_val = first_token_time - start_time if first_token_time else elapsed
             tps_val = (thinking_tokens + response_tokens + streaming_tool_tokens) / (time.time() - first_token_time) if first_token_time and (time.time() - first_token_time) > 0 else 0
             last_req_ctx = prompt_eval_count + eval_count
+            set_context_pressure(last_req_ctx / current_ctx if current_ctx else 0.0)
+            if prompt_eval_count:
+                calibrate_token_estimator(
+                    current_model, prompt_eval_count, prepared,
+                    persist_path=os.path.join(session_path, "performance.log"),
+                )
 
             _update_stats(
                 status="Processing tool calls..." if tool_calls else "Done",
@@ -1348,9 +1736,44 @@ def ask_ollama_textual(
                 break
 
             if not tool_calls:
+                # Добивка обрыва по finish_reason=length (этап 7): обрубок сохранён,
+                # скрытый досыл «продолжи с места обрыва», хвост приклеится при финале
+                if (done_reason == "length" and full_response.strip()
+                        and length_stitches < 2 and not stopped_by_user):
+                    length_stitches += 1
+                    stitched_parts.append(full_response)
+                    messages.append({"role": "assistant", "content": full_response})
+                    sm.update_context(session_path, "assistant", full_response)
+                    cont = ("Продолжи строго с места обрыва: без повторов уже сказанного, "
+                            "без нового начала, сразу с следующего слова/строки.")
+                    messages.append({"role": "user", "content": cont})
+                    sm.update_context(session_path, "user", cont)
+                    full_response = ""
+                    full_thinking = ""
+                    continue
+                if stitched_parts:
+                    full_response = _stitch_response(stitched_parts + [full_response])
+                    stitched_parts = []
                 sm.update_context(session_path, "assistant", full_response, thinking=full_thinking)
                 messages.append({"role": "assistant", "content": full_response})
                 _finalize_turn(full_response, full_thinking)
+
+                # sign_step (этап 6): нет подписи за рабочий ход — один пинк,
+                # дальше смириться (провал форсинга стоит нулю — механическая строка)
+                if (_sign_step is not None and sign_nudges < 1 and tool_rounds > 0
+                        and current_model not in MODELS_NO_TOOLS
+                        and not _sign_step.has_signature(session_path)):
+                    sign_nudges += 1
+                    nudge = ("Перед завершением хода вызови инструмент sign_step: "
+                             "goal (что делал за ход, ≤15 слов), done (что сделано, ≤15 слов), "
+                             "status (progress|blocked|decision|answered), "
+                             "entities — только что реально встречалось в ходе (пути, URL, имена; ≤6). "
+                             "Ничего больше не вызывай и не повторяй ответ.")
+                    messages.append({"role": "user", "content": nudge})
+                    sm.update_context(session_path, "user", nudge)
+                    full_response = ""
+                    full_thinking = ""
+                    continue
 
                 # --- РЕЖИМ КОРРЕКТОРА (--proofread) ---
                 if proofread and proofreader_fn and proof_rounds < MAX_PROOFREAD_ROUNDS:
@@ -1433,6 +1856,12 @@ def ask_ollama_textual(
                 _add_tool(tool_name, json.dumps(tool_args, ensure_ascii=False)[:60], status="running")
 
                 sm.log_tool_call(session_path, tool_name, tool_args, "STARTED", status="running", call_id=tc_id)
+
+                if _sign_step is not None and tool_name != "sign_step":
+                    try:
+                        _sign_step.observe(session_path, [tool_name] + [str(v) for v in (tool_args or {}).values()])
+                    except Exception:
+                        pass
 
                 progress_callback = None
                 if tool_name in ("curl", "web", "web_search", "open_url", "web_extract"):
@@ -1517,12 +1946,17 @@ def ask_ollama_textual(
                             pass
                         _write_log("[yellow]⚠️ Dangerous mode: ON (по запросу инструмента)[/yellow]")
 
-                tool_result = tm.call_tool(
-                    tool_name,
-                    tool_args,
-                    session_path=effective_session_path,
-                    progress_callback=progress_callback,
-                )
+                memo = _catalog_memo_check(session_path, tool_name, tool_args)
+                if memo:
+                    tool_result = memo
+                else:
+                    tool_result = tm.call_tool(
+                        tool_name,
+                        tool_args,
+                        session_path=effective_session_path,
+                        progress_callback=progress_callback,
+                    )
+                    _catalog_memo_store(session_path, tool_name, tool_args, tool_result, sm)
 
                 # Esc во время работы инструмента: процесс(ы) убиты, фиксируем
                 # прерывание и прекращаем ход, ничего не «додумывая».
