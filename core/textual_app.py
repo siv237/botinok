@@ -43,9 +43,18 @@ def filter_mouse_motion(data):
     и на каждое движение происходит рендер контента под курсором — на большой
     chafa-картинке это лавина событий и залипание UI. Прокрутка колесом и клики
     работают и в режиме 1002, а «чистое движение» перестаёт приходить.
+
+    На выходе Textual гасит только то, что включал (`?1003l`), — про наш
+    подменённый `?1002h` он не знает. Гасим 1002 вместе с 1003, иначе
+    mouse-tracking переживает выход из приложения и клики в шелле печатают
+    escape-последовательности.
     """
-    if isinstance(data, str) and "\x1b[?1003h" in data:
-        return data.replace("\x1b[?1003h", "\x1b[?1002h")
+    if not isinstance(data, str):
+        return data
+    if "\x1b[?1003h" in data:
+        data = data.replace("\x1b[?1003h", "\x1b[?1002h")
+    if "\x1b[?1003l" in data:
+        data = data.replace("\x1b[?1003l", "\x1b[?1003l\x1b[?1002l")
     return data
 
 
@@ -804,7 +813,6 @@ class BotinokTextualApp(App):
         self._stream_content = ""
         self._stream_thinking = ""
         self._last_tool_content = ""
-        self._tool_items: List[str] = []
         self.is_streaming = False
         self._stop_requested = False
         self._stop_logged = False
@@ -2016,6 +2024,9 @@ class BotinokTextualApp(App):
         if self._task_active():
             sp = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
             activity = f" [bold magenta]{sp[int(now*5) % len(sp)]}[/bold magenta]"
+        elif (s.get("status", "") or "").strip() in ("Ready", "Готов к работе",
+                                                     "Done", "Ответ готов"):
+            activity = " [bold green]✔[/bold green]"
 
         # Живые значения текущего потока: считаем по уже пришедшему тексту,
         # поэтому они растут прямо во время генерации, а не только в конце.
@@ -2794,7 +2805,6 @@ class BotinokTextualApp(App):
             _pc.clear_stop()
 
     def start_assistant_turn(self) -> None:
-        self._flush_tool_spoilers()
         self._last_chunk_time = 0.0
         self._stream_started_at = time.time()
         self._first_token_at = None
@@ -3113,20 +3123,7 @@ class BotinokTextualApp(App):
 
         self._last_tool_content = ""
 
-        if tool_calls:
-            for tc in tool_calls:
-                name = tc.get("function", {}).get("name", "unknown")
-                self._tool_items.append(f"🔧 {name}")
-
-    def _flush_tool_spoilers(self) -> None:
-        if self._tool_items:
-            text = "\n".join(self._tool_items)
-            title = self._spoiler_title("Tool calls", text)
-            self._mount_spoiler(title, Static(f"[dim]{text}[/dim]"))
-            self._tool_items = []
-
     def append_tool_result(self, tool_name: str, result: str) -> None:
-        self._tool_items.append(f"  └ ✔ {tool_name}")
         # Сохраняем превью результата в карточку инструмента (раскрывается по клику).
         preview = normalize_cells(str(result))[:4000]
         for t in reversed(self.active_tools):
@@ -3305,10 +3302,13 @@ class BotinokTextualApp(App):
         return title
 
     def flush_tool_buffer(self) -> None:
-        self._flush_tool_spoilers()
         stopped = self._stop_requested
         self.is_streaming = False
         self._last_chunk_time = 0.0
+        # Финальная перерисовка панели: ход закончен, тикер в покое не крутится —
+        # иначе останемся на последнем кадре спиннера вместо «готово ✔».
+        self._stats_dirty = True
+        self.update_stats_display()
         if not self._queued_inputs:
             return
         if stopped:

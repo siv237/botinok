@@ -1062,18 +1062,24 @@ def main():
         if resume_session_msg:
             messages.append({"role": "system", "content": resume_session_msg})
 
-        ask_ollama_textual(
-            model=args.model,
-            messages=messages,
-            session_path=session_path,
-            num_ctx=args.ctx,
-            dangerous_mode=args.dangerous,
-            version=_BOTINOK_VERSION,
-            initial_prompt=(args.prompt or args.prompt_pos or ""),
-            proofread=args.proofread,
-            proofreader_fn=run_proofreader_turn,
-            resume_session=bool(resume_last_answer),
-        )
+        try:
+            ask_ollama_textual(
+                model=args.model,
+                messages=messages,
+                session_path=session_path,
+                num_ctx=args.ctx,
+                dangerous_mode=args.dangerous,
+                version=_BOTINOK_VERSION,
+                initial_prompt=(args.prompt or args.prompt_pos or ""),
+                proofread=args.proofread,
+                proofreader_fn=run_proofreader_turn,
+                resume_session=bool(resume_last_answer),
+            )
+        finally:
+            # Страховка: если TUI завершился аварийно и не погасил mouse-tracking,
+            # клики в шелле печатают escape-мусор. Последовательности idempotent.
+            sys.stdout.write("\x1b[?1002l\x1b[?1003l\x1b[?1000l\x1b[?1006l\x1b[?1015l")
+            sys.stdout.flush()
         return
 
     # Определяем параметры из аргументов или конфига
