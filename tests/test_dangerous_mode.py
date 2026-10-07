@@ -51,7 +51,7 @@ class _Click:
         self._stopped = True
 
 
-def test_tool_gate() -> None:
+def _check_tool_gate() -> None:
     print("-- ToolManager gate (простой режим) --")
     os.environ["BOTINOK_DANGEROUS"] = "0"
     tm = ToolManager()
@@ -78,7 +78,7 @@ def test_tool_gate() -> None:
     check("editor_write_outside_blocked", r.startswith("Error"), r)
 
 
-async def test_ui() -> None:
+async def _check_ui() -> None:
     print("-- UI: switch / автосогласие / шапка --")
     app = BotinokTextualApp()
     TextualAppRegistry.set_app(app)
@@ -145,14 +145,18 @@ async def main_async() -> int:
     print("=" * 70)
     print("Dangerous mode smoke-test")
     print("=" * 70)
-    test_tool_gate()
-    await test_ui()
+    _check_tool_gate()
+    await _check_ui()
     print("=" * 70)
     if FAILURES:
         print(f"❌ ПРОВАЛЕНО: {len(FAILURES)} — {FAILURES}")
         return 1
     print("✅ DANGEROUS MODE SMOKE-ТЕСТ ПРОЙДЕН")
     return 0
+
+
+def test_dangerous_mode() -> None:
+    assert asyncio.run(main_async()) == 0
 
 
 if __name__ == "__main__":
