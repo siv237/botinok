@@ -14,7 +14,7 @@ from typing import Optional
 
 _enabled: dict = {}
 
-_ALWAYS_ON = ("tools", "sign_step")
+_ALWAYS_ON = ("tools", "sign_step", "session_memory")
 
 
 def _norm_session(session_path: Optional[str]) -> str:
@@ -76,7 +76,8 @@ def catalog_lines(tm) -> list:
 def catalog_text(tm) -> str:
     return (
         "ИНСТРУМЕНТЫ (краткий каталог; схемы по запросу):\n"
-        "В твоём запросе всегда доступны tools (этот список) и sign_step. "
+        "В твоём запросе всегда доступны tools (этот список), sign_step и session_memory "
+        "(история сессии — главный инструмент при прерванном/вытесненном контексте). "
         "Нужен инструмент из каталога — вызови tools(action=enable, name=…), "
         "его полная схема появится в следующем запросе и останется на всю сессию. "
         "Включай только то, чем будешь пользоваться в этом ходе.\n"

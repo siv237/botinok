@@ -3,7 +3,7 @@
 Тест ступенчатого раскрытия инструментов (tools/tools_catalog.py):
   * каталог краткий и содержит все инструменты;
   * enable добавляет инструмент в payload-набор и персистится;
-  * always-on (tools/sign_step) нельзя сломать; неизвестное имя — ошибка;
+  * always-on (tools/sign_step/session_memory) нельзя сломать; неизвестное имя — ошибка;
   * disable и перезагрузка состояния.
 
 Запуск: venv/bin/python -u tests/test_tools_catalog.py
@@ -33,7 +33,8 @@ def main() -> int:
 
     # 1) каталог
     cat = tc.catalog_text(tm)
-    check("catalog_has_core", all(n in cat for n in ("web", "session_memory", "github", "vision")), "")
+    check("catalog_has_core", all(n in cat for n in ("web", "github", "vision")), "")
+    check("session_memory_always_on_not_in_catalog", "\n- session_memory:" not in cat)
     check("catalog_compact", len(cat) < 4000, str(len(cat)))
     check("catalog_mentions_enable", "enable" in cat)
     check("tools_meta_not_in_catalog", "\n- tools:" not in cat)
@@ -43,7 +44,7 @@ def main() -> int:
         sess = os.path.join(td, "s")
         os.makedirs(sess)
         base = tc.enabled_tools(sess)
-        check("always_on_present", {"tools", "sign_step"} <= base, str(base))
+        check("always_on_present", {"tools", "sign_step", "session_memory"} <= base, str(base))
         check("others_off_by_default", "web" not in base and "github" not in base)
 
         # 3) enable
@@ -80,7 +81,7 @@ def main() -> int:
     allowed = tc.enabled_tools(sess2)
     filtered = [t for t in defs.values() if ((t or {}).get("function") or {}).get("name") in allowed]
     names = {t["function"]["name"] for t in filtered}
-    check("payload_filtered", names == {"tools", "sign_step", "web"}, str(sorted(names)))
+    check("payload_filtered", names == {"tools", "sign_step", "session_memory", "web"}, str(sorted(names)))
     tc._enabled.pop(sess2, None)
 
     print("=" * 70)
