@@ -11,7 +11,7 @@ import json
 import os
 import re
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Tuple
 from dataclasses import dataclass, field
 
 try:
@@ -48,7 +48,7 @@ class ToolCall:
             status=entry.get("status", "unknown")
         )
 
-    def to_dict(self, include_args: bool = True) -> Dict:
+    def to_dict(self, include_args: bool = True, include_results: bool = False) -> Dict:
         result = {
             "id": self.id,
             "tool": self.tool,
@@ -61,7 +61,11 @@ class ToolCall:
             result["artifact"] = self.artifact
         if self.result_preview:
             result["result_preview"] = self.result_preview
-        if include_args and self.result:
+        # Полный результат инструмента по умолчанию НЕ инлайнится: ход из
+        # десятков tool-вызовов с полными результатами давал 100+ КБ на один
+        # get_turn и взрывал контекст — модель после этого боялась
+        # session_memory и лезла в file_system. Только по include_results=true.
+        if include_results and self.result:
             result["result"] = self.result
         return result
 
@@ -145,7 +149,8 @@ class Turn:
     tool_calls: List[ToolCall] = field(default_factory=list)
     artifacts_created: List[str] = field(default_factory=list)
 
-    def to_dict(self, include_content: bool = True, include_thinking: bool = True) -> Dict:
+    def to_dict(self, include_content: bool = True, include_thinking: bool = True,
+                include_results: bool = False) -> Dict:
         """Сериализация с контролем объёма данных"""
         result = {
             "turn_id": self.turn_id,
@@ -159,7 +164,9 @@ class Turn:
         if self.assistant:
             result["assistant"] = self.assistant.to_dict(include_full=include_content)
         if self.tool_calls:
-            result["tool_calls"] = [tc.to_dict(include_args=include_content) for tc in self.tool_calls]
+            result["tool_calls"] = [tc.to_dict(include_args=include_content,
+                                               include_results=include_results)
+                                    for tc in self.tool_calls]
             result["tool_calls_count"] = len(self.tool_calls)
         if self.artifacts_created:
             result["artifacts_created"] = self.artifacts_created
@@ -406,6 +413,10 @@ class SessionParser:
         if full and full != "STARTED":
             tc.result = full
             tc.result_preview = full[:200]
+            if not tc.artifact:
+                m = re.search(r"artifact_path:\s*(\S+)", full)
+                if m:
+                    tc.artifact = m.group(1)
         tc.timestamp = log_entry.get("timestamp", tc.timestamp)
 
 
@@ -622,6 +633,8 @@ def session_memory_tool(
         turn_id = _to_int(kwargs.get("turn") or kwargs.get("id") or kwargs.get("turn_id"))
     if not include_content:
         include_content = bool(kwargs.get("full") or kwargs.get("include_full"))
+    include_results = bool(kwargs.get("include_results") or kwargs.get("full_results")
+                           or kwargs.get("with_results"))
 
     # Определяем путь к сессии (прощающе: плохой путь → берём последнюю сессию)
     requested_path = session_path
@@ -674,7 +687,8 @@ def session_memory_tool(
         result = _action_turns(turns, limit, offset, include_content, include_thinking)
     
     elif action == "get_turn":
-        result = _action_get_turn(turns, turn_id, include_content, include_thinking)
+        result = _action_get_turn(turns, turn_id, include_content, include_thinking,
+                                  include_results)
     
     elif action == "search":
         result = _action_search(turns, index, query, limit, include_content, include_thinking,
@@ -742,8 +756,9 @@ def _help_text(session_path: str) -> str:
         "\n"
         "Простой синтаксис (всё прощается, регистр/пробелы не важны):\n"
         "  • action=resume_brief                      — что было и где остановились\n"
-        "  • action=get_turn turn_id=123 include_content=true — полный ход\n"
-        "  • action=search query=кулер                — гибкий поиск (части слов, RU)\n"
+        "  • action=get_turn turn_id=123 include_content=true — полный ход (результаты инструментов — превью+артефакт; include_results=true — полные тексты)\n"
+        "  • action=search query=кулер                — гибкий поиск (части слов, RU; "
+        "ходы + артефакты + downloads, со сниппетами и путями)\n"
         "  • action=turns limit=20 offset=0           — список ходов\n"
         "  • action=timeline limit=30                 — хронология\n"
         "  • action=windows limit=20                  — окна вызовов модели (облака терминов, указатели)\n"
@@ -962,35 +977,43 @@ def _action_turns(turns: List[Turn], limit: int, offset: int, include_content: b
     }
 
 
-def _action_get_turn(turns: List[Turn], turn_id: Optional[int], include_content: bool, include_thinking: bool) -> Dict:
+def _action_get_turn(turns: List[Turn], turn_id: Optional[int], include_content: bool,
+                     include_thinking: bool, include_results: bool = False) -> Dict:
     """Получить конкретный turn по ID.
 
     Прощающее поведение: без turn_id берём последний ход, а при промахе —
     ближайший существующий (с пометкой), чтобы агент не упирался в ошибку.
+    Результаты инструментов по умолчанию — превью + артефакт (полные тексты
+    десятка вызовов сжигают контекст; include_results=true возвращает их).
     """
     if not turns:
         return {"error": "История пуста", "turns": 0}
 
+    def _ser(turn: Turn, note: Optional[str] = None) -> Dict:
+        res = turn.to_dict(include_content, include_thinking, include_results)
+        res["confidence"] = "DERIVED"
+        if note:
+            res["_note"] = note
+        if not include_results:
+            hidden = sum(1 for tc in turn.tool_calls if tc.result)
+            if hidden:
+                res["_tools_note"] = (
+                    f"Результаты {hidden} инструментов свёрнуты до превью и указателя "
+                    "на артефакт. Нужны полные тексты — повтори с include_results=true."
+                )
+        return res
+
     if turn_id is None:
-        turn = turns[-1]
-        result = turn.to_dict(include_content, include_thinking)
-        result["_note"] = "turn_id не указан — показан последний ход."
-        result["confidence"] = "DERIVED"
-        return result
+        return _ser(turns[-1], "turn_id не указан — показан последний ход.")
 
     for turn in turns:
         if turn.turn_id == turn_id:
-            result = turn.to_dict(include_content, include_thinking)
-            result["confidence"] = "DERIVED"
-            return result
+            return _ser(turn)
 
     # Ближайший по номеру.
     nearest = min(turns, key=lambda t: abs(t.turn_id - turn_id))
-    result = nearest.to_dict(include_content, include_thinking)
-    result["confidence"] = "DERIVED"
-    result["_note"] = (f"Turn {turn_id} не найден — показан ближайший "
-                       f"Turn {nearest.turn_id}. Диапазон: {turns[0].turn_id}…{turns[-1].turn_id}.")
-    return result
+    return _ser(nearest, f"Turn {turn_id} не найден — показан ближайший "
+                         f"Turn {nearest.turn_id}. Диапазон: {turns[0].turn_id}…{turns[-1].turn_id}.")
 
 
 def _norm_text(s) -> str:
@@ -1102,6 +1125,100 @@ def _search_files(session_path: str, tokens: List[str],
     return found
 
 
+# Только artifacts — клад сессии (полные результаты инструментов).
+# downloads/ не трогаем: это рабочая зона file_system, модель грепает их сама.
+# steps/ — JSON-зеркала артефактов, двойной шум.
+_CONTENT_KINDS = (("artifacts", 2),)
+_CONTENT_MAX_FILE = 5_000_000
+_CONTENT_MAX_FILES = 300
+
+
+def _line_token_hits(line_norm: str, tokens: List[str], stems: Dict[str, str]) -> int:
+    """Сколько РАЗЛИЧНЫХ токенов (или их стемов) встречается в строке."""
+    return sum(1 for tok in tokens
+               if tok in line_norm or (stems[tok] and stems[tok] in line_norm))
+
+
+def _scan_content_files(session_path: str, tokens: List[str],
+                        turns: List[Turn], limit: int = 12) -> List[Dict]:
+    """Ранжированный поиск по ТЕКСТУ артефактов и скачанных файлов сессии.
+
+    Артефакты — клад сессии (полные результаты инструментов): они приоритетнее
+    downloads. Строки ранжируются по числу различных совпавших токенов, файлы —
+    по (тип, покрытие токенов, свежесть). Сниппеты короткие: полный текст
+    дочитывается file_system read по пути.
+    """
+    if not session_path or not os.path.isdir(session_path) or not tokens:
+        return []
+    stems = {tok: (_stem(tok) if len(tok) > 4 else "") for tok in tokens}
+    # basename артефакта → turn_id, чтобы сниппет был привязан к ходу.
+    by_name = {}
+    for t in turns:
+        for tc in t.tool_calls:
+            if tc.artifact:
+                by_name[os.path.basename(str(tc.artifact))] = t.turn_id
+
+    candidates: List[Tuple[int, str, float]] = []  # (kind_priority, path, mtime)
+    for d, prio in _CONTENT_KINDS:
+        dir_path = os.path.join(session_path, d)
+        if not os.path.isdir(dir_path):
+            continue
+        for root_dir, _dirs, fnames in os.walk(dir_path):
+            for fn in fnames:
+                fp = os.path.join(root_dir, fn)
+                try:
+                    if os.path.getsize(fp) > _CONTENT_MAX_FILE:
+                        continue
+                    with open(fp, "rb") as fb:
+                        if b"\x00" in fb.read(1024):
+                            continue
+                    candidates.append((prio, fp, os.path.getmtime(fp)))
+                except Exception:
+                    continue
+    candidates = candidates[:_CONTENT_MAX_FILES]
+
+    scored: List[Dict] = []
+    for prio, path, mtime in candidates:
+        rel = os.path.relpath(path, session_path)
+        file_cov = 0
+        best_lines: List[Dict] = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for lineno, line in enumerate(f, 1):
+                    nl = _norm_text(line)
+                    n = _line_token_hits(nl, tokens, stems)
+                    if not n:
+                        continue
+                    file_cov = max(file_cov, n)
+                    best_lines.append({
+                        "file": rel,
+                        "line": lineno,
+                        "score": n,
+                        "snippet": " ".join(line.split())[:200],
+                    })
+        except Exception:
+            continue
+        if not best_lines:
+            continue
+        best_lines.sort(key=lambda h: h["score"], reverse=True)
+        tid = by_name.get(os.path.basename(path))
+        for h in best_lines[:2]:
+            h["kind_prio"] = prio
+            h["file_cov"] = file_cov
+            h["mtime"] = mtime
+            if tid is not None:
+                h["turn_id"] = tid
+            scored.append(h)
+    scored.sort(key=lambda h: (h["kind_prio"], h["score"], h["file_cov"], h["mtime"]),
+                reverse=True)
+    out = scored[:limit]
+    for h in out:
+        h.pop("kind_prio", None)
+        h.pop("file_cov", None)
+        h.pop("mtime", None)
+    return out
+
+
 def _action_search(turns: List[Turn], index: SessionIndex, query: str, limit: int,
                    include_content: bool, include_thinking: bool,
                    mode: str = "auto", session_path: str = "") -> Dict:
@@ -1188,6 +1305,7 @@ def _action_search(turns: List[Turn], index: SessionIndex, query: str, limit: in
         "total_matches": len(matched_turns),
         "turns": matched_turns[:limit],
         "files": _search_files(session_path, tokens) if tokens else [],
+        "content_files": _scan_content_files(session_path, tokens, turns) if tokens else [],
     }
 
 
@@ -1493,9 +1611,12 @@ def _format_structured(data: Dict, action: str) -> str:
                     lines.append(f"      args: {str(args)[:600]}")
             if tc.get("artifact"):
                 lines.append(f"      artifact: {tc.get('artifact')}")
-            body = tc.get("result") or tc.get("result_preview") or ""
-            if body:
-                lines.append(f"      result: {str(body)[:2000]}")
+            if tc.get("result"):
+                lines.append(f"      result: {str(tc['result'])[:2000]}")
+            elif tc.get("result_preview"):
+                lines.append(f"      preview: {str(tc['result_preview'])[:300]}")
+        if data.get("_tools_note"):
+            lines.append(f"   ℹ {data['_tools_note']}")
     
     elif action == "search":
         lines.append(f"🔍 Search '{data.get('query')}': {data.get('total_matches')} turns"
@@ -1521,6 +1642,13 @@ def _format_structured(data: Dict, action: str) -> str:
             lines.append("   📄 Где именно (файл:строка, время):")
             for f in files:
                 lines.append(f"      {f.get('file')}:{f.get('line')} [{f.get('timestamp')}]")
+                lines.append(f"         {f.get('snippet', '')[:160]}")
+        arts = data.get("content_files") or []
+        if arts:
+            lines.append("   📦 Клад сессии — найдено в артефактах (полный текст: file_system read по пути):")
+            for f in arts[:8]:
+                tid = f" (turn {f['turn_id']})" if f.get("turn_id") is not None else ""
+                lines.append(f"      {f.get('file')}:{f.get('line')}{tid}")
                 lines.append(f"         {f.get('snippet', '')[:160]}")
     
     elif action == "stats":
