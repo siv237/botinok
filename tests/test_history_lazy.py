@@ -3,7 +3,7 @@
 Тест ленивой загрузки истории на длинной сессии:
 - при старте рисуется только хвост (не тысячи виджетов);
 - есть кнопка «Показать более раннее» и догрузка работает;
-- спойлеры из истории СВЁРНУТЫ;
+- в истории только диалог (мысли и tool-вызовы не рендерятся);
 - индикатор загрузки убирается.
 
 Запуск: venv/bin/python -u tests/test_history_lazy.py
@@ -68,11 +68,17 @@ async def main() -> int:
         check("load_older_button", app._load_older_button is not None)
         check("loading_indicator_removed", app._loading_widget is None)
 
-        from textual.widgets import Collapsible
-        cols = list(app.query(Collapsible))
-        check("spoilers_present", len(cols) > 0, f"n={len(cols)}")
-        check("spoilers_collapsed", all(c.collapsed for c in cols),
-              f"opened={sum(1 for c in cols if not c.collapsed)}")
+        # Повторно открытая история — только диалог: без спойлеров мыслей и
+        # tool-вызовов (см. _render_history_entry).
+        from textual.widgets import Collapsible, Static
+        cols = list(app.chat.query(Collapsible))
+        check("history_no_spoilers", len(cols) == 0, f"n={len(cols)}")
+        junk = []
+        for w in app.chat.query(Static):
+            t = " ".join(str(w.render()).split())
+            if t.startswith(("Thinking:", "Tool result:", "web:", "file_system:")):
+                junk.append(t[:40])
+        check("history_no_tool_junk", not junk, f"junk={junk[:3]}")
 
         before_from = app._history_from
         before_children = len(app.chat.children)
