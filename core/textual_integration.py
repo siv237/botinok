@@ -931,9 +931,13 @@ def ask_ollama_textual(
         _call_from_thread(app.update_stats, **s)
 
     def _add_tool(name, query, status="running", size_kb=0):
+        if name == "sign_step":
+            return
         _call_from_thread(app.add_tool_activity, name, query, status, size_kb)
 
     def _update_tool(name, status="completed", size_kb=0, query="", detail=None):
+        if name == "sign_step":
+            return
         _call_from_thread(app.update_tool_activity, name, status, size_kb, query, detail)
 
     def _tool_progress(tn, min_interval=0.2):
@@ -970,6 +974,9 @@ def ask_ollama_textual(
     def _finalize_turn(content, thinking="", tool_calls=None):
         if not tool_calls:
             reset_context_pressure()
+        if tool_calls:
+            tool_calls = [tc for tc in tool_calls
+                          if (tc.get("function") or {}).get("name") != "sign_step"] or None
         _call_from_thread(app.finalize_assistant_turn, content, thinking, tool_calls)
 
     def _persist_connection_failure(reason: str, user_prompt: str = "") -> None:
@@ -986,6 +993,8 @@ def ask_ollama_textual(
         _finalize_turn("", "")
 
     def _append_tool_result(tool_name, result):
+        if tool_name == "sign_step":
+            return
         _call_from_thread(app.append_tool_result, tool_name, result)
 
     def _write_log(text):
@@ -1099,6 +1108,8 @@ def ask_ollama_textual(
         empty_retries = 0
         proof_rounds = 0
         sign_nudges = 0
+        sign_hidden = False
+        post_sign_silent = False
         length_stitches = 0
         stitched_parts = []
         try:
@@ -1174,6 +1185,11 @@ def ask_ollama_textual(
                 _finalize_turn("", "")
                 break
             tool_rounds += 1
+            # Раунд не виден в чате: пинк sign_step (sign_hidden) или раунд сразу
+            # после подписи, когда ответ был отдан вместе со sign_step — тогда
+            # текст раунда это лишь «эхо подписи», а не новый ответ.
+            round_silent = sign_hidden or post_sign_silent
+            post_sign_silent = False
             if tool_rounds > MAX_TOOL_ROUNDS_PER_TURN:
                 if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
                     summary, _ = _ollama_summarize_and_reset_context(
@@ -1357,7 +1373,8 @@ def ask_ollama_textual(
             last_chunk_time = time.time()
             _stream_buf.clear()
             _thinking_buf.clear()
-            _call_from_thread(app.start_assistant_turn)
+            if not round_silent:
+                _call_from_thread(app.start_assistant_turn)
 
             if user_text:
                 sm.update_context(session_path, "user", user_text)
@@ -1451,7 +1468,7 @@ def ask_ollama_textual(
                             if not msg.get("content") and not msg.get("thinking"):
                                 if token:
                                     streaming_tool_text += str(token)
-                                    if _tool_stream_has_payload(streaming_tool_text):
+                                    if _tool_stream_has_payload(streaming_tool_text) and not round_silent:
                                         _append_chunk(tool_stream_json=streaming_tool_text)
                                 if not waiting_status_set:
                                     _update_stats(status="Streaming Tool JSON...")
@@ -1477,7 +1494,8 @@ def ask_ollama_textual(
                     if thought:
                         full_thinking += thought
                         thinking_tokens += 1
-                        _stream_thought(thought)
+                        if not round_silent:
+                            _stream_thought(thought)
                         sm.log_chunk(session_path, "thinking", thought)
 
                     token = msg.get("content", "")
@@ -1499,7 +1517,8 @@ def ask_ollama_textual(
 
                         full_response += token
                         response_tokens += 1
-                        _stream_chunk(content=token)
+                        if not round_silent:
+                            _stream_chunk(content=token)
                         sm.log_chunk(session_path, "response", token)
 
                         if len(full_response) % 800 == 0 and _detect_repetition(full_response):
@@ -1604,6 +1623,11 @@ def ask_ollama_textual(
 
             _flush_thinking_buf()
             _flush_stream_buf()
+
+            if round_silent and not tool_calls:
+                # Тихий раунд (пинк sign_step или эхо после подписи): текст
+                # в чат не показываем, ход завершён.
+                break
 
             if (not tool_calls) and (not full_response.strip()) and full_thinking.strip():
                 if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
@@ -1732,7 +1756,8 @@ def ask_ollama_textual(
             if stopped_by_user:
                 sm.update_context(session_path, "assistant", full_response, thinking=full_thinking)
                 messages.append({"role": "assistant", "content": full_response})
-                _finalize_turn(full_response, full_thinking)
+                if not round_silent:
+                    _finalize_turn(full_response, full_thinking)
                 break
 
             if not tool_calls:
@@ -1764,6 +1789,7 @@ def ask_ollama_textual(
                         and current_model not in MODELS_NO_TOOLS
                         and not _sign_step.has_signature(session_path)):
                     sign_nudges += 1
+                    sign_hidden = True
                     nudge = ("Перед завершением хода вызови инструмент sign_step: "
                              "goal (что делал за ход, ≤15 слов), done (что сделано, ≤15 слов), "
                              "status (progress|blocked|decision|answered), "
@@ -1826,7 +1852,8 @@ def ask_ollama_textual(
             messages.append({"role": "assistant", "content": full_response, "tool_calls": tool_calls})
             sm.update_context(session_path, "assistant", full_response, thinking=full_thinking, tool_calls=tool_calls)
 
-            _finalize_turn(full_response, full_thinking, tool_calls)
+            if not round_silent:
+                _finalize_turn(full_response, full_thinking, tool_calls)
 
             for tc in tool_calls:
                 # Esc до старта инструмента: не выполняем его вовсе. Закрываем
@@ -2050,6 +2077,16 @@ def ask_ollama_textual(
 
                 _update_tool(tool_name, status="completed", size_kb=size_kb)
                 _append_tool_result(tool_name, compact_msg[:500])
+
+            if sign_hidden and _sign_step is not None and _sign_step.has_signature(session_path):
+                # Подпись получена — ход завершён, ответ уже показан выше.
+                break
+
+            if any((tc.get("function") or {}).get("name") == "sign_step" for tc in tool_calls) \
+                    and full_response.strip():
+                # Модель отдала ответ вместе со sign_step — следующий финальный
+                # текст будет лишь эхом подписи, его не показываем.
+                post_sign_silent = True
 
             # Если инструмент был прерван пользователем — не запускаем новый ход,
             # возвращаем UI в покой и ждём следующий вопрос.
