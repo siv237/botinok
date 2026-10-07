@@ -450,8 +450,8 @@ class ToolManager:
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["resume_brief", "summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain"],
-                                "description": "resume_brief - быстрый сбор сессии для продолжения (задача, состояние, последние ходы), summary - сводка сессии, turns - список обменов, get_turn - конкретный turn, search - поиск по тексту, filter - фильтрация, timeline - хронология, stats - статистика, chain - цепочка turns"
+                                "enum": ["resume_brief", "summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain", "restore", "windows"],
+                                "description": "resume_brief - быстрый сбор сессии для продолжения (задача, состояние, последние ходы), summary - сводка сессии, turns - список обменов, get_turn - конкретный turn, search - поиск по тексту, filter - фильтрация, timeline - хронология, stats - статистика, chain - цепочка turns, restore - точное восстановление из снапшота, windows - окна вызовов модели (дайджест)"
                             },
                             "session_path": {"type": "string", "description": "Путь к сессии (опционально, по умолчанию текущая)"},
                             "turn_id": {"type": "integer", "description": "ID turn для get_turn"},
@@ -474,8 +474,9 @@ class ToolManager:
                 "function": {
                     "name": "tools",
                     "description": ("Менеджер инструментов: краткий каталог всех инструментов (action=list) и "
-                                    "ступенчатое раскрытие схем. В запросе всегда доступны только tools и sign_step; "
-                                    "нужен инструмент из каталога — tools(action=enable, name=…), его полная схема "
+                                    "ступенчатое раскрытие схем. В запросе всегда доступны tools, sign_step и "
+                                    "session_memory; нужен инструмент из каталога — tools(action=enable, name=…), "
+                                    "его полная схема "
                                     "появится в следующем запросе и останется на сессию. Включай только то, чем "
                                     "будешь пользоваться в этом ходе."),
                     "parameters": {
