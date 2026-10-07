@@ -24,7 +24,7 @@ TESTS: list = []
 FAILURES: list = []
 
 
-def test(name):
+def case(name):
     def deco(fn):
         TESTS.append((name, fn))
         return fn
@@ -46,7 +46,7 @@ def _wait_output(s: ShellSession, needle: str, timeout: float = 8.0) -> bool:
 
 # ------------------------------------------------------------------ tests
 
-@test("01_simple_output")
+@case("01_simple_output")
 def _01():
     s = ShellSession(command="echo hello_world_123", cwd="/tmp")
     s.start()
@@ -57,7 +57,7 @@ def _01():
     assert not s.is_running()
 
 
-@test("02_non_blocking")
+@case("02_non_blocking")
 def _02():
     """Команда крутится в фоне — агент не держится."""
     s = ShellSession(command="sleep 2; echo AFTER_SLEEP", cwd="/tmp")
@@ -74,7 +74,7 @@ def _02():
     s.close()
 
 
-@test("03_send_input_answer_question")
+@case("03_send_input_answer_question")
 def _03():
     """Программа задаёт вопрос — агент/юзер вводит ответ в ту же сессию."""
     cmd = (
@@ -94,7 +94,7 @@ def _03():
     s.close()
 
 
-@test("04_send_key_menu_number")
+@case("04_send_key_menu_number")
 def _04():
     """Выбор пункта меню: send_key('3') + send_key('enter')."""
     cmd = (
@@ -114,7 +114,7 @@ def _04():
     s.close()
 
 
-@test("04b_send_key_arrows")
+@case("04b_send_key_arrows")
 def _04b():
     """Спец-клавиши доходят до программы: ловим ESC-последовательность стрелки."""
     # cat переводит режим терминала в raw и отдаёт нажатия как есть.
@@ -129,7 +129,7 @@ def _04b():
     s.close()
 
 
-@test("04c_password_prompt")
+@case("04c_password_prompt")
 def _04c():
     """Ввод пароля: промпт без \\n виден, ответ доходит, не ломая эхо."""
     cmd = (
@@ -147,7 +147,7 @@ def _04c():
     s.close()
 
 
-@test("05_search_output_regex")
+@case("05_search_output_regex")
 def _05():
     cmd = "for i in $(seq 1 20); do echo \"LINE_$i value=$((i*7))\"; done; sleep 0.3"
     s = ShellSession(command=cmd, cwd="/tmp")
@@ -168,7 +168,7 @@ def _05():
     s.close()
 
 
-@test("06_concurrent_reader")
+@case("06_concurrent_reader")
 def _06():
     """Параллельный читатель-подписчик не блокирует агентский цикл."""
     s = ShellSession(command="for i in $(seq 1 50); do echo \"TICK_$i\"; sleep 0.05; done",
@@ -193,7 +193,7 @@ def _06():
     s.close()
 
 
-@test("07_kill_timeout")
+@case("07_kill_timeout")
 def _07():
     """kill() и timeout_sec прибивают зависшую команду."""
     s = ShellSession(command="sleep 60", cwd="/tmp")
@@ -215,7 +215,7 @@ def _07():
     s2.close()
 
 
-@test("08_registry")
+@case("08_registry")
 def _08():
     reg = ShellSessionRegistry.instance()
     s = ShellSession(command="echo registry_test", cwd="/tmp")
@@ -229,7 +229,7 @@ def _08():
     assert reg.get(sid) is None
 
 
-@test("09_ansi_color_stripped")
+@case("09_ansi_color_stripped")
 def _09():
     cmd = 'printf "\\033[31mRED_TEXT\\033[0m PLAIN\\n"; echo DONE_ANSI'
     s = ShellSession(command=cmd, cwd="/tmp")
@@ -242,7 +242,7 @@ def _09():
     s.close()
 
 
-@test("10_raw_tail_has_colors")
+@case("10_raw_tail_has_colors")
 def _10():
     """Сырой хвост для артефакта сохраняет цвета."""
     cmd = 'printf "\\033[32mGREEN\\033[0m\\n"'
@@ -286,6 +286,10 @@ def main() -> int:
         return 1
     print("✅ ВСЕ ТЕСТЫ ПРОЙДЕНЫ")
     return 0
+
+
+def test_all() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":

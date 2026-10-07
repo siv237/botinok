@@ -28,7 +28,7 @@ TESTS: list = []
 FAILURES: list = []
 
 
-def test(name):
+def case(name):
     def deco(fn):
         TESTS.append((name, fn))
         return fn
@@ -53,7 +53,7 @@ def _do(action: str, **kw) -> dict:
 
 # ------------------------------------------------------------------ tests
 
-@test("run_start_interactive_session")
+@case("run_start_interactive_session")
 def _01():
     r = _run("echo HI_FROM_SHELL; sleep 1", interactive=True)
     assert "session_id" in r, f"нет session_id: {r}"
@@ -66,7 +66,7 @@ def _01():
     assert st["session_id"] == r["session_id"]
 
 
-@test("agent_reads_output_without_blocking")
+@case("agent_reads_output_without_blocking")
 def _02():
     r = _run("for i in $(seq 1 10); do echo \"OUT_$i\"; sleep 0.1; done",
              interactive=True)
@@ -80,7 +80,7 @@ def _02():
     assert "OUT_10" in rd2["output_tail"], f"не дождались вывода: {rd2}"
 
 
-@test("agent_searches_output")
+@case("agent_searches_output")
 def _03():
     r = _run("for i in $(seq 1 30); do echo \"ITEM_$i val=$((i*3))\"; done; sleep 0.2",
              interactive=True)
@@ -91,7 +91,7 @@ def _03():
     assert "val=60" in sr2["matches"] or "val=63" in sr2["matches"], f"regex: {sr2}"
 
 
-@test("agent_answers_password_prompt")
+@case("agent_answers_password_prompt")
 def _04():
     cmd = ('echo "LOGIN_PROMPT"; read -s -p "Password: " pw; echo ""; '
            'echo "AUTH_OK=$pw"')
@@ -111,7 +111,7 @@ def _04():
     assert "AUTH_OK=S3cretPass" in sr2["output_tail"], f"пароль не дошёл: {sr2}"
 
 
-@test("agent_selects_menu_item")
+@case("agent_selects_menu_item")
 def _05():
     cmd = ("PS3='menu> '; options=('red' 'green' 'blue'); "
            "select opt in \"${options[@]}\"; do echo \"PICKED=$opt\"; break; done")
@@ -129,7 +129,7 @@ def _05():
     assert "PICKED=green" in wr["output_tail"], f"меню не выбрано: {wr}"
 
 
-@test("wait_and_returncode")
+@case("wait_and_returncode")
 def _06():
     r = _run("exit 7", interactive=True)
     wr = _do("wait", session_id=r["session_id"], wait_timeout=5)
@@ -137,7 +137,7 @@ def _06():
     assert wr["running"] is False
 
 
-@test("kill_hung_session")
+@case("kill_hung_session")
 def _07():
     r = _run("sleep 120", interactive=True)
     sid = r["session_id"]
@@ -148,7 +148,7 @@ def _07():
     assert kr["running"] is False
 
 
-@test("list_sessions")
+@case("list_sessions")
 def _08():
     r = _run("echo LIST_TEST", interactive=True)
     lr = _do("list")
@@ -159,7 +159,7 @@ def _08():
     assert "available" in bad
 
 
-@test("batch_mode_compat")
+@case("batch_mode_compat")
 def _09():
     """batch-режим для совместимости: команда отрабатывает синхронно."""
     r = _run("echo BATCH_OK", interactive=False, timeout_sec=10)
@@ -168,7 +168,7 @@ def _09():
     assert "BATCH_OK" in r["output_tail"]
 
 
-@test("empty_command_rejected")
+@case("empty_command_rejected")
 def _10():
     r = _run("   ", interactive=True)
     assert "error" in r, f"ожидали error: {r}"
@@ -206,6 +206,10 @@ def main() -> int:
         return 1
     print("✅ ВСЕ ТЕСТЫ ПРОЙДЕНЫ")
     return 0
+
+
+def test_all() -> None:
+    assert main() == 0
 
 
 if __name__ == "__main__":
