@@ -67,29 +67,42 @@ def file_system_tool(
     path = resolve_session_path(path, session_path) if path else path
     if dest:
         dest = resolve_session_path(dest, session_path)
+    # Файлы истории → однострочный совет; артефакты → session_memory ищет
+    # прямо здесь (клад сессии); downloads/ и project/ — не трогаем.
+    hint = _session_touch_hint(action, path) or _artifact_autosearch(
+        action, path, content_query or pattern or "")
+
+    def _ret(res: str) -> str:
+        res = str(res)
+        # Жёсткие ошибки — без хвостов. Пустой grep («Совпадений не найдено»),
+        # наоборот, самое место авто-поиску: здесь нет, а в кладе — есть.
+        if res.startswith(("Ошибка", "Файл не найден", "Путь не существует")):
+            return res
+        return f"{res}\n\n{hint}" if hint else res
+
     try:
         if action == "help":
             return _safe.catalog() if _safe else "Справка недоступна"
         if action == "list":
-            return _list_dir(path, sort=sort, reverse=reverse, max_results=max_results)
+            return _ret(_list_dir(path, sort=sort, reverse=reverse, max_results=max_results))
         elif action == "search":
             # Поиск по имени (маска pattern); если задан content_query — поиск по содержимому.
             if content_query:
-                return _grep_query(path, pattern, content_query, recursive, max_results, use_regex=True)
-            return _search_files(path, pattern, recursive, max_results)
+                return _ret(_grep_query(path, pattern, content_query, recursive, max_results, use_regex=True))
+            return _ret(_search_files(path, pattern, recursive, max_results))
         elif action == "grep":
             # content_query — regex; прощающий ввод: если пусто, берём pattern как запрос.
             query = content_query
             mask = pattern
             if not query and pattern and pattern != "*":
                 query, mask = pattern, "*"
-            return _grep_query(path, mask, query or "", recursive, max_results, use_regex=True)
+            return _ret(_grep_query(path, mask, query or "", recursive, max_results, use_regex=True))
         elif action == "read":
-            return _read_file(path, offset, limit, max_bytes=max_bytes)
+            return _ret(_read_file(path, offset, limit, max_bytes=max_bytes))
         elif action == "info":
-            return _file_info(path)
+            return _ret(_file_info(path))
         elif action == "inspect":
-            return _inspect(
+            return _ret(_inspect(
                 command=command,
                 path=path,
                 pattern=pattern,
@@ -107,9 +120,9 @@ def file_system_tool(
                 since=since,
                 lines=lines,
                 algo=algo,
-            )
+            ))
         elif action == "find":
-            return _find_files(
+            return _ret(_find_files(
                 path=path,
                 pattern=pattern,
                 ftype=content_query or "any",
@@ -118,7 +131,7 @@ def file_system_tool(
                 mtime_days=depth if depth > 0 and depth < 100 else None,
                 max_depth=10,
                 max_results=max_results,
-            )
+            ))
         elif action in ("delete", "move", "copy", "mkdir", "chmod", "symlink", "touch"):
             return _dangerous_action(
                 action=action,
@@ -704,6 +717,86 @@ def _tail_file(path: str, n: int, max_bytes: int) -> str:
         return header + content
     except Exception as e:
         return f"Ошибка tail: {str(e)}"
+
+
+_FS_HINT_ACTIONS = ("list", "search", "grep", "read", "info", "inspect", "find")
+_SESSION_FILE_NAMES = ("context.json", "tools.log", "metrics.log", "performance.log",
+                       "images.json", "meta.json", "session.json")
+
+
+def _sessions_root() -> str:
+    try:
+        from core.session_manager import SessionManager
+        return os.path.realpath(SessionManager().base_path)
+    except Exception:
+        return ""
+
+
+def _session_rel_parts(p: str) -> List[str]:
+    """Части пути внутри корня сессий: [sess_id, subdir, …]; [] если вне его."""
+    root = _sessions_root()
+    if not root or not (p == root or p.startswith(root + os.sep)):
+        return []
+    return p[len(root) + 1:].split(os.sep)
+
+
+def _session_touch_hint(action: str, path: Optional[str]) -> str:
+    """Однострочный совет на session_memory для файлов ИСТОРИИ сессии.
+
+    Только context.json/tools.log/корень — там сырой JSON сжигает контекст.
+    artifacts/ обрабатывает _artifact_autosearch (он делает поиск сам),
+    downloads/ не трогаем вовсе: это рабочая зона file_system.
+    """
+    if action not in _FS_HINT_ACTIONS or not path:
+        return ""
+    try:
+        p = os.path.realpath(path)
+    except Exception:
+        return ""
+    parts = _session_rel_parts(p)
+    if not parts:
+        return ""
+    if (len(parts) == 1 or os.path.basename(p) in _SESSION_FILE_NAMES
+            or p == _sessions_root()):
+        return "💡 По сессии ищи через session_memory: search query=…, get_turn turn_id=N."
+    return ""
+
+
+def _artifact_autosearch(action: str, path: Optional[str], query: str) -> str:
+    """grep/read по artifacts — клад сессии: ищем session_memory ЗДЕСЬ и сейчас.
+
+    Вместо «подсказать и отпустить» умный инструмент делает ранжированный
+    поиск по всем артефактам и возвращает лучшие попадания прямо в ответе —
+    модель получает результат, а не работу. downloads не затрагивает.
+    """
+    if action not in ("grep", "search", "read") or not path:
+        return ""
+    try:
+        p = os.path.realpath(path)
+    except Exception:
+        return ""
+    parts = _session_rel_parts(p)
+    if len(parts) < 2 or parts[1] not in ("artifacts", "steps"):
+        return ""
+    sess = os.path.join(_sessions_root(), parts[0])
+    try:
+        from tools.session_memory import SessionParser, _scan_content_files, _norm_text
+        toks = [t for t in re.split(r"[^\w]+", _norm_text(query)) if len(t) >= 4][:6]
+        if not toks:
+            return ("💡 artifacts — клад сессии (полные результаты инструментов). "
+                    "Поиск по нему: session_memory search query=… (ранжирует артефакты первым делом).")
+        turns = SessionParser(sess).parse_turns()
+        hits = _scan_content_files(sess, toks, turns, limit=3)
+        if not hits:
+            return ""
+        lines = [f"💡 session_memory прошёлся по ВСЕМ артефактам (клад сессии) — «{' '.join(toks[:4])}»:", ""]
+        for h in hits:
+            tid = f" (turn {h['turn_id']})" if h.get("turn_id") is not None else ""
+            lines.append(f"   {h['file']}:{h['line']}{tid}")
+            lines.append(f"      {h['snippet'][:140]}")
+        return "\n".join(lines)
+    except Exception:
+        return ""
 
 
 def _is_within_session(target_path: str, session_path: Optional[str]) -> bool:
