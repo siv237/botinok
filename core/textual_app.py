@@ -2711,12 +2711,15 @@ class BotinokTextualApp(App):
         tool_calls = entry.get("tool_calls", [])
         timestamp = entry.get("timestamp", "")
         ts_str = ""
+        ts_full = ""
         if timestamp:
             try:
                 dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
                 ts_str = dt.strftime("%H:%M:%S")
+                ts_full = dt.strftime("%d.%m.%y %H:%M:%S")
             except Exception:
                 ts_str = str(timestamp)[:8]
+                ts_full = ts_str
         if role == "user":
             raw = str(content)
             self._add_static(f"[dim]━━━ {ts_str} ━━━[/dim]")
@@ -2730,34 +2733,25 @@ class BotinokTextualApp(App):
                 self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(raw)}")
             self._add_static("")
         elif role == "assistant":
-            self._add_static("[bold green]Assistant:[/bold green]")
-            if thinking:
-                self._mount_spoiler(self._spoiler_title("Thinking", thinking), Static(self._rich_escape(thinking)), collapsed=True)
-            if content:
-                try:
-                    # История: картинки монтируем отложенно (плейсхолдер), рендер
-                    # позже — чтобы длинная история грузилась без всплеска chafa.
-                    self._mount_content_with_images(str(content), defer=True)
-                except Exception:
-                    self._add_static(self._rich_escape(str(content)))
-                self._add_static("")
-            if tool_calls:
-                for tc in tool_calls:
-                    func = tc.get("function", {})
-                    name = func.get("name", "unknown")
-                    try:
-                        args = json.loads(func.get("arguments", "{}")) if isinstance(func.get("arguments"), str) else func.get("arguments", {})
-                    except Exception:
-                        args = {}
-                    args_json = json.dumps(args, ensure_ascii=False)
-                    title = self._spoiler_title(name, args_json)
-                    # В истории спойлеры СВЁРНУТЫ — раскрывать по клику.
-                    self._mount_spoiler(title, *self._tool_call_widgets(name, args),
-                                        collapsed=True)
+            # При повторном открытии сессии — только текст ответа модели.
+            # Мысли и tool-вызовы/результаты в истории не рендерим: они
+            # превращают чат в ленту спойлеров-заголовков («web: {…}»,
+            # «Tool result: TOOL_RESULT_SUMMARY…»). Всё это доступно через
+            # session_memory (turns/get_turn/search).
+            if not content:
+                return
+            stamp = ts_full or datetime.now().strftime("%d.%m.%y %H:%M:%S")
+            self._add_static(f"[dim]▸ {stamp}[/dim]")
+            try:
+                # История: картинки монтируем отложенно (плейсхолдер), рендер
+                # позже — чтобы длинная история грузилась без всплеска chafa.
+                self._mount_content_with_images(str(content), defer=True)
+            except Exception:
+                self._add_static(self._rich_escape(str(content)))
+            self._add_static("")
         elif role == "tool":
-            title = self._spoiler_title("Tool result", str(content)[:200])
-            self._mount_spoiler(title, Static(f"[dim]{self._rich_escape(str(content)[:1000])}[/dim]"),
-                                collapsed=True)
+            # Только служебные записи — в чате не показываем.
+            return
         elif role == "system":
             pass
 
@@ -3096,9 +3090,11 @@ class BotinokTextualApp(App):
         # первым и должно остаться над ответом (хронология не нарушается).
         final_thinking = thinking or self._stream_thinking
         if final_thinking:
+            # Спойлер мысли — тем же серым, что и живой стриминг мыслей (#555555).
             title = self._spoiler_title("Thinking", final_thinking)
-            self._mount_spoiler(title, Static(self._rich_escape(final_thinking)), collapsed=True,
-                                before=self.stream_static)
+            self._mount_spoiler(f"[#555555]{title}[/#555555]",
+                                Static(f"[#555555]{self._rich_escape(final_thinking)}[/#555555]"),
+                                collapsed=True, before=self.stream_static)
 
         # Ответ конвертируем на месте в Markdown — он идёт ниже рассуждения.
         # Рассуждение КАК УЖЕ убрано из stream_static (см. спойлер выше), поэтому
@@ -3118,7 +3114,9 @@ class BotinokTextualApp(App):
                 if not mounted_md:
                     self.stream_static.update(self._rich_escape(final_content))
             else:
-                self.stream_static.update("")
+                # Пустой Static занимает строку — подряд идущие спойлеры
+                # «Thinking» оказались бы разделены пустой строкой.
+                self.stream_static.remove()
             self.stream_static = None
 
         self._last_tool_content = ""
