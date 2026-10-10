@@ -175,10 +175,10 @@ class ConfirmationScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         warn = f"{self._esc(self.warn_text)}\n" if self.warn_text else ""
         if self._switch_kind:
-            title = "[bold red]🔓 ТРЕБУЕТСЯ DANGEROUS MODE[/bold red]"
+            title = "[bold red]🔓 ТРЕБУЕТСЯ ОПАСНЫЙ РЕЖИМ[/bold red]"
             lead = ("[bold yellow]Инструмент[/bold yellow] "
                     f"{self._esc(self.tool_name)} хочет выполнить действие вне сессии.\n"
-                    "[dim]Переключиться в dangerous mode и выполнить?[/dim]")
+                    "[dim]Переключить опасный режим и выполнить?[/dim]")
         else:
             title = "[bold red]⚠️  ПОДТВЕРДИТЕ ОПАСНОЕ ДЕЙСТВИЕ[/bold red]"
             lead = (f"[bold yellow]Инструмент:[/bold yellow] {self._esc(self.tool_name)}\n"
@@ -379,10 +379,10 @@ class ConfirmInline(Vertical):
         has_cmd = self._command() is not None
         label = "Команда:" if has_cmd else "Аргументы:"
         if self._switch_kind:
-            title = "[bold red]🔓 ТРЕБУЕТСЯ DANGEROUS MODE[/bold red]"
+            title = "[bold red]🔓 ТРЕБУЕТСЯ ОПАСНЫЙ РЕЖИМ[/bold red]"
             lead = (f"[bold yellow]Инструмент[/bold yellow] {self._esc(self.tool_name)} "
                     "хочет выполнить действие вне сессии.\n"
-                    "[dim]Переключиться в dangerous mode и выполнить?[/dim]")
+                    "[dim]Переключить опасный режим и выполнить?[/dim]")
         else:
             title = "[bold red]⚠️  ПОДТВЕРДИТЕ ОПАСНОЕ ДЕЙСТВИЕ[/bold red]"
             lead = (f"[bold yellow]Инструмент:[/bold yellow] {self._esc(self.tool_name)}\n"
@@ -1383,10 +1383,12 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self._submit_text(prompt)
 
     def set_model_info(self, model: str, dangerous: bool = False, proofreader: bool = False,
-                       server: Optional[str] = None):
+                       server: Optional[str] = None, ctx: Optional[int] = None):
         self.model_name = model
         if server:
             self.stats_data["server"] = server
+        if ctx:
+            self.stats_data["session_ctx_max"] = ctx
         self.dangerous_mode = dangerous
         if dangerous:
             # Режим включён вручную — отказ от переключения больше не актуален.
@@ -1451,6 +1453,19 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             "Proofreader is thinking...": "Корректор проверяет…",
         }
         return table.get(s, s)
+
+    _TOOL_STATUS_RU = {
+        "running": "выполняется",
+        "completed": "готово",
+        "aborted": "прервано",
+        "error": "ошибка",
+    }
+
+    @classmethod
+    def _tool_status_ru(cls, status: str) -> str:
+        """Статус инструмента по-русски для показа в карточке."""
+        s = (status or "").strip()
+        return cls._TOOL_STATUS_RU.get(s, s)
 
     @staticmethod
     def _fmt_bytes_raw(n) -> str:
@@ -1887,12 +1902,17 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             self._update_shells_panel()
 
     def _render_header_text(self) -> str:
-        danger_tag = " | DANGEROUS MODE: ON" if self.dangerous_mode else ""
-        agent_type = "PROOFREADER AGENT" if self.is_proofreader else "BOTINOK AGENT"
+        danger_tag = " | ОПАСНЫЙ РЕЖИМ: ВКЛ" if self.dangerous_mode else ""
+        agent_type = "АГЕНТ-КОРРЕКТОР" if self.is_proofreader else "АГЕНТ БОТИНОК"
         vram = normalize_cells(self.stats_data.get("vram", "..."))
         ctx = self.stats_data.get("session_ctx_max", 8192)
         model = normalize_cells(self.model_name)
-        return f"{agent_type}{danger_tag} | Model: {model} | Context: {ctx} | {vram}"
+        # Видеопамять сообщает только Ollama; на OpenAI-совместимом сервере
+        # строка «No models loaded» ложная — не показываем её в шапке.
+        server_raw = str(self.stats_data.get("server", "") or "").strip().lower()
+        is_ollama = server_raw in ("", "ollama") or server_raw.startswith("ollama")
+        vram_part = f" | {vram}" if is_ollama and vram and vram != "..." else ""
+        return f"{agent_type}{danger_tag} | Модель: {model} | Контекст: {ctx}{vram_part}"
 
     def _update_header(self) -> None:
         if not self.header_display:
@@ -2214,7 +2234,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             started = "--:--:--"
         lines = [
             f"[bold cyan]Инструмент:[/bold cyan] {normalize_cells(t.get('name', ''))}",
-            f"[bold cyan]Время:[/bold cyan] {started}  [bold cyan]Статус:[/bold cyan] [{ss}]{t['status']}[/{ss}]  [bold cyan]Размер:[/bold cyan] {sz}",
+            f"[bold cyan]Время:[/bold cyan] {started}  [bold cyan]Статус:[/bold cyan] [{ss}]{self._tool_status_ru(t['status'])}[/{ss}]  [bold cyan]Размер:[/bold cyan] {sz}",
         ]
         detail = self._rich_escape(t.get("detail", ""))
         if detail:
@@ -2253,7 +2273,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             return
         if not self.active_tools:
             if self._tools_placeholder is None:
-                self._tools_placeholder = Static("[dim]No active tools[/dim]")
+                self._tools_placeholder = Static("[dim]Нет активных инструментов[/dim]")
                 try:
                     self.tools_list.mount(self._tools_placeholder)
                 except Exception:
@@ -2518,7 +2538,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             self.chat.mount(self._banner_static)
             self._logo_width_used = None
             self._request_logo_render(render_width)
-            ver = f"BOTINOK AGENT — Version {self.version}" if self.version else "BOTINOK AGENT"
+            ver = f"АГЕНТ БОТИНОК — версия {self.version}" if self.version else "АГЕНТ БОТИНОК"
             self.chat.mount(Static(f"[bold yellow]{ver}[/bold yellow]"))
             self.chat.mount(Static(""))
             self.chat.scroll_end(animate=False)
@@ -3093,7 +3113,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             parts = []
             if self._stream_thinking:
                 t = self._collapse_newlines(self._rich_escape(self._stream_thinking))
-                parts.append(f"[#555555]Thinking...[/#555555]\n[#555555]{t}[/#555555]")
+                parts.append(f"[#555555]Думает…[/#555555]\n[#555555]{t}[/#555555]")
             if tool_stream_json:
                 tool_display = self._GGUF_TAG_RE.sub("", tool_stream_json)
                 tool_display = self._GGUF_QUOTE_RE.sub('"', tool_display)
@@ -3101,11 +3121,11 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                 tool_display = re.sub(r'[\x80-\x9f]', '', tool_display)
                 tool_display = tool_display.replace("[", r"\[")
                 if any(t in tool_display for t in self._KNOWN_TOOLS) or ("call:" in tool_display) or ("{" in tool_display and ":" in tool_display):
-                    parts.append(f"[bold magenta]Tool Call:[/bold magenta]\n{tool_display}")
+                    parts.append(f"[bold magenta]Команда:[/bold magenta]\n{tool_display}")
             if self._stream_content:
                 t = self._collapse_newlines(
                     self._rich_escape(self._mask_image_tokens(self._stream_content)))
-                parts.append(f"[#555555]Response:[/#555555]\n[#555555]{t}[/#555555]")
+                parts.append(f"[#555555]Ответ:[/#555555]\n[#555555]{t}[/#555555]")
             self.stream_static.update("\n\n".join(parts) if parts else "")
 
     def finalize_assistant_turn(self, content: str, thinking: str = "",
@@ -3117,7 +3137,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         final_thinking = thinking or self._stream_thinking
         if final_thinking:
             # Спойлер мысли — тем же серым, что и живой стриминг мыслей (#555555).
-            title = self._spoiler_title("Thinking", final_thinking)
+            title = self._spoiler_title("Размышление", final_thinking)
             self._mount_spoiler(f"[#555555]{title}[/#555555]",
                                 Static(f"[#555555]{self._rich_escape(final_thinking)}[/#555555]"),
                                 collapsed=True, before=self.stream_static)
@@ -3280,6 +3300,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         name = normalize_cells(t.get("name", ""))
         status = str(t.get("status", ""))
         ss = "yellow" if status == "running" else "green" if status == "completed" else "red"
+        status = self._tool_status_ru(status)
         state = self._tool_state(t)
 
         # -5: стрелка Collapsible + её отступы, чтобы строка гарантированно не переносилась.

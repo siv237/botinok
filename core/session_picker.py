@@ -195,7 +195,7 @@ class _SessionActions(ModalScreen):
 
 def _relative_time(timestamp) -> str:
     if not timestamp:
-        return "unknown"
+        return "нет данных"
     try:
         diff = datetime.now().timestamp() - float(timestamp)
         if diff < 60:
@@ -205,17 +205,17 @@ def _relative_time(timestamp) -> str:
         if diff < 86400:
             return f"{int(diff / 3600)} час назад"
         if diff < 604800:
-            return f"{int(diff / 86400)} дн назад"
+            return f"{int(diff / 604800)} дн назад"
         return f"{int(diff / 604800)} нед назад"
     except Exception:
-        return "unknown"
+        return "нет данных"
 
 
 def _absolute_time(mtime) -> str:
     try:
         return datetime.fromtimestamp(float(mtime)).strftime("%H:%M %d.%m.%y")
     except Exception:
-        return "unknown"
+        return "нет данных"
 
 
 class _MenuScreen(Screen):
@@ -287,7 +287,7 @@ class _NamePrompt(ModalScreen):
             yield Static(self._prompt)
             yield Input(placeholder="название", id="pk_name_input")
             with Horizontal(id="pk_name_buttons"):
-                yield Button("OK", variant="primary", id="pk_name_ok")
+                yield Button("ОК", variant="primary", id="pk_name_ok")
                 yield Button("Отмена", id="pk_name_no")
 
     def on_mount(self) -> None:
@@ -562,7 +562,7 @@ class _ListScreen(Screen):
         flt = (flt or "").strip().lower()
         for s in self._sessions():
             path = s.get("path") or ""
-            name = s.get("name") or "(unknown)"
+            name = s.get("name") or "(без названия)"
             preview = self._meta.get(path, {}).get("preview")
             sign = self._meta.get(path, {}).get("sign")
             hay = " ".join([name, str(preview or ""), str(sign or "")]).lower()

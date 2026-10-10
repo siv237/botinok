@@ -5,6 +5,7 @@ Textual History Viewer - просмотр истории с прокруткой
 """
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.widgets import RichLog, Header, Footer
 from core import themes as botinok_themes
 import json
@@ -15,6 +16,10 @@ from typing import Optional
 
 class HistoryViewerApp(botinok_themes.ThemedAppMixin, App):
     """Textual приложение для просмотра истории сессии."""
+
+    TITLE = "История сессии"
+    ENABLE_COMMAND_PALETTE = False
+    BINDINGS = [Binding("q", "quit", "Выход")]
 
     CSS = """
     Screen {
@@ -46,12 +51,12 @@ class HistoryViewerApp(botinok_themes.ThemedAppMixin, App):
     def load_history(self) -> None:
         """Загружает историю сессии из context.json."""
         if not self.session_path:
-            self.rich_log.write("[yellow]No session path specified[/yellow]")
+            self.rich_log.write("[yellow]Путь к сессии не указан[/yellow]")
             return
 
         context_path = os.path.join(self.session_path, "context.json")
         if not os.path.exists(context_path):
-            self.rich_log.write(f"[red]Session not found: {context_path}[/red]")
+            self.rich_log.write(f"[red]Сессия не найдена: {context_path}[/red]")
             return
 
         try:
@@ -68,9 +73,9 @@ class HistoryViewerApp(botinok_themes.ThemedAppMixin, App):
 
                 self._add_entry(role, content, thinking, timestamp, tool_calls)
 
-            self.rich_log.write(f"\n[dim]Total: {len(history)} messages[/dim]")
+            self.rich_log.write(f"\n[dim]Всего сообщений: {len(history)}[/dim]")
         except Exception as e:
-            self.rich_log.write(f"[red]Error loading history: {e}[/red]")
+            self.rich_log.write(f"[red]Не удалось загрузить историю: {e}[/red]")
 
     def _add_entry(self, role: str, content: str, thinking: str,
                    timestamp: str, tool_calls: Optional[list] = None) -> None:
@@ -88,25 +93,25 @@ class HistoryViewerApp(botinok_themes.ThemedAppMixin, App):
 
         if role == "user":
             self.rich_log.write(f"[dim]━━━ {ts_str} ━━━[/dim]")
-            self.rich_log.write(f"[bold blue]User:[/bold blue] {content}")
+            self.rich_log.write(f"[bold blue]Вы:[/bold blue] {content}")
             self.rich_log.write("")
 
         elif role == "assistant":
             if thinking:
-                self.rich_log.write("[dim]─── thinking ───[/dim]")
+                self.rich_log.write("[dim]─── размышление ───[/dim]")
                 self.rich_log.write(f"[dim]{thinking}[/dim]")
                 self.rich_log.write("")
 
             if content:
-                self.rich_log.write("[bold green]Assistant:[/bold green]")
+                self.rich_log.write("[bold green]Ботинок:[/bold green]")
                 self.rich_log.write(content)
                 self.rich_log.write("")
 
             if tool_calls:
                 for tc in tool_calls:
                     func = tc.get("function", {})
-                    tool_name = func.get("name", "unknown")
-                    self.rich_log.write(f"[bold yellow]Tool: {tool_name}[/bold yellow]")
+                    tool_name = func.get("name", "неизвестно")
+                    self.rich_log.write(f"[bold yellow]Инструмент: {tool_name}[/bold yellow]")
 
         elif role == "tool":
             content_str = str(content)
