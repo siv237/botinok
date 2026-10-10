@@ -36,10 +36,6 @@ from core.shell_session import ShellSession, ShellSessionRegistry
 MAX_TAIL_CHARS = 6000
 
 
-def _project_root() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-
 def _result(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -172,7 +168,9 @@ def shell_exec(
     if action == "run":
         if not command or not str(command).strip():
             return _result({"error": "command пустой"})
-        run_cwd = _project_root() if not cwd else os.path.realpath(cwd)
+        # По умолчанию — папка, из которой запущен ботинок (не папка установки):
+        # «ls» должен показывать то, что видит пользователь.
+        run_cwd = os.getcwd() if not cwd else os.path.realpath(cwd)
 
         session = ShellSession(
             command=command,

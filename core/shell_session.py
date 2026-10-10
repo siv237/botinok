@@ -295,6 +295,23 @@ class ShellSession:
             if callback not in self._subscribers:
                 self._subscribers.append(callback)
 
+    def subscribe_flush(self, callback) -> None:
+        """Подписаться и сразу отдать уже накопленный сырой вывод.
+
+        Атомарно под локом: быстрый вывод (ls) успевает пройти до подписки —
+        без «догона» подписчик его бы не увидел. Порядок с ридером сериализуется
+        тем же локом, поэтому дублей и потерь нет.
+        """
+        with self._lock:
+            if callback not in self._subscribers:
+                self._subscribers.append(callback)
+            snapshot = bytes(self._raw)
+        if snapshot:
+            try:
+                callback(snapshot)
+            except Exception:
+                pass
+
     def unsubscribe(self, callback) -> None:
         with self._lock:
             try:
