@@ -74,6 +74,10 @@ class SessionManager:
         # Разворачиваем ~ и $HOME для текущего пользователя
         self.base_path = os.path.expanduser(self.base_path)
         self.base_path = os.path.expandvars(self.base_path)
+        # Относительный SessionsDir привязан к папке установки (как раньше),
+        # а не к cwd запуска — иначе сессии сваливались бы в проект пользователя.
+        if not os.path.isabs(self.base_path):
+            self.base_path = os.path.join(_INSTALL_DIR, self.base_path)
         self.last_chunk_time = None
         if not os.path.exists(self.base_path):
             try:
