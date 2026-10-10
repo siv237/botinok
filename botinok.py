@@ -1395,7 +1395,7 @@ def main():
                                           TZNAME=now.tzname() or "unknown")
         session_location_msg = sm.load_prompt(session_path, "session_location",
                                                SESSION_PATH=session_path,
-                                               CWD=os.getcwd(),
+                                               CWD=os.environ.get("BOTINOK_LAUNCH_DIR") or os.getcwd(),
                                                PROJECT_DIR=os.path.join(session_path, 'project'))
         session_files_msg = sm.load_prompt(session_path, "session_files",
                                             SESSION_PATH=session_path,
@@ -1652,7 +1652,7 @@ def main():
     
     session_location_msg = sm.load_prompt(session_path, "session_location",
                                           SESSION_PATH=session_path,
-                                          CWD=os.getcwd(),
+                                          CWD=os.environ.get("BOTINOK_LAUNCH_DIR") or os.getcwd(),
                                           PROJECT_DIR=os.path.join(session_path, 'project'))
     
     session_files_msg = sm.load_prompt(session_path, "session_files",
