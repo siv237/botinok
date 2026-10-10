@@ -78,6 +78,26 @@ def allowed_in_session(name, args, session_path) -> bool:
     # shell_exec всегда опасен и не привязан к папке сессии.
     return False
 
+
+def requires_dangerous(name, args, session_path) -> bool:
+    """True — вызов упрётся в гейт dangerous mode в `call_tool`.
+
+    Тот же источник политики, что и гейт: используется, чтобы спросить
+    пользователя ДО попытки выполнить опасное действие (headless-режим).
+    """
+    if not isinstance(args, dict):
+        return False
+    action = args.get("action")
+    if name == "shell_exec":
+        return (action or "run") in DANGEROUS_SHELL_ACTIONS
+    if name in ("code_editor", "file_system"):
+        gate_action = editor_action_of(args) if name == "code_editor" else action
+        return (gate_action in (DANGEROUS_EDITOR_ACTIONS + DANGEROUS_FILESYSTEM_ACTIONS)
+                and not allowed_in_session(name, args, session_path))
+    if name in ("curl", "web"):
+        return bool(args.get("output_path")) and not allowed_in_session(name, args, session_path)
+    return False
+
 def log_tool_error(tool_name, error_type, error_msg, traceback_str):
     """Логирует ошибку загрузки инструмента"""
     os.makedirs(os.path.dirname(TOOLS_LOG), exist_ok=True)

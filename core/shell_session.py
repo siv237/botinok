@@ -77,6 +77,7 @@ class ShellSession:
         rows: int = 24,
         cols: int = 100,
         name: str = "",
+        botinok_session: Optional[str] = None,
     ) -> None:
         self.session_id = f"sh_{uuid.uuid4().hex[:8]}"
         self.name = name or command
@@ -86,6 +87,19 @@ class ShellSession:
         self.rows = int(rows) if rows else 24
         self.cols = int(cols) if cols else 100
         self.env = env
+
+        # Сырой вывод «как есть» (байт в байт, с ANSI) — в файл сессии ботинка,
+        # для аудита и чтения через file_system. Буфер в памяти кольцевой,
+        # файл — полная хронология.
+        self.raw_log_path: Optional[str] = None
+        self._raw_log_fh = None
+        if botinok_session:
+            try:
+                log_dir = os.path.join(botinok_session, "shell")
+                os.makedirs(log_dir, exist_ok=True)
+                self.raw_log_path = os.path.join(log_dir, f"{self.session_id}.log")
+            except Exception:
+                self.raw_log_path = None
 
         self._master: Optional[int] = None
         self._slave: Optional[int] = None
@@ -116,6 +130,11 @@ class ShellSession:
 
     def start(self) -> None:
         """Открывает PTY и запускает процесс. Неблокирующий."""
+        if self.raw_log_path and self._raw_log_fh is None:
+            try:
+                self._raw_log_fh = open(self.raw_log_path, "ab")
+            except Exception:
+                self._raw_log_fh = None
         self._master, self._slave = pty.openpty()
 
         # Неблокирующее чтение мастера —	reader крутит select().
@@ -245,6 +264,12 @@ class ShellSession:
         with self._lock:
             self._total_raw_bytes += len(chunk)
             self._raw.extend(chunk)
+            if self._raw_log_fh:
+                try:
+                    self._raw_log_fh.write(chunk)
+                    self._raw_log_fh.flush()
+                except Exception:
+                    pass
             clean = _strip_ansi(chunk)
             self._total_clean_bytes += len(clean)
             self._partial += clean
@@ -493,6 +518,12 @@ class ShellSession:
                 except OSError:
                     pass
                 setattr(self, fd_attr, None)
+        if self._raw_log_fh is not None:
+            try:
+                self._raw_log_fh.close()
+            except Exception:
+                pass
+            self._raw_log_fh = None
 
     # -------------------------------------------------------------- summary
 

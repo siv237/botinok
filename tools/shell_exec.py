@@ -155,6 +155,7 @@ def shell_exec(
     interactive: bool = True,
     name: str = "",
     env: Optional[Dict[str, str]] = None,
+    session_path: Optional[str] = None,
 ) -> str:
     """Главная точка входа инструмента shell_exec.
 
@@ -179,6 +180,7 @@ def shell_exec(
             timeout_sec=max(0, int(timeout_sec or 0)),
             name=name or command,
             env=env,
+            botinok_session=session_path,
         )
         try:
             session.start()
@@ -217,9 +219,11 @@ def shell_exec(
             "elapsed": round(session.elapsed, 2),
             "lines_total": st["lines_total"],
             "output_tail": _tail_for_context(session, tail_lines),
+            "raw_log": session.raw_log_path or "",
             "hint": (
                 "Сессия выполняется в фоне и не держит тебя. Командуй дальше: "
-                f"action=status/read/search/send/send_key/wait/kill с session_id={session.session_id}."
+                f"action=status/read/search/send/send_key/wait/kill с session_id={session.session_id}. "
+                "Полный сырой вывод пишется в raw_log — читай его через file_system read."
             ),
         })
 
