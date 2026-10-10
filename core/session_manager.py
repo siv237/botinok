@@ -87,15 +87,95 @@ class SessionManager:
         except OSError:
             return 0
 
+    # Файлы/папки, появление которых означает «в сессии был реальный диалог».
+    # Скелет create_session (context.json с history=[], prompts/, пустые
+    # steps/artifacts/project/proofreader) содержимым не считается.
+    _CONTENT_FILES = ("response.md", "thinking.md", "tools.log", "session_raw.log",
+                      "messages.json", "signatures.json", "performance.log")
+    _CONTENT_DIRS = ("steps", "artifacts", "project", "proofreader", "downloads")
+
+    def session_is_empty(self, session_path: str) -> bool:
+        """True, если сессия — только скелет: ни истории, ни следов работы.
+
+        Дёшево: смотрим начало context.json (у пустой сессии `"history": []`
+        в первых байтах) и наличие содержательных файлов. Полный разбор
+        мегабайтных context.json не делаем.
+        """
+        ctx = os.path.join(session_path, "context.json")
+        try:
+            with open(ctx, "r", encoding="utf-8", errors="ignore") as f:
+                head = f.read(4096)
+        except OSError:
+            head = ""
+        if head and not re.search(r'"history"\s*:\s*\[\s*\]', head):
+            return False
+        for fname in self._CONTENT_FILES:
+            try:
+                if os.path.getsize(os.path.join(session_path, fname)) > 0:
+                    return False
+            except OSError:
+                pass
+        for sub in self._CONTENT_DIRS:
+            try:
+                if os.listdir(os.path.join(session_path, sub)):
+                    return False
+            except OSError:
+                pass
+        return True
+
+    def prune_empty_session(self, session_path: str) -> bool:
+        """Удаляет папку сессии, если в ней так и не началось общение."""
+        try:
+            if session_path and os.path.isdir(session_path) and self.session_is_empty(session_path):
+                shutil.rmtree(session_path, ignore_errors=True)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def prune_stale_empty_sessions(self, min_age_sec: int = 600) -> list:
+        """Прибирает пустые сессии старше min_age_sec.
+
+        Свежие пустые папки не трогаем: в них мог прямо сейчас сидеть
+        другой запущенный экземпляр, ещё не получивший первое сообщение.
+        """
+        pruned = []
+        try:
+            names = os.listdir(self.base_path)
+        except OSError:
+            return pruned
+        now = time.time()
+        for name in names:
+            p = os.path.join(self.base_path, name)
+            if not os.path.isdir(p):
+                continue
+            try:
+                if now - os.path.getmtime(p) < min_age_sec:
+                    continue
+            except OSError:
+                continue
+            if self.session_is_empty(p):
+                try:
+                    shutil.rmtree(p, ignore_errors=True)
+                    pruned.append(p)
+                except OSError:
+                    pass
+        return pruned
+
     def list_sessions(self):
-        """Возвращает список существующих сессий в base_path (новые сверху)."""
+        """Возвращает список сессий с содержимым в base_path (новые сверху).
+
+        Пустые сессии (скелет без диалога) не показываем: они создаются при
+        старте «Начать новую» и остаются мёртвыми, если пользователь вышел,
+        так и не написав ни слова.
+        """
         try:
             if not os.path.exists(self.base_path):
                 return []
             items = []
             for name in os.listdir(self.base_path):
                 p = os.path.join(self.base_path, name)
-                if os.path.isdir(p):
+                if os.path.isdir(p) and not self.session_is_empty(p):
                     items.append({
                         "name": name,
                         "path": p,
@@ -255,6 +335,32 @@ class SessionManager:
             pass
 
         return ""
+
+    _SIGN_ICONS = {"answered": "✓", "progress": "▸", "blocked": "⚠", "decision": "◆"}
+
+    def load_last_sign_note(self, session_path: str, max_chars: int = 160) -> str:
+        """Краткая строка последней подписи sign_step: «иконка done/goal».
+
+        signatures.json — хронология шагов модели; берём последнюю запись,
+        она описывает, чем бот занимался в сессии на момент выхода.
+        """
+        try:
+            with open(os.path.join(session_path, "signatures.json"),
+                      "r", encoding="utf-8", errors="ignore") as f:
+                records = json.load(f)
+        except Exception:
+            return ""
+        if not isinstance(records, list) or not records:
+            return ""
+        last = records[-1] if isinstance(records[-1], dict) else {}
+        text = str(last.get("done") or last.get("goal") or "").strip()
+        text = re.sub(r"\s+", " ", text)
+        if not text:
+            return ""
+        if len(text) > max_chars:
+            text = text[:max_chars].rstrip() + "…"
+        icon = self._SIGN_ICONS.get(str(last.get("status") or ""), "▸")
+        return f"{icon} {text}"
 
     def ensure_session_subdir(self, session_path: str, subdir_name: str) -> str:
         subdir_path = os.path.join(session_path, subdir_name)
