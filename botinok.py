@@ -1309,10 +1309,6 @@ def main():
     
     sm = SessionManager()
     
-    # Уведомление о используемом конфиге — в stderr, чтобы stdout оставался чистым
-    if sm.config_source == "personal":
-        print(f"Using personal config: {sm.config_path}", file=sys.stderr)
-    
     default_model = sm.config.get('Ollama', 'DefaultModel', fallback='qwen3.5:9b')
     default_ctx = sm.config.getint('Ollama', 'DefaultContext', fallback=8192)
 
@@ -1341,6 +1337,11 @@ def main():
                         help="Ключ для openai-бэкенда, без ввода в мастере (env BOTINOK_API_KEY)")
 
     args = parser.parse_args()
+
+    # Уведомление о используемом конфиге — в stderr, чтобы stdout оставался чистым.
+    # В --stealth молчим: там ожидается только ответ.
+    if sm.config_source == "personal" and not args.stealth:
+        print(f"Using personal config: {sm.config_path}", file=sys.stderr)
 
     # Переопределение бэкенда из флагов/окружения: позволяет запуститься
     # одной строкой вообще без config.cfg и мастера. В конфиг не пишем;
@@ -1579,7 +1580,7 @@ def main():
             })
             Console(highlight=False, theme=flat).print(Markdown(text, code_theme=theme))
         else:
-            out(text)
+            out(text.strip())
 
     # Прогресс — только живому терминалу; в pipe и при --stealth stdout/stderr чистые.
     # События инструментов — приглушённой строкой с маркером, не сырым JSON.
