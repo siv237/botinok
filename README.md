@@ -189,6 +189,15 @@ botinok -m qwen3.5:9b -c 16384 --dangerous
 - `--ensure-deps`: Проверить и установить системные зависимости (chafa, ffmpeg, aria2 и др.).
 - `--view-history PATH`: Открыть историю сессии в просмотрщике с прокруткой.
 - `--debug`: Включить отладочный вывод.
+- `--version`: Показать версию и дату коммита.
+- `--backend ollama|openai`: Бэкенд без конфига и мастера (env `BOTINOK_BACKEND`).
+- `--base-url URL`: Адрес сервера без `/v1`, напр. `http://localhost:11434` или `https://api.openai.com` (env `BOTINOK_BASE_URL`).
+- `--api-key KEY`: Ключ для openai-бэкенда, без ввода в мастере (env `BOTINOK_API_KEY`).
+
+Полный запуск одной строкой, вообще без `config.cfg` и мастера:
+```bash
+botinok --backend openai --base-url https://api.openai.com --api-key sk-... -m gpt-4o --once "Привет"
+```
 - `--proofread`: Режим корректора (цикл: Исполнитель → Корректор).
 
 ### 6. Обновление

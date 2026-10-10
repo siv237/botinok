@@ -1315,8 +1315,6 @@ def main():
     
     default_model = sm.config.get('Ollama', 'DefaultModel', fallback='qwen3.5:9b')
     default_ctx = sm.config.getint('Ollama', 'DefaultContext', fallback=8192)
-    ollama_base_url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
-    OLLAMA_CHAT_URL = f"{ollama_base_url}/api/chat"
 
     parser.add_argument("prompt_pos", nargs="?", help="Initial prompt (optional)")
     parser.add_argument("-p", "--prompt", help="Initial prompt")
@@ -1332,8 +1330,34 @@ def main():
     parser.add_argument("--ensure-deps", action="store_true", help="Проверить и установить системные зависимости (chafa, ffmpeg, aria2 и др.)")
     parser.add_argument("--view-history", metavar="SESSION_PATH", help="Просмотр истории сессии через Textual (с прокруткой)")
     parser.add_argument("--version", action="version", version=f"BOTINOK {_BOTINOK_VERSION}", help="Показать версию и дату коммита")
+    parser.add_argument("--backend", choices=("ollama", "openai"),
+                        default=(os.environ.get("BOTINOK_BACKEND") or "").strip().lower() or None,
+                        help="Бэкенд без конфига и мастера: ollama | openai (env BOTINOK_BACKEND)")
+    parser.add_argument("--base-url",
+                        default=(os.environ.get("BOTINOK_BASE_URL") or "").strip() or None,
+                        help="Адрес сервера без /v1, напр. http://localhost:11434 или https://api.openai.com (env BOTINOK_BASE_URL)")
+    parser.add_argument("--api-key",
+                        default=(os.environ.get("BOTINOK_API_KEY") or "").strip() or None,
+                        help="Ключ для openai-бэкенда, без ввода в мастере (env BOTINOK_API_KEY)")
 
     args = parser.parse_args()
+
+    # Переопределение бэкенда из флагов/окружения: позволяет запуститься
+    # одной строкой вообще без config.cfg и мастера. В конфиг не пишем;
+    # прокидываем в env — его увидят и другие экземпляры SessionManager
+    # (stealth-цикл, TUI), а apply_env_overrides применит их при создании.
+    if args.backend:
+        os.environ["BOTINOK_BACKEND"] = args.backend
+    if args.base_url:
+        os.environ["BOTINOK_BASE_URL"] = args.base_url
+    if args.api_key:
+        os.environ["BOTINOK_API_KEY"] = args.api_key
+    if args.backend or args.base_url or args.api_key:
+        from core.session_manager import apply_env_overrides
+        apply_env_overrides(sm.config)
+
+    ollama_base_url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+    OLLAMA_CHAT_URL = f"{ollama_base_url}/api/chat"
 
     # Установка системных зависимостей (без обновления кода).
     if args.ensure_deps:

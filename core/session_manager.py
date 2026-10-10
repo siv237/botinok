@@ -13,6 +13,28 @@ import re
 
 _INSTALL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+
+def apply_env_overrides(config) -> None:
+    """Переопределения бэкенда из окружения (BOTINOK_BACKEND/BASE_URL/API_KEY).
+
+    CLI-флаги ботинок прокидывает в env, чтобы их видели ВСЕ экземпляры
+    SessionManager (stealth-цикл и TUI создают свои), а config.cfg не портился.
+    """
+    env_backend = os.getenv("BOTINOK_BACKEND", "").strip().lower()
+    env_base = os.getenv("BOTINOK_BASE_URL", "").strip()
+    env_key = os.getenv("BOTINOK_API_KEY", "").strip()
+    if not (env_backend or env_base or env_key):
+        return
+    if not config.has_section('Ollama'):
+        config.add_section('Ollama')
+    if env_backend:
+        config.set('Ollama', 'Backend', env_backend)
+    if env_base:
+        config.set('Ollama', 'BaseUrl', env_base.rstrip('/'))
+    if env_key:
+        config.set('Ollama', 'ApiKey', env_key)
+
+
 class SessionManager:
     def __init__(self):
         self.config = configparser.ConfigParser()
@@ -41,6 +63,8 @@ class SessionManager:
             # Дефолтные значения, если конфиг не найден
             self.config['Ollama'] = {'BaseUrl': 'http://localhost:11434', 'DefaultModel': 'qwen3.5:9b', 'DefaultContext': '8192'}
             self.config['Storage'] = {'SessionsDir': '~/.botinok/sessions', 'StepsSubDir': 'steps'}
+
+        apply_env_overrides(self.config)
             
         self.base_path = self.config.get('Storage', 'SessionsDir', fallback='sessions')
         # Явное переопределение (тесты/скрипты), чтобы не сорить в рабочих сессиях.
