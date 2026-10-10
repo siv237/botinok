@@ -266,6 +266,93 @@ class ConfirmationScreen(ModalScreen):
             event.stop()
 
 
+class StopInterruptScreen(ModalScreen):
+    """Esc во время работы инструмента: диалог согласия на жёсткое прерывание.
+
+    Перечисляет работающие инструменты (имя, живая деталь/запрос, сколько
+    работают). y/Enter — жёсткое прерывание: убийство групп процессов через
+    process_control.kill_all, срабатывает и для зависших инструментов, которые
+    не проверяют флаг. n/esc — обычное (мягкое) прерывание: процессы сами
+    увидят флаг и аккуратно завершатся.
+    """
+
+    CSS = """
+    StopInterruptScreen { align: center middle; }
+    #stop_box { width: 76%; height: auto; border: solid $err; padding: 1 2;
+                background: $surface; }
+    #stop_tools { height: auto; max-height: 12; padding: 0 0 1 0; }
+    #stop_options { height: auto; border: none; padding: 0;
+                    background: transparent; width: 1fr; }
+    #stop_options:focus { border: none; }
+    """
+
+    def __init__(self, running_tools, on_resolve: Optional[Callable] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.running_tools = list(running_tools or [])
+        self.on_resolve = on_resolve
+        self._options: Optional[OptionList] = None
+
+    def _esc(self, text: str) -> str:
+        return str(text or "").replace("[", r"\[")
+
+    def _dur(self, secs: float) -> str:
+        secs = int(max(0, secs))
+        if secs < 60:
+            return f"{secs} с"
+        if secs < 3600:
+            return f"{secs // 60} мин {secs % 60:02d} с"
+        return f"{secs // 3600} ч {(secs % 3600) // 60:02d} мин"
+
+    def compose(self) -> ComposeResult:
+        now = time.time()
+        lines = []
+        for t in self.running_tools:
+            try:
+                started = now - float(t.get("start_time") or now)
+            except Exception:
+                started = 0.0
+            detail = str(t.get("detail") or t.get("query") or "").strip()
+            line = (f"[cyan]{self._esc(str(t.get('name') or '?'))}[/cyan] "
+                    f"[dim]{self._dur(started)}[/dim]")
+            if detail:
+                line += f" [dim]{self._esc(detail[:70])}[/dim]"
+            lines.append(line)
+        tools_text = "\n".join(lines) if lines else "[dim]инструменты уже завершились[/dim]"
+        with Vertical(id="stop_box"):
+            yield Static("[bold red]⏹ Работают инструменты[/bold red]")
+            yield Static(tools_text, id="stop_tools")
+            self._options = OptionList(
+                Option("⛔ Жёстко прервать — убить процессы инструментов", id="hard"),
+                Option("⏹ Прервать обычно — аккуратная остановка", id="soft"),
+                id="stop_options")
+            yield self._options
+            yield Static("[dim]y/Enter — жёстко · n/esc — обычное прерывание · "
+                         "↑↓ — выбор[/dim]")
+
+    def on_mount(self) -> None:
+        if self._options:
+            self._options.focus()
+
+    def _resolve(self, hard: bool) -> None:
+        try:
+            if self.on_resolve:
+                self.on_resolve(hard)
+        finally:
+            self.app.pop_screen()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self._resolve((getattr(event.option, "id", "") or "") == "hard")
+
+    def on_key(self, event) -> None:
+        k = event.key.lower()
+        if k in ("y", "д", "enter"):
+            self._resolve(True)
+            event.stop()
+        elif k in ("n", "т", "escape"):
+            self._resolve(False)
+            event.stop()
+
+
 class ApiKeyScreen(ModalScreen):
     """Окошко ввода API-ключа.
 
@@ -557,8 +644,7 @@ class Composer(TextArea):
             app = self.app
             if app.turn_in_progress():
                 try:
-                    app.request_stop()
-                    app._log_stop_once()
+                    app.handle_escape()
                 except Exception:
                     pass
                 return
@@ -827,6 +913,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self.is_streaming = False
         self._stop_requested = False
         self._stop_logged = False
+        self._stop_dialog_open = False
         self._user_scrolled_away = False
         self._last_scroll_y: Optional[float] = None
         self._queued_inputs: List[str] = []
@@ -1486,6 +1573,9 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
 
     def _tick_stats(self) -> None:
         now = time.time()
+        # Диалог остановки больше не нужен, если ход уже завершился сам.
+        if self._stop_dialog_open and not self.turn_in_progress():
+            self._dismiss_stop_dialog()
         # Раз в 30 секунд обновляем относительное время у вопросов в Diagnostic Log.
         if now - self._diag_last_refresh > 30:
             self._footer_dirty = True
@@ -2830,6 +2920,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self.dangerous_switch_denied = False
         self._stop_requested = False
         self._stop_logged = False
+        self._dismiss_stop_dialog()
         if _pc is not None:
             _pc.clear_stop()
 
@@ -3002,10 +3093,64 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             self._stop_logged = True
             self.append_log("[dim]⏹ Остановлено. Прерываю действие и завершаю ход…[/dim]")
 
-    def on_key(self, event) -> None:
-        if event.key == "escape" and self.turn_in_progress():
+    def _open_stop_dialog(self, running_tools) -> None:
+        """Esc при работающих инструментах: спросить про жёсткое прерывание."""
+        self._stop_dialog_open = True
+        try:
+            self.push_screen(StopInterruptScreen(running_tools,
+                                                 on_resolve=self._apply_stop_choice))
+        except Exception:
+            self._stop_dialog_open = False
             self.request_stop()
             self._log_stop_once()
+
+    def _apply_stop_choice(self, hard: bool) -> None:
+        """Колбэк диалога остановки (UI-поток): hard — убить процессы, иначе мягко."""
+        self._stop_dialog_open = False
+        if hard:
+            self._stop_requested = True
+            if _pc is not None:
+                # kill_all ждёт до grace секунд — не вешаем UI-поток.
+                threading.Thread(target=_pc.request_stop, daemon=True).start()
+            if not self._stop_logged:
+                self._stop_logged = True
+                self.append_log("[bold red]⏹ Жёсткое прерывание: убиваю процессы "
+                                "инструментов…[/bold red]")
+        else:
+            self.request_stop()
+            self._log_stop_once()
+
+    def _dismiss_stop_dialog(self) -> None:
+        """Закрыть диалог остановки, если он ещё открыт (ход уже завершился)."""
+        if not self._stop_dialog_open:
+            return
+        self._stop_dialog_open = False
+        try:
+            if isinstance(self.screen, StopInterruptScreen):
+                self.pop_screen()
+        except Exception:
+            pass
+
+    def handle_escape(self) -> None:
+        """Центральная маршрутизация Esc при идущем ходе (общая для App,
+        Composer и встроенного терминала — они перехватывают Esc до App.on_key).
+
+        Работает инструмент → диалог согласия на жёсткое прерывание с
+        перечислением инструментов; обычный Esc В ДИАЛОГЕ = простое (мягкое)
+        прерывание. Идут только данные модели → мягкая остановка сразу.
+        """
+        if not self.turn_in_progress():
+            return
+        running = [t for t in self.active_tools if t.get("status") == "running"]
+        if running and not self._stop_dialog_open:
+            self._open_stop_dialog(running)
+        elif not running:
+            self.request_stop()
+            self._log_stop_once()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape" and self.turn_in_progress():
+            self.handle_escape()
             event.stop()
 
     def on_mouse_down(self, event) -> None:

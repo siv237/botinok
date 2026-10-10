@@ -154,11 +154,14 @@ def maybe_stop_from_terminal(widget, event) -> bool:
     app = getattr(widget, "app", None)
     try:
         if app is not None and getattr(app, "turn_in_progress", None) and app.turn_in_progress():
-            app.request_stop()
-            try:
-                app._log_stop_once()
-            except Exception:
-                pass
+            if getattr(app, "handle_escape", None):
+                app.handle_escape()
+            else:
+                app.request_stop()
+                try:
+                    app._log_stop_once()
+                except Exception:
+                    pass
             event.stop()
             return True
     except Exception:

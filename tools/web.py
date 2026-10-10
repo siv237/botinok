@@ -618,12 +618,16 @@ def _aria2c_download_streaming(cmd, dest, torrent, work_dir, hard_timeout,
     """Загрузка aria2c со стримингом прогресса (для живой панели)."""
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, bufsize=1)
+                                text=True, bufsize=1,
+                                start_new_session=(os.name == "posix"))
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+    if _pc:
+        _pc.register(proc)
     lines: List[str] = []
     deadline = time.time() + hard_timeout
     last = 0.0
+    stopped = False
     try:
         for line in proc.stdout:
             lines.append(line)
@@ -636,11 +640,20 @@ def _aria2c_download_streaming(cmd, dest, torrent, work_dir, hard_timeout,
                 text = f"⬇ {pct}% ({done}/{total})" + (f" · {dl}/s" if dl else "")
                 _emit_progress(progress_callback, text)
                 last = now
+            if _pc and _pc.stop_requested():
+                stopped = True
+                _pc.terminate(proc)
+                break
             if now > deadline:
                 proc.kill()
                 return False, "aria2c timeout"
     except Exception:
         pass
+    finally:
+        if _pc:
+            _pc.unregister(proc)
+    if stopped:
+        return False, "остановлено пользователем"
     rc = proc.wait()
     output = "".join(lines)
     if rc != 0:
