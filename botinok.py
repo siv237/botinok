@@ -1270,6 +1270,13 @@ def run_proofreader_turn(model, session_path, num_ctx, developer_messages):
     return feedback, verdict_path
 
 def main():
+    # Лаунчер делает cd в папку установки — возвращаем реальную папку запуска:
+    # cwd, относительные пути инструментов («.») и shell по умолчанию должны
+    # указывать на проект пользователя, а не на /opt/botinok.
+    launch_dir = os.environ.get("BOTINOK_LAUNCH_DIR")
+    if launch_dir and os.path.isdir(launch_dir):
+        os.chdir(launch_dir)
+
     parser = argparse.ArgumentParser(description="BOTINOK AGENT - Interactive AI Assistant")
     
     sm = SessionManager()

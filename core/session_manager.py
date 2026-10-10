@@ -11,13 +11,15 @@ from typing import Optional
 import requests
 import re
 
+_INSTALL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 class SessionManager:
     def __init__(self):
         self.config = configparser.ConfigParser()
         
         # Приоритет конфигов: персональный > локальный > системный
         personal_config = os.path.expanduser("~/.config/botinok/config.cfg")
-        local_config = "config.cfg"
+        local_config = os.path.join(_INSTALL_DIR, "config.cfg")
         system_config = os.getenv("BOTINOK_CONFIG", "/opt/botinok/config.cfg")
         
         self.config_path = None
@@ -440,8 +442,9 @@ class SessionManager:
         
         # Fallback на глобальные промпты
         if not os.path.exists(prompt_file):
-            if os.path.exists(f"prompts/{prompt_name}.txt"):
-                prompt_file = f"prompts/{prompt_name}.txt"
+            install_prompt = os.path.join(_INSTALL_DIR, "prompts", f"{prompt_name}.txt")
+            if os.path.exists(install_prompt):
+                prompt_file = install_prompt
             else:
                 global_file = os.path.join(os.path.dirname(self.config_path), "prompts", f"{prompt_name}.txt")
                 if os.path.exists(global_file):
