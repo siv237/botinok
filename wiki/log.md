@@ -1128,3 +1128,57 @@ Textual вызывает on_click по всей MRO — дубль обрабо�
 двойной цикл, убран. Тест test_themes.py расширен до 26 проверок (global load/save,
 диалог берёт глобальную тему, клик пишет в global); регрессия wizard/chat_pager/
 escape/confirm/history — зелено. Не коммичено.
+
+## [2026-10-10] fix | Шапка TUI: ложное «No models loaded» и фиктивные 8192 контекста
+
+Повод: при старте на OpenAI-совместимом сервере шапка выдавала «Model: qwen3.8-flash-next |
+Context: 8192 | No models loaded» — два противоречия рабочей сессии.
+- `_render_header_text` (core/textual_app.py) печатал сегмент видеопамяти безусловно. У
+  OpenAI-бэкенда `SessionManager.get_ollama_status` возвращает None (`/api/ps` — только
+  Ollama), `_refresh_vram` (core/textual_integration.py) пишет «No models loaded» → шапка
+  врала. Сегмент теперь идёт только при ollama-сервере и непустых данных (тот же принцип,
+  что в панели «Производительность» с 2026-09-19).
+- `session_ctx_max` проставлялся лишь в первом ходе (`_update_stats` в `_stream_turn`),
+  поэтому до первой отправленной строки шапка показывала константу 8192 из `__init__`
+  независимо от `DefaultContext`. `set_model_info` получил параметр `ctx`, проводка
+  `ctx=num_ctx` из `ask_ollama_textual`.
+Проверка: py_compile + tests/test_perf_panel.py зелено; прогон `_render_header_text` для
+трёх профилей (openai / ollama без моделей / ollama с моделью). Страница
+`entities/textual_ui.md` дополнена. Не коммичено.
+
+## [2026-10-10] feat | Шапка и «Сервер» по-русски, адрес сервера без префикса
+
+- `_render_header_text` (core/textual_app.py) полностью переведён: «АГЕНТ БОТИНОК» /
+  «АГЕНТ-КОРРЕКТОР», «ОПАСНЫЙ РЕЖИМ: ВКЛ», «Модель:», «Контекст:»; стартовый баннер —
+  «АГЕНТ БОТИНОК — версия …».
+- `_server_label` (core/textual_integration.py) для OpenAI-бэкенда возвращает голый
+  `BaseUrl` (например https://llm.dgk.ru) без словесного префикса «OpenAI-совместимый
+  сервер (…)» — панель «Производительность» строки «Сервер» печатает его как есть.
+  Логика скрытия видеопамяти в шапке не пострадала: ollama-метка по-прежнему
+  «Ollama (…)», openai-метка (URL) не совпадает с префиксом.
+Проверка: прогон `_render_header_text` (openai/ollama/dangerous) + tests/test_perf_panel.py
+зелено. Страница `entities/textual_ui.md` обновлена. Не коммичено.
+
+## [2026-10-10] feat | Русский UI: инструменты, стрим, подтверждения, просмотрщик истории
+
+Аудит английских строк, видимых пользователю, и их перевод:
+- Панель «Инструменты»: заглушка «No active tools» → «Нет активных инструментов»; статусы
+  карточек running/completed/aborted/error → «выполняется/готово/прервано/ошибка»
+  (`_tool_status_ru`, применяется в `_build_tool_title` и `_tool_details`; цвета по
+  сырому статусу, ширина заголовка считается по русскому тексту).
+- Живой стрим в чате: «Thinking.../Tool Call:/Response:» → «Думает…/Команда:/Ответ:»;
+  спойлер «Thinking» → «Размышление».
+- Подтверждения: «ТРЕБУЕТСЯ DANGEROUS MODE» → «ТРЕБУЕТСЯ ОПАСНЫЙ РЕЖИМ», «Переключиться
+  в dangerous mode…» → «Переключить опасный режим и выполнить?» (оба диалога);
+  /help: «переключить dangerous mode» → «переключить опасный режим».
+- Ошибки: «Unknown Error» → «Неизвестная ошибка сервера» (2 места).
+- Выбор сессии: «unknown» в датах → «нет данных», «(unknown)» имени → «(без названия)»,
+  кнопка «OK» → «ОК».
+- Просмотрщик истории (textual_history_viewer.py): заголовок окна «История сессии»,
+  отключена командная палитра, «q — Выход» в футере; «User/Assistant/thinking/Tool/
+  Total/Error loading/Session not found» → русские метки.
+Не трогали (не видны пользователю): внутренние статусы `_update_stats` (покрываются
+`_ru_status`), промпты модели («Continue task: …»), служебные заметки в context.json.
+Проверка: py_compile, полный pytest (61 passed; test_themes::test_app — предсуществующий
+провал без pytest-asyncio, воспроизводится на чистом дереве), ручной прогон
+`_build_tool_title`/`_tool_details`. Не коммичено.

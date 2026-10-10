@@ -450,7 +450,7 @@ def _server_label(sm) -> str:
         base = ""
     try:
         if is_openai_backend(sm):
-            return f"OpenAI-совместимый сервер ({base})" if base else "OpenAI-совместимый сервер"
+            return base or "OpenAI-совместимый сервер"
     except Exception:
         pass
     return f"Ollama ({base})" if base else "Ollama"
@@ -471,7 +471,7 @@ def _extract_api_error(data) -> str:
     detail = data.get("detail")
     if detail:
         return str(detail)
-    return "Unknown Error"
+    return "Неизвестная ошибка сервера"
 
 
 # HTTP-коды, при которых имеет смысл держать сессию и ждать сервер
@@ -894,7 +894,7 @@ def ask_ollama_textual(
                             theme=botinok_themes.load_theme_name(sm.config),
                             config_path=getattr(sm, "config_path", None))
     app.set_model_info(model, dangerous=dangerous_mode,
-                       server=_server_label(sm))
+                       server=_server_label(sm), ctx=num_ctx)
     # Первый запуск с openai-бэкендом без ключа — окошко ключа сразу при старте.
     try:
         app.require_api_key = (
@@ -1279,7 +1279,7 @@ def ask_ollama_textual(
                 break
 
             if response.status_code != 200:
-                error_msg = "Unknown Error"
+                error_msg = "Неизвестная ошибка сервера"
                 error_text = ""
                 try:
                     data = response.json()
@@ -2183,7 +2183,7 @@ def ask_ollama_textual(
             _write_log("  [green]/models[/green]         — список доступных моделей Ollama")
             _write_log("  [green]/ctx <n>[/green]         — сменить размер контекста (например /ctx 32768)")
             _write_log("  [green]/clear[/green]          — очистить экран")
-            _write_log("  [green]/dangerous[/green]      — переключить dangerous mode")
+            _write_log("  [green]/dangerous[/green]      — переключить опасный режим")
             _write_log("  [green]/retry[/green]          — повторить последний запрос")
             _write_log("  [green]/vram[/green]           — показать статус VRAM")
             _write_log("  [green]exit[/green]            — выход")
