@@ -1182,3 +1182,41 @@ Context: 8192 | No models loaded» — два противоречия рабо�
 Проверка: py_compile, полный pytest (61 passed; test_themes::test_app — предсуществующий
 провал без pytest-asyncio, воспроизводится на чистом дереве), ручной прогон
 `_build_tool_title`/`_tool_details`. Не коммичено.
+
+## [2026-10-10] query | Модель исполнения tool_calls: последовательность и точки для параллельных/фоновых веб-тулзов
+Разбор по запросу (готовка к реализации параллельности/фоновости веб-вызовов). Обновлён
+`concepts/function_calling.md` (секция «Модель исполнения»). Ключевое: цикл
+`textual_integration.py::_stream_turn` исполняет tool_calls строго последовательно
+(`for tc in tool_calls:` :1857, блокирующий `tm.call_tool` :1979); несколько tool_calls
+за ответ протокольно поддерживаются (openai_compat склеивает дельты по index); web —
+синхронный httpx.Client/aria2c-subprocess; dangerous-gate блокирует на подтверждении
+человека; Esc-стоп проверяется до/после каждого тулза. Готовый шаблон фоновости —
+shell_exec+ShellSessionRegistry (session_id сразу, status/read/wait/kill). Точки
+внедрения: ThreadPoolExecutor для батча web-тулзов с сохранением порядка tool-сообщений;
+реестр WebJobRegistry по образцу shell_exec; UI-карточки ключуются по имени — для
+параллельных одноимённых нужен ключ по call_id.
+
+## [2026-10-10] feat | Фоновые веб-задачи: параллельность web по запросу агента
+Реализована опция параллельного/фонового вызова веб-тулзов (обычный механизм
+остался синхронным). Новое:
+- `tools/web_jobs.py` — `WebJob`/`WebJobRegistry` (синглтон, по образцу
+  ShellSessionRegistry): тред-воркер, прогресс, статусы running/done/error,
+  kill (best-effort), инкрементный `drain_notifications`, уборка (40/1ч);
+  `format_notifications()` — сводка «✅/❌ готовые (один раз) + ⏳ висящие».
+- `tools/web.py`: параметры `background/name/job_id/wait`; действия `jobs`
+  (список) и `job` (статус/полный результат, wait=true, command=kill);
+  `_submit_background` для auto/open/extract/json/images/download/search.
+- Схема `web` в `core/tool_manager.py` + `prompts/tool_policy.txt`: агент
+  узнаёт про опцию, получает напоминание о висящих задачах.
+- Уведомления в цикле агента: `_web_jobs_notice()` на начале хода и границах
+  тул-раундов (`core/textual_integration.py`, `botinok.py`) — инкрементально,
+  role:user в messages+context.json.
+- UI (`core/textual_app.py`): `_sync_web_jobs()` в `_tick_stats` — карточки
+  задач в панели (имя, id, прогресс, превью); флаг `job` исключён из
+  turn_in_progress/_task_active/детектора зависаний/Esc-диалога.
+Тест: `tests/test_web_jobs.py` (локальный сервер, /slow 0.7s): мгновенный
+job_id, статус/результат, список, инкрементность, пачка 3 задач <2с, kill.
+pytest: 62 passed (test_themes::test_app — предсуществующий).
+Вики: новая `entities/tools/web-jobs.md`, обновлены `entities/tools/web.md`,
+`concepts/web_kit.md`, `concepts/function_calling.md`, `index.md`,
+`raw/README.md`. CHANGELOG 0.4. Не коммичено.

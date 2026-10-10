@@ -12,7 +12,15 @@ web — единый добыватель данных из сети.
   json      — JSON: jq-фильтр или сводка по структуре
   download  — скачать файл (output_path или downloads/ сессии)
   search    — поиск в интернете (DuckDuckGo HTML, fallback lynx)
+  jobs      — список фоновых задач (что готово, что идёт)
+  job       — статус/результат фоновой задачи по job_id (wait, command=kill)
   help      — справка
+
+Фоновый режим (параллельность по запросу агента): к любому сетевому
+действию добавь background=true и name=… — задача уйдёт в отдельный тред,
+job_id вернётся сразу. Можно запустить пачку, заниматься другим, опрашивать
+action=jobs и забирать результаты action=job. Обычные вызовы (без
+background) остаются синхронными. Реестр — tools/web_jobs.py.
 
 Каждый ответ сопровождается харнесом: _meta (content-type, размер, время,
 сохранённый путь), provenance, «Совет» и «Следующие шаги».
@@ -42,6 +50,11 @@ try:
     from tools import download_manager as _dlm
 except Exception:  # pragma: no cover
     _dlm = None
+
+try:
+    from tools import web_jobs as _jobs
+except Exception:  # pragma: no cover
+    _jobs = None
 
 try:
     from core import process_control as _pc
@@ -203,7 +216,16 @@ def _help() -> str:
         "  web action=downloads                      — память загрузок: что/куда/целое\n"
         "  web action=search query=\"…\"               — поиск в интернете\n"
         "  web action=proxy [command=show|set|clear|test] — прокси (см. ниже)\n"
+        "  web action=jobs                           — фоновые задачи: что готово/идёт\n"
+        "  web action=job job_id=… [wait=true] [command=kill] — статус/результат задачи\n"
         "  web action=help                           — эта справка\n"
+        "\n"
+        "Фоновый режим (параллельность по твоей просьбе):\n"
+        "  Любой сетевой action + background=true name=\"метка\" → задача уходит в тред,\n"
+        "  сразу приходит job_id. Запусти пачку (погода+новости+API), занимайся другим,\n"
+        "  опроси web action=jobs, забери готовые web action=job job_id=…\n"
+        "  Завершение/сбой придут уведомлением в размышления — ждать не обязан.\n"
+        "  Без background вызовы остаются синхронными (обычное поведение).\n"
         "\n"
         "  web action=json url=… method=POST json_body={…} — веб-API (POST/PUT/…)\n"
         "    для API, требующих тело: method, json_body (объект) или body (строка)\n"
@@ -1902,6 +1924,111 @@ def _go(url: str, action: str, extract, css, jq_filter, output_path, headers,
                    inventory=_inventory_line(inv))
 
 
+# --------------------------------------------------------------------------
+# Фоновые задачи (параллельность по явной просьбе агента)
+# --------------------------------------------------------------------------
+
+# Действия, которые осмысленно уходят в фон (сетевые, долгие).
+BACKGROUNDABLE = ("auto", "open", "extract", "json", "download", "search", "images")
+
+
+def _submit_background(action: str, name: Optional[str], run_kwargs: Dict,
+                       args_preview: str) -> str:
+    """Отправить сетевое действие в фоновый тред, вернуть job_id сразу."""
+    if _jobs is None:
+        return _finish("❌ Реестр фоновых задач недоступен.",
+                       {"action": action}, "error", "используй без background", [])
+    if not run_kwargs.get("url") and not run_kwargs.get("query"):
+        return _finish("❌ Для фонового запуска нужны url или query.",
+                       {"action": action}, "error", "укажи url/query", [])
+    reg = _jobs.WebJobRegistry.instance()
+
+    def _run(progress_cb):
+        return execute(progress_callback=progress_cb, **run_kwargs)
+
+    job = reg.submit(name or "", action, _run, args_preview=args_preview)
+    meta = {"action": action, "job_id": job.job_id, "status": "running",
+            "background": "yes"}
+    return _finish(
+        f"⏳ Фоновая задача #{job.job_id} «{job.name}» запущена ({action}).\n"
+        f"Она выполняется параллельно — не жди её: запускай другие или работай.\n"
+        f"Результат придёт уведомлением; опрос: web action=jobs.",
+        meta, "running",
+        "не блокируйся: запусти остальные задачи пачкой, потом собери web action=job",
+        [f"web action=job job_id={job.job_id}", "web action=jobs"])
+
+
+def _action_jobs(max_items: int = 50) -> str:
+    """Сводка по всем фоновым веб-задачам: что готово, что идёт."""
+    if _jobs is None:
+        return _finish("❌ Реестр фоновых задач недоступен.",
+                       {"action": "jobs"}, "error", "", [])
+    reg = _jobs.WebJobRegistry.instance()
+    reg.cleanup_old()
+    snaps = reg.list()
+    if not snaps:
+        return _finish("Нет фоновых веб-задач.", {"action": "jobs", "count": 0},
+                       "none", "запусти: web action=search query=… background=true", [])
+    icon = {"running": "⏳", "done": "✅", "error": "❌"}
+    lines = []
+    for s in snaps[-max_items:]:
+        head = f"{icon.get(s['status'], '•')} #{s['job_id']} «{s['name']}» · {s['action']} · {s['status']}"
+        if s["status"] == "running" and s["progress"]:
+            head += f" · {s['progress']}"
+        elif s["status"] == "done":
+            head += f" · {s['result_len']} зн."
+        elif s["status"] == "error":
+            head += f" · {s['error']}"
+        lines.append(head)
+    running = sum(1 for s in snaps if s["status"] == "running")
+    done = sum(1 for s in snaps if s["status"] == "done")
+    meta = {"action": "jobs", "count": len(snaps), "running": running, "done": done}
+    nxt = [f"web action=job job_id={s['job_id']}" for s in snaps
+           if s["status"] == "done"][:3]
+    return _finish("\n".join(lines), meta, "jobs",
+                   "собери готовые через job; работающие дождутся уведомлением",
+                   nxt)
+
+
+def _action_job(job_id: Optional[str], command: Optional[str], wait: bool,
+                timeout_sec: int) -> str:
+    """Статус/результат одной фоновой задачи (по job_id); command=kill — убить."""
+    if _jobs is None:
+        return _finish("❌ Реестр фоновых задач недоступен.",
+                       {"action": "job"}, "error", "", [])
+    reg = _jobs.WebJobRegistry.instance()
+    job = reg.get(job_id or "")
+    if job is None:
+        return _finish(f"❌ Задача не найдена: {job_id}. Список: web action=jobs",
+                       {"action": "job", "job_id": job_id}, "error",
+                       "проверь job_id или возьми web action=jobs", ["web action=jobs"])
+    if (command or "").strip().lower() == "kill":
+        killed = job.kill()
+        s = job.snapshot()
+        return _finish(
+            f"{'⏹ Задача убита' if killed else 'Задача уже завершена'}: "
+            f"#{s['job_id']} «{s['name']}» ({s['status']})",
+            {"action": "job", "job_id": s["job_id"], "status": s["status"]},
+            "killed" if killed else s["status"], "", [])
+    if wait and job.is_running():
+        job.wait(max(1, min(timeout_sec or 30, 300)))
+    s = job.snapshot()
+    meta = {"action": "job", "job_id": s["job_id"], "status": s["status"],
+            "name": s["name"], "elapsed": s["elapsed"]}
+    if s["status"] == "running":
+        prog = s["progress"] or "идёт…"
+        return _finish(f"⏳ #{s['job_id']} «{s['name']}» выполняется: {prog}",
+                       {**meta, "progress": s["progress"]}, "running",
+                       "опроси позже или дождись уведомления; не блокируйся",
+                       [f"web action=job job_id={s['job_id']} wait=true"])
+    if s["status"] == "error":
+        return _finish(f"❌ #{s['job_id']} «{s['name']}» завершилась с ошибкой: {s['error']}",
+                       meta, "error", "смотри причину; при нужде повтори запрос", [])
+    # done — отдаём полный результат задачи
+    return (f"✅ #{s['job_id']} «{s['name']}» — результат:\n\n"
+            + (job.result or "∅ (пустой результат)"))
+
+
 def execute(
     url: str = None,
     action: str = "auto",
@@ -1931,6 +2058,10 @@ def execute(
     no_proxy: str = None,
     scope: str = None,
     command: str = None,
+    name: str = None,
+    background: bool = False,
+    job_id: str = None,
+    wait: bool = False,
 ) -> str:
     """Единый вход web. См. action=help."""
     action = (action or "auto").strip().lower()
@@ -1953,6 +2084,10 @@ def execute(
 
     if action == "help":
         return _help()
+    if action == "jobs":
+        return _action_jobs(max_items or 50)
+    if action == "job":
+        return _action_job(job_id, command, wait, timeout_sec)
     if action == "proxy":
         sub = (command or "").strip().lower()
         if not sub:
@@ -1961,6 +2096,18 @@ def execute(
         return _action_proxy(sub, proxy, no_proxy, scope, url, session_path)
     if action == "downloads":
         return _action_downloads(session_path)
+    # Фоновый запуск: сетевое действие уходит в тред, агент получает job_id сразу.
+    bg_on = str(background).strip().lower() in ("1", "true", "yes", "on", "да") if not isinstance(background, bool) else background
+    if bg_on and action in BACKGROUNDABLE:
+        run_kwargs = dict(
+            url=url, action=action, query=query, extract=extract, css=css,
+            jq=jq_filter, output_path=output_path, headers=headers,
+            timeout_sec=timeout_sec, max_bytes=max_bytes,
+            follow_redirects=follow_redirects, max_items=max_items,
+            session_path=session_path, resume=resume,
+            expected_sha256=expected_sha256, method=method,
+            json_body=json_body, data=data, proxy=proxy)
+        return _submit_background(action, name, run_kwargs, (url or query or "")[:60])
     if action == "images":
         body, provenance, nxt, meta = _action_images(
             query, url, headers, timeout_sec, max_bytes, max_items or 3,

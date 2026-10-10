@@ -594,6 +594,15 @@ def _pressure_note() -> str:
     return ""
 
 
+def _web_jobs_notice() -> str:
+    """Инкрементная сводка фоновых веб-задач для модели ('' — нечего сказать)."""
+    try:
+        from tools import web_jobs as _wj
+        return _wj.format_notifications()
+    except Exception:
+        return ""
+
+
 def _compact_tool_message(tool_name, tool_args, result, artifact_path):
     res_str = "" if result is None else str(result)
     size_kb = len(res_str.encode('utf-8', errors='ignore')) / 1024
@@ -1173,6 +1182,13 @@ def ask_ollama_textual(
             _call_from_thread(app.reset_turn_state)
         except Exception:
             app.dangerous_switch_denied = False
+
+        # Фоновые веб-задачи: доставить завершившиеся в отсутствие модели и
+        # напоминание о висящих — агент помнит, что он ждёт, и не считает их готовыми.
+        _wj_note = _web_jobs_notice()
+        if _wj_note:
+            messages.append({"role": "user", "content": _wj_note})
+            sm.update_context(session_path, "user", _wj_note)
 
         while True:
             # Esc между итерациями: не отправляем новый запрос, сразу выходим и
@@ -2107,6 +2123,14 @@ def ask_ollama_textual(
                 sm.update_context(session_path, "user", _wrapped)
                 _call_from_thread(app.deliver_thought_block, _thoughts)
                 _write_log("[dim]💭 Мысли переданы модели[/dim]")
+
+            # Фоновые веб-задачи: инкрементные ✅/❌ о завершившихся за этот
+            # раунд + напоминание о ещё идущих (модель их не «теряет»).
+            _wj_note = _web_jobs_notice()
+            if _wj_note:
+                messages.append({"role": "user", "content": _wj_note})
+                sm.update_context(session_path, "user", _wj_note)
+                _write_log("[dim]🌐 Уведомление о веб-задачах передано модели[/dim]")
 
             _append_turn_guidance(resume_turn)
 

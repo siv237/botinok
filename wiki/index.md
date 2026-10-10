@@ -26,7 +26,8 @@
 ### Инструменты ([entities/tools/](entities/tools/))
 | Инструмент | Страница | Краткое описание |
 |-----------|----------|------------------|
-| web | [entities/tools/web.md](entities/tools/web.md) | Единый добыватель: search/open/extract/json/images/download/downloads/proxy; помощник-навигатор после fetch; проверка живых картинок |
+| web | [entities/tools/web.md](entities/tools/web.md) | Единый добыватель: search/open/extract/json/images/download/downloads/proxy; помощник-навигатор после fetch; проверка живых картинок; фоновость `background=true` |
+| web_jobs | [entities/tools/web-jobs.md](entities/tools/web-jobs.md) | Реестр фоновых веб-задач: пачка параллельных web-вызовов, job_id сразу, опрос jobs, инкрементные уведомления о готовности |
 | download_manager | [entities/download_manager.md](entities/download_manager.md) | Глобальная память загрузок web: что/куда/целое, докачка, хеши |
 | safe_ops | [entities/safe_ops.md](entities/safe_ops.md) | Каталог безопасных read-only операций + подсказки эквивалента |
 | process_control | [entities/process_control.md](entities/process_control.md) | Реестр процессов и мгновенная остановка по Esc (killpg дерева) |
