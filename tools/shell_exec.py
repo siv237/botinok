@@ -170,7 +170,7 @@ def shell_exec(
             return _result({"error": "command пустой"})
         # По умолчанию — папка, из которой запущен ботинок (не папка установки):
         # «ls» должен показывать то, что видит пользователь.
-        run_cwd = os.getcwd() if not cwd else os.path.realpath(cwd)
+        run_cwd = (os.environ.get("BOTINOK_LAUNCH_DIR") or os.getcwd()) if not cwd else os.path.realpath(cwd)
 
         session = ShellSession(
             command=command,

@@ -82,7 +82,7 @@ class ShellSession:
         self.session_id = f"sh_{uuid.uuid4().hex[:8]}"
         self.name = name or command
         self.command = command
-        self.cwd = os.path.realpath(cwd) if cwd else os.getcwd()
+        self.cwd = os.path.realpath(cwd) if cwd else (os.environ.get("BOTINOK_LAUNCH_DIR") or os.getcwd())
         self.timeout_sec = max(0, int(timeout_sec or 0))
         self.rows = int(rows) if rows else 24
         self.cols = int(cols) if cols else 100

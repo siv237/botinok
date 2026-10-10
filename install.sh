@@ -242,6 +242,7 @@ echo_blue "Creating executable wrapper in $BIN_DIR/botinok..."
 cat <<EOF > "$BIN_DIR/botinok"
 #!/bin/bash
 export BOTINOK_HOME="$INSTALL_DIR"
+export BOTINOK_LAUNCH_DIR="\$PWD"
 cd "\$BOTINOK_HOME"
 ./venv/bin/python3 botinok.py "\$@"
 EOF
