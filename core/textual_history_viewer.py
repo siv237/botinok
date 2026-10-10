@@ -6,13 +6,14 @@ Textual History Viewer - просмотр истории с прокруткой
 
 from textual.app import App, ComposeResult
 from textual.widgets import RichLog, Header, Footer
+from core import themes as botinok_themes
 import json
 import os
 from datetime import datetime
 from typing import Optional
 
 
-class HistoryViewerApp(App):
+class HistoryViewerApp(botinok_themes.ThemedAppMixin, App):
     """Textual приложение для просмотра истории сессии."""
 
     CSS = """
@@ -22,7 +23,7 @@ class HistoryViewerApp(App):
     RichLog {
         height: 1fr;
     }
-    """
+    """ + botinok_themes.THEME_BTN_CSS
 
     def __init__(self, session_path: str = "", **kwargs):
         super().__init__(**kwargs)
@@ -31,6 +32,7 @@ class HistoryViewerApp(App):
 
     def compose(self) -> ComposeResult:
         """Создаем виджеты приложения."""
+        yield self.make_theme_btn()
         yield Header()
         yield RichLog(markup=True, auto_scroll=False, wrap=True)
         yield Footer()

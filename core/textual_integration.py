@@ -36,6 +36,7 @@ from core.path_utils import resolve_session_path
 from core.openai_compat import is_openai_backend, chat_stream_request, chat_once
 from core.api_key_gate import is_auth_error, key_entry_url, save_api_key
 from core.textual_app import BotinokTextualApp
+from core import themes as botinok_themes
 from core.terminal_keys import install as install_terminal_keys
 
 MODELS_NO_TOOLS = set()
@@ -889,7 +890,9 @@ def ask_ollama_textual(
             pass
 
     app = BotinokTextualApp(session_path=session_path, version=version,
-                            initial_prompt=initial_prompt)
+                            initial_prompt=initial_prompt,
+                            theme=botinok_themes.load_theme_name(sm.config),
+                            config_path=getattr(sm, "config_path", None))
     app.set_model_info(model, dangerous=dangerous_mode,
                        server=_server_label(sm))
     # Первый запуск с openai-бэкендом без ключа — окошко ключа сразу при старте.

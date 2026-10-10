@@ -30,6 +30,7 @@ from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from core.text_width import cell_width, cell_truncate
+from core import themes as botinok_themes
 
 
 def _human_size(size: Optional[int]) -> str:
@@ -222,10 +223,11 @@ class _MenuScreen(Screen):
 
     CSS = """
     _MenuScreen { align: center middle; }
+    #theme_btn { dock: top; }
     #pk_menu_box { width: 90%; height: auto; }
     #pk_menu_title { width: 100%; padding: 0 0 1 0; }
-    #pk_menu { width: 100%; height: auto; border: solid cyan; }
-    """
+    #pk_menu { width: 100%; height: auto; border: solid $hl; }
+    """ + botinok_themes.THEME_BTN_CSS
 
     def __init__(self, latest_name: str, preview_loader=None, **kwargs):
         super().__init__(**kwargs)
@@ -233,6 +235,7 @@ class _MenuScreen(Screen):
         self._preview_loader = preview_loader
 
     def compose(self) -> ComposeResult:
+        yield self.app.make_theme_btn()
         with Vertical(id="pk_menu_box"):
             yield Static(
                 "[bold cyan]Старт BOTINOK: выбрать сессию[/bold cyan]\n"
@@ -340,11 +343,12 @@ class _ListScreen(Screen):
 
     CSS = """
     _ListScreen { align: center middle; }
+    #theme_btn { dock: top; }
     #pk_list_box { width: 96%; height: 90%; }
     #pk_list_title { width: 100%; padding: 0 0 1 0; }
     #pk_filter_row { width: 100%; height: auto; }
     #pk_filter { width: 1fr; }
-    #pk_rows { width: 100%; height: 1fr; border: solid cyan; padding: 0; }
+    #pk_rows { width: 100%; height: 1fr; border: solid $hl; padding: 0; }
     _SessionRow { width: 100%; height: 1; }
     _SessionRow .row-text { width: 1fr; height: 1; }
     _SessionRow .row-info { width: auto; min-width: 1; height: 1; border: none;
@@ -352,7 +356,7 @@ class _ListScreen(Screen):
                            color: $text-muted; text-style: bold;
                            content-align: center middle; }
     _SessionRow .row-info:hover, _SessionRow .row-info:focus {
-                           color: cyan; background: transparent; text-style: bold underline; }
+                           color: $hl; background: transparent; text-style: bold underline; }
     _SessionRow.selected { background: $block-cursor-background; }
     _SessionRow.selected .row-text { color: $block-cursor-foreground; }
     """
@@ -371,6 +375,7 @@ class _ListScreen(Screen):
         self._resize_timer = None
 
     def compose(self) -> ComposeResult:
+        yield self.app.make_theme_btn()
         with Vertical(id="pk_list_box"):
             yield Static(
                 "[bold cyan]Выбор сессии[/bold cyan]\n"
@@ -697,12 +702,12 @@ class _ListScreen(Screen):
             return
 
 
-class SessionPickerApp(App):
+class SessionPickerApp(botinok_themes.ThemedAppMixin, App):
     """Двухшаговый выбор сессии."""
 
     CSS = """
     SessionPickerApp { background: $surface; }
-    """
+    """ + botinok_themes.THEME_BTN_CSS
 
     def __init__(self, sessions: List[dict], latest_name: str, preview_loader=None, **kwargs):
         super().__init__(**kwargs)
