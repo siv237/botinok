@@ -1296,7 +1296,8 @@ def main():
     parser.add_argument("--update", action="store_true", help="Проверить и установить обновления из git")
     parser.add_argument("--ensure-deps", action="store_true", help="Проверить и установить системные зависимости (chafa, ffmpeg, aria2 и др.)")
     parser.add_argument("--view-history", metavar="SESSION_PATH", help="Просмотр истории сессии через Textual (с прокруткой)")
-    
+    parser.add_argument("--version", action="version", version=f"BOTINOK {_BOTINOK_VERSION}", help="Показать версию и дату коммита")
+
     args = parser.parse_args()
 
     # Установка системных зависимостей (без обновления кода).
