@@ -3,7 +3,9 @@
 Тест остановки по Esc — выстраданный инвариант.
 
 Проверяем:
-- Esc при активном ходе (стрим ИЛИ работающий инструмент) останавливает агента;
+- Esc при стриме (без инструментов) останавливает агента сразу (мягко);
+- Esc при работающем инструменте открывает диалог жёсткого прерывания,
+  повторный Esc в диалоге — обычное (мягкое) прерывание, y — жёсткое;
 - фокус на встроенном терминале больше НЕ проглатывает Esc (не уходит в PTY);
 - в покое Esc по-прежнему очищает ввод, а не «стоп».
 
@@ -96,14 +98,29 @@ async def main() -> int:
         await asyncio.sleep(0.15)
         check("escape_stops_stream", app._stop_requested)
 
-        # 2. Нет стрима, но работает инструмент → Esc тоже останавливает.
+        # 2. Нет стрима, но работает инструмент → Esc открывает диалог
+        #    жёсткого прерывания; повторный Esc в диалоге = мягкая остановка.
         app.is_streaming = False
         app.active_tools = [{"name": "shell_exec", "status": "running",
                              "start_time": 0, "query": "", "result": "", "size_kb": 0}]
         app._stop_requested = False
         await pilot.press("escape")
         await asyncio.sleep(0.15)
-        check("escape_stops_running_tool", app._stop_requested)
+        from core.textual_app import StopInterruptScreen
+        check("escape_opens_hard_dialog",
+              app._stop_dialog_open and isinstance(app.screen, StopInterruptScreen)
+              and not app._stop_requested)
+        await pilot.press("escape")
+        await asyncio.sleep(0.15)
+        check("dialog_escape_soft_stops", app._stop_requested and not app._stop_dialog_open)
+        # y в диалоге — жёсткое прерывание.
+        app._stop_requested = False
+        app._stop_logged = False
+        await pilot.press("escape")
+        await asyncio.sleep(0.15)
+        await pilot.press("y")
+        await asyncio.sleep(0.15)
+        check("dialog_y_hard_stops", app._stop_requested and not app._stop_dialog_open)
 
         # 3. Фокус на кнопке крестика мысли → Esc всё равно останавливает.
         app.active_tools = []
