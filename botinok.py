@@ -2,10 +2,22 @@ import os
 import sys
 import time
 import json
+import shutil
+import warnings
 import requests
 import argparse
 import re
 from datetime import datetime
+
+# Шум TLS: самоподписанные сертификаты (VerifySSL=false в мастере) засоряют
+# консоль варнингами urllib3 на каждый запрос. Пользователь уже согласился их
+# игнорировать — молчим. В BOTINOK_DEBUG варнинги остаются полезными.
+if not os.environ.get("BOTINOK_DEBUG"):
+    try:
+        from urllib3.exceptions import InsecureRequestWarning
+        warnings.filterwarnings("ignore", category=InsecureRequestWarning)
+    except Exception:
+        pass
 
 # --- Truecolor: терминалы, которые его поддерживают, но не объявляют --------
 # rich/Textual включают 24-битный цвет только когда видят COLORTERM=truecolor,
@@ -37,7 +49,7 @@ _ensure_truecolor_env()
 from core.cli_io import out, term_width
 from core.textual_prompts import textual_confirm
 from core.session_manager import SessionManager
-from core.tool_manager import ToolManager
+from core.tool_manager import ToolManager, requires_dangerous
 from core.openai_compat import is_openai_backend, chat_stream_request
 from core.api_key_gate import (is_auth_error, key_entry_url, save_api_key,
                                prompt_key_console)
@@ -545,7 +557,80 @@ def _compact_tool_message(tool_name: str, tool_args: dict, result: str, artifact
     return msg
 
 
-def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, read_only_mode=False):
+def _clip(s, n: int) -> str:
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _fmt_tool_event(name: str, args) -> str:
+    """Человекочитаемая строка о вызове инструмента для консольного прогресса.
+
+    Пустая строка — событие служебное, показывать нечего.
+    """
+    if not isinstance(args, dict):
+        return name
+    action = str(args.get("action") or "")
+    sid = str(args.get("session_id") or "")
+    if name == "shell_exec":
+        cmd = str(args.get("command") or "")
+        if (not action or action == "run") and cmd:
+            return f"shell: $ {_clip(cmd, 110)}"
+        if action == "read":
+            tail = args.get("tail_lines")
+            return f"shell: вывод {sid}" + (f" (хвост {tail})" if tail else "")
+        if action == "wait":
+            return f"shell: ожидание {sid}"
+        if action == "search":
+            return f"shell: поиск «{_clip(args.get('pattern', ''), 40)}» в {sid}"
+        if action in ("send", "send_key"):
+            return f"shell: ввод в {sid}"
+        if action == "kill":
+            return f"shell: завершение {sid}"
+        return f"shell: {action or 'вызов'}"
+    if name == "file_system":
+        path = _clip(args.get("path") or args.get("directory") or "", 90)
+        if action == "read":
+            parts = []
+            if args.get("offset"):
+                parts.append(f"с {args['offset']}")
+            if args.get("limit"):
+                parts.append(f"{args['limit']} строк")
+            return f"чтение: {path}" + (f" ({', '.join(parts)})" if parts else "")
+        if action == "grep":
+            return f"grep: «{_clip(args.get('pattern', ''), 40)}» в {path}"
+        if action == "list":
+            return f"лист: {path}"
+        if action == "search":
+            return f"поиск файлов: «{_clip(args.get('pattern', ''), 40)}» в {path}"
+        if action == "inspect":
+            return ("инспекция: " + str(args.get("command", "")) + " " + path).strip()
+        return (f"{action}: {path}" if action else f"file_system: {path}").strip() or "file_system"
+    if name == "code_editor":
+        return f"правка файла: {_clip(args.get('path', ''), 90)}" + (f" ({action})" if action else "")
+    if name in ("web", "curl", "web_search", "open_url", "web_extract"):
+        q = args.get("query") or args.get("url") or args.get("output_path") or ""
+        return f"веб ({action or 'get'}): {_clip(q, 90)}"
+    if name == "journal":
+        bits = [str(args[k]) for k in ("unit", "since", "until", "grep") if args.get(k)]
+        joined = " ".join(bits)
+        return f"journal{f' ({action})' if action else ''}" + (f": {joined}" if joined else "")
+    if name == "github":
+        return f"github ({action}): {_clip(args.get('repo') or args.get('query') or '', 60)}"
+    if name == "skills":
+        return f"skills ({action}): {_clip(args.get('name') or args.get('query') or args.get('skill_id') or '', 50)}"
+    if name == "experience":
+        return f"опыт ({action})" if action else "опыт"
+    if name == "sign_step":
+        return ""
+    if name == "session_memory":
+        return f"память сессии ({action})" if action else "память сессии"
+    for k in ("path", "url", "query", "command", "pattern", "name"):
+        if args.get(k):
+            return f"{name} ({action}): {_clip(args[k], 80)}" if action else f"{name}: {_clip(args[k], 80)}"
+    return f"{name} ({action})" if action else name
+
+
+def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, read_only_mode=False, progress=None, confirm_dangerous=None):
     sm = SessionManager()
     tm = ToolManager()
     
@@ -734,13 +819,30 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
             for tool_call in tool_calls:
                 func_name = tool_call["function"]["name"]
                 func_args = tool_call["function"]["arguments"]
-                
-                sm.log_tool_call(session_path, func_name, func_args, "STARTED", status="running")
-                
-                try:
-                    result = tm.call_tool(func_name, func_args, session_path=session_path)
-                except Exception as e:
-                    result = f"Error calling tool: {str(e)}"
+
+                if progress:
+                    line = _fmt_tool_event(func_name, func_args)
+                    if line:
+                        progress(line)
+
+                result = None
+                if not tm.dangerous_mode and requires_dangerous(func_name, func_args, session_path):
+                    if confirm_dangerous:
+                        approved, reason = confirm_dangerous(func_name, func_args)
+                    else:
+                        approved, reason = False, "нет интерактивного терминала для подтверждения"
+                    if approved:
+                        tm.dangerous_mode = True
+                        os.environ["BOTINOK_DANGEROUS"] = "1"
+                    else:
+                        result = f"ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ. Причина: {reason or 'отказ без пояснения'}"
+                        sm.log_tool_call(session_path, func_name, func_args, result, status="denied")
+                if result is None:
+                    sm.log_tool_call(session_path, func_name, func_args, "STARTED", status="running")
+                    try:
+                        result = tm.call_tool(func_name, func_args, session_path=session_path)
+                    except Exception as e:
+                        result = f"Error calling tool: {str(e)}"
 
                 artifact_file = f"tool_{func_name}_{tool_call.get('id', int(time.time()))}.txt"
                 artifact_path = sm.save_artifact(session_path, artifact_file, str(result))
@@ -909,9 +1011,9 @@ def main():
     
     sm = SessionManager()
     
-    # Уведомление о используемом конфиге
+    # Уведомление о используемом конфиге — в stderr, чтобы stdout оставался чистым
     if sm.config_source == "personal":
-        out(f"[dim cyan]Using personal config: {sm.config_path}[/dim cyan]")
+        print(f"Using personal config: {sm.config_path}", file=sys.stderr)
     
     default_model = sm.config.get('Ollama', 'DefaultModel', fallback='qwen3.5:9b')
     default_ctx = sm.config.getint('Ollama', 'DefaultContext', fallback=8192)
@@ -1005,10 +1107,11 @@ def main():
             out("[yellow]Обновление отменено.[/yellow]")
         return
 
-    # Обработка Textual режима (по умолчанию)
-    # Stealth/pipe-режим (аргумент --stealth или данные в stdin) обслуживается
-    # headless-циклом ниже — Textual его не должен перехватывать.
-    if not args.stealth and sys.stdin.isatty():
+    # Одиночный запрос (`botinok "..."`, --stealth или pipe) обслуживается
+    # headless-циклом ниже: без TUI, без выбора сессии, все инструменты
+    # без подтверждений, временная сессия удаляется после ответа.
+    arg_prompt = args.prompt if args.prompt else args.prompt_pos
+    if not args.stealth and not arg_prompt and sys.stdin.isatty():
         if args.dangerous:
             os.environ["BOTINOK_DANGEROUS"] = "1"
         if args.debug:
@@ -1088,7 +1191,6 @@ def main():
                 num_ctx=args.ctx,
                 dangerous_mode=args.dangerous,
                 version=_BOTINOK_VERSION,
-                initial_prompt=(args.prompt or args.prompt_pos or ""),
                 proofread=args.proofread,
                 proofreader_fn=run_proofreader_turn,
                 resume_session=bool(resume_last_answer),
@@ -1102,10 +1204,11 @@ def main():
             sm.prune_empty_session(session_path)
         return
 
-    # Определяем параметры из аргументов или конфига
-    arg_prompt = args.prompt if args.prompt else args.prompt_pos
+    # Headless-режим: одиночный запрос без интерактива.
     model = args.model
     num_ctx = args.ctx
+    # Dangerous mode по умолчанию выключен; при потребности в опасном действии
+    # спросим в консоли по ходу. В pipe спросить некого — опасное отсекается.
     if args.dangerous:
         os.environ["BOTINOK_DANGEROUS"] = "1"
     if args.debug:
@@ -1121,12 +1224,65 @@ def main():
             else:
                 arg_prompt = stdin_data
 
-    session_path, resume_last_answer = _choose_or_resume_session(sm, True, "stealth_run")
-    
-    # Если пользователь отменил выбор сессии - выходим
-    if session_path is None:
-        out("\n[dim]Старт отменён.[/dim]")
-        return
+    # Временная сессия одиночного запроса: живёт до конца работы, затем удаляется.
+    session_path = sm.create_session("oneshot")
+
+    def _progress(line: str) -> None:
+        print(f"[botinok] {line}", file=sys.stderr, flush=True)
+
+    def _print_answer(text: str) -> None:
+        """Ответ в живой терминал — через Rich Markdown (таблицы, заголовки,
+        списки). В pipe и при --stealth — чистый текст без разметки."""
+        if progress_fn:
+            from rich.console import Console
+            from rich.markdown import Markdown
+            Console(highlight=False).print(Markdown(text))
+        else:
+            out(text)
+
+    # Прогресс — только живому терминалу; в pipe и при --stealth stdout/stderr чистые.
+    # События инструментов — приглушённой строкой с маркером, не сырым JSON.
+    _err_console = None
+    if sys.stderr.isatty() and not args.stealth:
+        from rich.console import Console
+        _err_console = Console(stderr=True, highlight=False)
+
+    def _tool_progress(line: str) -> None:
+        if _err_console is not None:
+            _err_console.print(f"[dim]⚙ {line}[/dim]")
+        else:
+            print(f"[botinok] {line}", file=sys.stderr, flush=True)
+
+    progress_fn = _tool_progress if (sys.stderr.isatty() and not args.stealth) else None
+    if progress_fn:
+        _progress(f"временная сессия: {session_path}")
+
+    def _confirm_dangerous(name: str, tool_args) -> tuple[bool, str]:
+        """Запрос dangerous mode посреди одиночного запроса (только живой tty stdin)."""
+        if not sys.stdin.isatty():
+            return False, "нет интерактивного терминала (pipe/stealth), опасные действия запрещены"
+        try:
+            brief = json.dumps(tool_args, ensure_ascii=False, indent=2)
+        except Exception:
+            brief = str(tool_args)
+        if _err_console is not None:
+            _err_console.print(f"\n[yellow]⚠ Агент просит опасное действие: {name}[/yellow]")
+            _err_console.print(f"[cyan]{brief}[/cyan]")
+            _err_console.print("[bold]Включить dangerous mode и выполнить?[/bold] "
+                               "[green]y[/green] — да, иначе — отказ (можно указать причину): ", end="")
+        else:
+            print(f"\n[botinok] ⚠ Агент просит опасное действие: {name}", file=sys.stderr, flush=True)
+            print(brief, file=sys.stderr, flush=True)
+            print("[botinok] Включить dangerous mode и выполнить? y — да, "
+                  "иначе — отказ (можно указать причину): ", end="", file=sys.stderr, flush=True)
+        try:
+            ans = input().strip()
+        except EOFError:
+            print("", file=sys.stderr)
+            return False, "ответ не получен"
+        if ans.lower() in ("y", "yes", "д", "да"):
+            return True, ""
+        return False, ans
     
     # Подготовка начальных сообщений из промптов
     now = datetime.now().astimezone()
@@ -1156,8 +1312,13 @@ def main():
     tool_policy_msg = sm.load_prompt(session_path, "tool_policy")
     
     dangerous_status = "ON" if args.dangerous else "OFF"
-    dangerous_details = ("В этой сессии разрешены опасные инструменты: code_editor, shell_exec. shell_exec всегда требует подтверждение пользователя перед выполнением." 
-                        if args.dangerous else "Опасные инструменты отключены.")
+    if args.dangerous:
+        dangerous_details = ("Опасные инструменты (code_editor, shell_exec) разрешены и выполняются "
+                             "без подтверждения — режим одиночного запроса.")
+    else:
+        dangerous_details = ("Опасные инструменты (code_editor, shell_exec) выключены. Если задача требует "
+                             "опасного действия (shell-команда, запись вне папки сессии), выполняй его — "
+                             "пользователь подтвердит переключение в dangerous mode или откажет с причиной.")
     dangerous_mode_msg = sm.load_prompt(session_path, "dangerous_mode",
                                         DANGEROUS_STATUS=dangerous_status,
                                         DANGEROUS_DETAILS=dangerous_details)
@@ -1167,10 +1328,6 @@ def main():
     broken_tools_info = tm.get_broken_tools_info() or ""
     broken_tools_msg = sm.load_prompt(session_path, "broken_tools", BROKEN_TOOLS_INFO=broken_tools_info) if broken_tools_info else ""
 
-    resume_context_msg = ""
-    if resume_last_answer:
-        resume_context_msg = sm.load_prompt(session_path, "resume_context", 
-                                            RESUME_LAST_ANSWER=resume_last_answer)
     messages = [
         {"role": "system", "content": system_time_msg},
         {"role": "system", "content": session_location_msg},
@@ -1181,9 +1338,6 @@ def main():
 
     if broken_tools_msg:
         messages.append({"role": "system", "content": broken_tools_msg})
-
-    if resume_context_msg:
-        messages.append({"role": "system", "content": resume_context_msg})
     
     step_num = 1
     try:
@@ -1202,7 +1356,11 @@ def main():
                 messages.append({"role": "user", "content": prompt})
 
                 try:
-                    messages = ask_ollama_stealth(model, messages, session_path, step_num, num_ctx)
+                    messages = ask_ollama_stealth(
+                        model, messages, session_path, step_num, num_ctx,
+                        progress=progress_fn,
+                        confirm_dangerous=None if args.stealth else _confirm_dangerous,
+                    )
                 except KeyboardInterrupt:
                     out("\n[bold red]Interrupted[/bold red]")
                     raise SystemExit(0)
@@ -1220,7 +1378,7 @@ def main():
 
                 # Очистка от невалидных UTF-8 байтов
                 last_assistant_message = last_assistant_message.encode('utf-8', errors='ignore').decode('utf-8')
-                out(last_assistant_message)
+                _print_answer(last_assistant_message)
 
                 if not args.proofread:
                     step_num += 1
@@ -1230,7 +1388,7 @@ def main():
                 out("\n[bold magenta]>>> ПРОВЕРКА КОРРЕКТОРОМ...[/bold magenta]")
                 feedback, verdict_path = run_proofreader_turn(model, session_path, num_ctx, messages)
                 out("\n[bold magenta]ЗАКЛЮЧЕНИЕ КОРРЕКТОРА:[/bold magenta]")
-                out(feedback)
+                _print_answer(feedback)
                 out("\n" + "═" * term_width() + "\n")
 
                 fb_low = feedback.lower()
@@ -1251,9 +1409,10 @@ def main():
     except SystemExit:
         raise
     finally:
-        # Пустой запуск (отмена/ошибка до первого сообщения) не должен
-        # оставлять мёртвую папку в списке сессий.
-        sm.prune_empty_session(session_path)
+        # Временная сессия одиночного запроса не остаётся в списке сессий.
+        shutil.rmtree(session_path, ignore_errors=True)
+        if progress_fn:
+            _progress(f"временная сессия удалена: {session_path}")
 
 if __name__ == "__main__":
     main()
