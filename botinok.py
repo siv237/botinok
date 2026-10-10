@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import shutil
+import signal
 import warnings
 import requests
 import argparse
@@ -562,6 +563,121 @@ def _clip(s, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+_LIGHT_BG: "bool | None" = None
+_LIGHT_BG_QUERIED = False
+
+
+def _light_background() -> "bool | None":
+    """Светлый ли фон у терминала (OSC 11). None — терминал не ответил.
+
+    Один запрос на процесс, результат кэшируется. Нужен, чтобы подсветка кода
+    подбиралась под реальную палитру, а не перекрывала её тёмной темой.
+    """
+    global _LIGHT_BG, _LIGHT_BG_QUERIED
+    if _LIGHT_BG_QUERIED:
+        return _LIGHT_BG
+    _LIGHT_BG_QUERIED = True
+    try:
+        if not (sys.stdout.isatty() and sys.stdin.isatty()):
+            return _LIGHT_BG
+        import select
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            sys.stdout.write("\x1b]11;?\x1b\\")
+            sys.stdout.flush()
+            buf = b""
+            end = time.time() + 0.15
+            while time.time() < end:
+                r, _, _ = select.select([fd], [], [], max(0.0, end - time.time()))
+                if not r:
+                    break
+                buf += os.read(fd, 64)
+                if b"\x1b\\" in buf or b"\x07" in buf:
+                    break
+            m = re.search(rb"11;rgb:([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})", buf)
+            if m:
+                comps = [int(x[:4], 16) / 65535 for x in m.groups()]
+                _LIGHT_BG = (0.2126 * comps[0] + 0.7152 * comps[1] + 0.0722 * comps[2]) > 0.5
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    except Exception:
+        pass
+    return _LIGHT_BG
+
+
+def _fmt_dangerous_detail(name: str, args) -> str:
+    """Диалог dangerous-спроса без JSON-синтаксиса: одна понятная строка."""
+    if isinstance(args, dict):
+        action = str(args.get("action") or "")
+        if name == "shell_exec" and (not action or action == "run") and args.get("command"):
+            return f"Команда: {_clip(args['command'], 200)}"
+    line = _fmt_tool_event(name, args) or name
+    if isinstance(args, dict):
+        skip = {"action", "session_id", "command", "path", "directory",
+                "pattern", "query", "url", "name"}
+        extra = [f"{k}={_clip(v, 40)}" for k, v in args.items()
+                 if k not in skip and v not in (None, "", [], {})]
+        if extra:
+            line += " · " + " ".join(extra)
+    return line
+
+
+_INPUT_PROMPT_RE = re.compile(
+    r"(password|пароль|passphrase|pin|token)\s*:|\[sudo\].*password|login:|username:|имя пользователя",
+    re.IGNORECASE,
+)
+_ANY_PROMPT_RE = re.compile(
+    r"(\(y/(n|es|da|да)\)|continue\?|proceed\?|продолжить\?|yes/no)",
+    re.IGNORECASE,
+)
+
+
+def _parse_shell_result(result):
+    try:
+        data = json.loads(result) if isinstance(result, str) else result
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _looks_like_input_prompt(output: str):
+    """(строка-промпт, секретный ли ввод) если вывод заканчивается запросом ввода."""
+    lines = [l for l in (output or "").splitlines() if l.strip()]
+    if not lines:
+        return None, False
+    last = lines[-1]
+    if _INPUT_PROMPT_RE.search(last):
+        return last, True
+    if _ANY_PROMPT_RE.search(last):
+        return last, False
+    return None, False
+
+
+def _shell_output_for_console(result) -> str:
+    """Хвост вывода shell_exec для показа в консоль — то же, что видит агент."""
+    try:
+        data = json.loads(result) if isinstance(result, str) else result
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    text = str(data.get("output_tail") or data.get("output") or "").strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    shown = lines[-15:]
+    body = "\n".join(shown)
+    if len(body) > 2000:
+        body = body[-2000:]
+    if len(lines) > len(shown):
+        body = f"… ({len(lines) - len(shown)} строк выше)\n" + body
+    return body
+
+
 def _fmt_tool_event(name: str, args) -> str:
     """Человекочитаемая строка о вызове инструмента для консольного прогресса.
 
@@ -609,15 +725,18 @@ def _fmt_tool_event(name: str, args) -> str:
         return f"правка файла: {_clip(args.get('path', ''), 90)}" + (f" ({action})" if action else "")
     if name in ("web", "curl", "web_search", "open_url", "web_extract"):
         q = args.get("query") or args.get("url") or args.get("output_path") or ""
-        return f"веб ({action or 'get'}): {_clip(q, 90)}"
+        q = _clip(q, 90)
+        return f"веб ({action or 'get'}): {q}" if q else f"веб ({action or 'get'})"
     if name == "journal":
         bits = [str(args[k]) for k in ("unit", "since", "until", "grep") if args.get(k)]
         joined = " ".join(bits)
         return f"journal{f' ({action})' if action else ''}" + (f": {joined}" if joined else "")
     if name == "github":
-        return f"github ({action}): {_clip(args.get('repo') or args.get('query') or '', 60)}"
+        g = _clip(args.get("repo") or args.get("query") or "", 60)
+        return f"github ({action}): {g}" if g else f"github ({action})"
     if name == "skills":
-        return f"skills ({action}): {_clip(args.get('name') or args.get('query') or args.get('skill_id') or '', 50)}"
+        sk = _clip(args.get("name") or args.get("query") or args.get("skill_id") or "", 50)
+        return f"skills ({action}): {sk}" if sk else f"skills ({action})"
     if name == "experience":
         return f"опыт ({action})" if action else "опыт"
     if name == "sign_step":
@@ -630,7 +749,90 @@ def _fmt_tool_event(name: str, args) -> str:
     return f"{name} ({action})" if action else name
 
 
-def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, read_only_mode=False, progress=None, confirm_dangerous=None):
+def _attach_shell_console(session) -> bool:
+    """Интерактивный перехват PTY: пользователь общается с командой напрямую,
+    как будто запустил её сам. Живой вывод, любой ввод (пароли, меню, y/n,
+    Ctrl+C). Ctrl+] — отцепиться, команда продолжит в фоне.
+    Возвращает True, если пользователь отцепился (команда ещё живёт)."""
+    import select
+    import termios
+    import threading
+    import tty
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    try:
+        old = termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        return False
+
+    def _on_chunk(chunk: bytes) -> None:
+        try:
+            os.write(1, chunk)
+        except OSError:
+            pass
+
+    sys.stderr.write("\n[botinok] ⌨ Интерактив: команда ваша (Ctrl+] — отцепиться, она продолжит в фоне)\n")
+    sys.stderr.flush()
+    session.subscribe(_on_chunk)
+
+    # Heartbeat: молчаливые долгие команды (du, find) не должны выглядеть зависанием.
+    stop_hb = threading.Event()
+
+    def _heartbeat() -> None:
+        t0 = time.time()
+        while not stop_hb.wait(8.0):
+            if session.is_running():
+                try:
+                    os.write(2, f"\r\x1b[K[botinok] ⏳ выполняется {int(time.time() - t0)} с · Ctrl+] — отцепиться".encode())
+                except OSError:
+                    return
+
+    hb = threading.Thread(target=_heartbeat, name="shell-hb", daemon=True)
+    hb.start()
+
+    detached = False
+    fd = sys.stdin.fileno()
+    try:
+        tty.setraw(fd)
+        while True:
+            try:
+                r, _, _ = select.select([fd], [], [], 0.25)
+            except (OSError, ValueError):
+                break
+            if r:
+                try:
+                    data = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                cut = data.find(b"\x1d")  # Ctrl+]
+                if cut >= 0:
+                    if data[:cut]:
+                        session.send_bytes(data[:cut])
+                    detached = True
+                    break
+                session.send_bytes(data)
+            if not session.is_running():
+                time.sleep(0.3)  # дать ридеру долить хвост в буферы
+                break
+    finally:
+        stop_hb.set()
+        session.unsubscribe(_on_chunk)
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        except Exception:
+            pass
+        sys.stderr.write("\r\x1b[K\n")
+        sys.stderr.flush()
+    return detached and session.is_running()
+
+
+def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, read_only_mode=False, progress=None, confirm_dangerous=None, on_shell_input=None, attach_shell=None, on_shell_started=None):
+    printed_outputs = set()  # не печатать один и тот же хвост shell-вывода дважды
+    asked_inputs = set()     # на один и тот же промпт не спрашивать дважды
+    detached_sessions = set()  # пользователь отцепился — обратно не цепляем
+    tapped_sids = set()        # вывод этих сессий уже льётся в общий поток
     sm = SessionManager()
     tm = ToolManager()
     
@@ -839,10 +1041,71 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
                         sm.log_tool_call(session_path, func_name, func_args, result, status="denied")
                 if result is None:
                     sm.log_tool_call(session_path, func_name, func_args, "STARTED", status="running")
+                    # Долгое ожидание молчаливой команды не должно выглядеть зависанием.
+                    hb_stop = None
+                    if progress and func_name == "shell_exec" and isinstance(func_args, dict) and func_args.get("action") == "wait":
+                        import threading
+                        hb_stop = threading.Event()
+
+                        def _wait_hb(_ev=hb_stop):
+                            t0 = time.time()
+                            while not _ev.wait(8.0):
+                                progress(f"ожидание завершения shell-сессии · {int(time.time() - t0)} с")
+
+                        threading.Thread(target=_wait_hb, daemon=True).start()
                     try:
                         result = tm.call_tool(func_name, func_args, session_path=session_path)
                     except Exception as e:
                         result = f"Error calling tool: {str(e)}"
+                    finally:
+                        if hb_stop is not None:
+                            hb_stop.set()
+                    if func_name == "shell_exec":
+                        data = _parse_shell_result(result) or {}
+                        sid = str(data.get("session_id") or "")
+                        # Вывод интерактивной команды льётся в общий поток пассивно,
+                        # без перехвата и клавиш.
+                        if sid and on_shell_started and data.get("mode") == "interactive" and sid not in tapped_sids:
+                            tapped_sids.add(sid)
+                            on_shell_started(sid)
+                        outp = _shell_output_for_console(result)
+                        prompt_line, secret = _looks_like_input_prompt(outp)
+                        if sid and prompt_line:
+                            if attach_shell and sid not in detached_sessions:
+                                # Программа задала вопрос (пароль, y/n) — терминал
+                                # на время принадлежит ей; Ctrl+] возвращает его обратно.
+                                if attach_shell(sid):
+                                    detached_sessions.add(sid)
+                                result = tm.call_tool(
+                                    "shell_exec",
+                                    {"action": "status", "session_id": sid, "tail_lines": 40},
+                                    session_path=session_path,
+                                )
+                                outp = _shell_output_for_console(result)
+                            elif on_shell_input and (sid, prompt_line) not in asked_inputs:
+                                # Перехват недоступен — строчный ввод через send.
+                                asked_inputs.add((sid, prompt_line))
+                                text = on_shell_input(prompt_line, secret)
+                                if text is not None:
+                                    tm.call_tool(
+                                        "shell_exec",
+                                        {"action": "send", "session_id": sid, "input": text},
+                                        session_path=session_path,
+                                    )
+                                    sm.log_tool_call(session_path, "shell_exec",
+                                                     {"action": "send", "session_id": sid},
+                                                     "<скрыто>" if secret else text, status="user_input")
+                                    time.sleep(0.5)
+                                    result = tm.call_tool(
+                                        "shell_exec",
+                                        {"action": "read", "session_id": sid, "tail_lines": 15},
+                                        session_path=session_path,
+                                    )
+                                    outp = _shell_output_for_console(result)
+                        if outp and sid not in tapped_sids:
+                            if progress and outp not in printed_outputs:
+                                printed_outputs.add(outp)
+                                progress(outp)
 
                 artifact_file = f"tool_{func_name}_{tool_call.get('id', int(time.time()))}.txt"
                 artifact_path = sm.save_artifact(session_path, artifact_file, str(result))
@@ -1026,6 +1289,7 @@ def main():
     parser.add_argument("-c", "--ctx", type=int, default=default_ctx, help=f"Context size (default: {default_ctx})")
     parser.add_argument("--wizard", action="store_true", help="Запустить мастер настройки")
     parser.add_argument("--stealth", action="store_true", help="Минимальный вывод, только ответ")
+    parser.add_argument("--once", action="store_true", help="Один запрос: ответил — вышел, без вопроса о продолжении (для скриптов)")
     parser.add_argument("--dangerous", action="store_true", help="Разрешить опасные инструменты (редактирование файлов и выполнение команд) только в этой сессии")
     parser.add_argument("--proofread", action="store_true", help="Включить режим корректора (цикл: Исполнитель -> Корректор)")
     parser.add_argument("--debug", action="store_true", help="Включить отладочный вывод")
@@ -1131,6 +1395,7 @@ def main():
                                           TZNAME=now.tzname() or "unknown")
         session_location_msg = sm.load_prompt(session_path, "session_location",
                                                SESSION_PATH=session_path,
+                                               CWD=os.getcwd(),
                                                PROJECT_DIR=os.path.join(session_path, 'project'))
         session_files_msg = sm.load_prompt(session_path, "session_files",
                                             SESSION_PATH=session_path,
@@ -1232,11 +1497,21 @@ def main():
 
     def _print_answer(text: str) -> None:
         """Ответ в живой терминал — через Rich Markdown (таблицы, заголовки,
-        списки). В pipe и при --stealth — чистый текст без разметки."""
+        списки). Фонов нет нигде:ANSI-темы кода прозрачны, inline-коду фон
+        выключен — текст рисуется палитрой терминала и не спорит с любым фоном.
+        Светлая/тёмная тема кода — по реальному фону терминала (OSC 11).
+        В pipe и при --stealth — чистый текст без разметки."""
         if progress_fn:
             from rich.console import Console
             from rich.markdown import Markdown
-            Console(highlight=False).print(Markdown(text))
+            from rich.theme import Theme
+            from rich.style import Style
+            theme = "ansi_light" if _light_background() else "ansi_dark"
+            flat = Theme({
+                "markdown.code": Style(bold=True, color="cyan"),
+                "markdown.code_block": Style(color="cyan"),
+            })
+            Console(highlight=False, theme=flat).print(Markdown(text, code_theme=theme))
         else:
             out(text)
 
@@ -1249,32 +1524,42 @@ def main():
 
     def _tool_progress(line: str) -> None:
         if _err_console is not None:
-            _err_console.print(f"[dim]⚙ {line}[/dim]")
+            from rich.markup import escape
+            if "\n" in line:
+                body = "\n".join(f"│ {l}" for l in line.splitlines())
+                _err_console.print(f"[dim]{escape(body)}[/dim]")
+            else:
+                _err_console.print(f"[dim]⚙ {escape(line)}[/dim]")
         else:
             print(f"[botinok] {line}", file=sys.stderr, flush=True)
 
     progress_fn = _tool_progress if (sys.stderr.isatty() and not args.stealth) else None
+    _tapped_live = set()  # shell-сессии, чей вывод льётся в общий поток
     if progress_fn:
-        _progress(f"временная сессия: {session_path}")
+        # Фон терминала спрашиваем на старте, пока пользователь не печатает.
+        _light_background()
+        if args.once:
+            _progress(f"сессия временная: {session_path}")
+        else:
+            _progress(f"сессия временная: {session_path} "
+                      "(Enter/Esc после ответа — завершить, текст — продолжение)")
 
     def _confirm_dangerous(name: str, tool_args) -> tuple[bool, str]:
         """Запрос dangerous mode посреди одиночного запроса (только живой tty stdin)."""
         if not sys.stdin.isatty():
             return False, "нет интерактивного терминала (pipe/stealth), опасные действия запрещены"
-        try:
-            brief = json.dumps(tool_args, ensure_ascii=False, indent=2)
-        except Exception:
-            brief = str(tool_args)
+        detail = _fmt_dangerous_detail(name, tool_args)
         if _err_console is not None:
-            _err_console.print(f"\n[yellow]⚠ Агент просит опасное действие: {name}[/yellow]")
-            _err_console.print(f"[cyan]{brief}[/cyan]")
-            _err_console.print("[bold]Включить dangerous mode и выполнить?[/bold] "
-                               "[green]y[/green] — да, иначе — отказ (можно указать причину): ", end="")
+            from rich.markup import escape
+            _err_console.print(f"\n[yellow]⚠ Опасное действие[/yellow]")
+            _err_console.print(f"  {escape(detail)}")
+            _err_console.print("[bold]Выполнить?[/bold] [green]y[/green] — да "
+                               "(dangerous mode включится и для следующих команд), "
+                               "иначе — отказ (можно указать причину): ", end="")
         else:
-            print(f"\n[botinok] ⚠ Агент просит опасное действие: {name}", file=sys.stderr, flush=True)
-            print(brief, file=sys.stderr, flush=True)
-            print("[botinok] Включить dangerous mode и выполнить? y — да, "
-                  "иначе — отказ (можно указать причину): ", end="", file=sys.stderr, flush=True)
+            print(f"\n[botinok] ⚠ Опасное действие: {detail}", file=sys.stderr, flush=True)
+            print("[botinok] Выполнить? y — да (dangerous mode включится и для следующих "
+                  "команд), иначе — отказ (можно указать причину): ", end="", file=sys.stderr, flush=True)
         try:
             ans = input().strip()
         except EOFError:
@@ -1283,6 +1568,79 @@ def main():
         if ans.lower() in ("y", "yes", "д", "да"):
             return True, ""
         return False, ans
+
+    def _on_shell_input(prompt_line: str, secret: bool):
+        """Команда ждёт ввод — спросить у человека; None — пропустить (модель сама)."""
+        if not sys.stdin.isatty():
+            return None
+        if _err_console is not None:
+            from rich.markup import escape
+            _err_console.print(f"\n[cyan]⌨ Команда ждёт ввод[/cyan] [dim]({escape(prompt_line)})[/dim]")
+        else:
+            print(f"\n[botinok] ⌨ Команда ждёт ввод: {prompt_line}", file=sys.stderr, flush=True)
+        try:
+            if secret:
+                import getpass
+                text = getpass.getpass("[botinok] Введите (символы не видны, Enter — отправить): ")
+            else:
+                sys.stderr.write("[botinok] Введите (пустая строка — пропустить, решит модель): ")
+                sys.stderr.flush()
+                text = input()
+        except EOFError:
+            print("", file=sys.stderr)
+            return None
+        return text if text.strip() else None
+
+    def _attach_shell(session_id: str) -> bool:
+        from core.shell_session import ShellSessionRegistry
+        s = ShellSessionRegistry.instance().get(session_id)
+        if s is None:
+            return False
+        # На время перехвата глушим пассивный тап — вывод пишет сам перехват.
+        _tapped_live.discard(session_id)
+        try:
+            return _attach_shell_console(s)
+        finally:
+            _tapped_live.add(session_id)
+
+    def _on_shell_started(session_id: str) -> None:
+        """Пассивный тап: сырой вывод команды льётся в терминал (stderr) без
+        перехвата и клавиш. Быстрый вывод «догоняется» при подписке. Перехват
+        (raw-режим) включается только когда программа реально ждёт ввод."""
+        from core.shell_session import ShellSessionRegistry
+        s = ShellSessionRegistry.instance().get(session_id)
+        if s is None or session_id in _tapped_live:
+            return
+        _tapped_live.add(session_id)
+
+        def _tap(chunk: bytes) -> None:
+            if session_id not in _tapped_live:
+                return
+            try:
+                os.write(2, chunk)
+            except OSError:
+                pass
+
+        s.subscribe_flush(_tap)
+
+    def _ask_next_question():
+        """Продолжение сессии после ответа: пустая строка (Enter), Esc, Ctrl+C —
+        завершить; любой непустой текст — следующий вопрос."""
+        if _err_console is not None:
+            _err_console.print("\n[bold]Продолжаем?[/bold] [dim]Enter / Esc — завершить сессию "
+                               "(она удалится), любой текст — следующий вопрос[/dim]")
+        sys.stderr.write("[botinok] ❯ ")
+        sys.stderr.flush()
+        try:
+            line = input()
+        except (EOFError, KeyboardInterrupt):
+            print("", file=sys.stderr, flush=True)
+            return None
+        line = line.strip()
+        # Esc в терминале приходит как escape-последовательность (\x1b, \x1bOP, …)
+        if not line or (line.startswith("\x1b") and len(line) <= 4):
+            return None
+        return line
     
     # Подготовка начальных сообщений из промптов
     now = datetime.now().astimezone()
@@ -1294,6 +1652,7 @@ def main():
     
     session_location_msg = sm.load_prompt(session_path, "session_location",
                                           SESSION_PATH=session_path,
+                                          CWD=os.getcwd(),
                                           PROJECT_DIR=os.path.join(session_path, 'project'))
     
     session_files_msg = sm.load_prompt(session_path, "session_files",
@@ -1340,11 +1699,31 @@ def main():
         messages.append({"role": "system", "content": broken_tools_msg})
     
     step_num = 1
-    try:
-        while arg_prompt:
-            prompt = arg_prompt
-            arg_prompt = None  # Используем только один раз
+    prompt = arg_prompt
 
+    def _kill_all_shells() -> None:
+        """Фоновые shell-сессии не должны переживать ботинка и «драконить» диск."""
+        try:
+            from core.shell_session import ShellSessionRegistry
+            ShellSessionRegistry.instance().close_all()
+        except Exception:
+            pass
+
+    # Ctrl+C (SIGINT) штатно разворачивается в KeyboardInterrupt и доходит до
+    # finally ниже. SIGTERM/SIGHUP (закрытие терминала, kill, timeout) Python
+    # завершают молча, без atexit — ставим свои обработчики.
+    def _on_term(signum, frame):
+        _kill_all_shells()
+        raise SystemExit(128 + signum)
+
+    for _sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(_sig, _on_term)
+        except Exception:
+            pass
+
+    try:
+        while prompt:
             # Добавляем компактную памятку по инструментам ПЕРЕД началом хода (turn)
             tool_reminder_msg = sm.load_prompt(session_path, "tool_reminder",
                                                PROMPTS_DIR=os.path.join(session_path, 'prompts'))
@@ -1360,6 +1739,9 @@ def main():
                         model, messages, session_path, step_num, num_ctx,
                         progress=progress_fn,
                         confirm_dangerous=None if args.stealth else _confirm_dangerous,
+                        on_shell_input=None if args.stealth else _on_shell_input,
+                        attach_shell=None if args.stealth else _attach_shell,
+                        on_shell_started=_on_shell_started if progress_fn else None,
                     )
                 except KeyboardInterrupt:
                     out("\n[bold red]Interrupted[/bold red]")
@@ -1406,13 +1788,23 @@ def main():
                     "Исправь свою работу в соответствии с этими замечаниями. "
                     "Обязательно прочитай файл вердикта, если резюме обрезано."
                 )
+
+            # Ход завершён. В живом терминале спрашиваем продолжение:
+            # Enter — завершить (сессия удалится), текст — новый вопрос в этой же сессии.
+            if args.once or args.stealth or not sys.stdin.isatty():
+                break
+            prompt = _ask_next_question()
+            if prompt is None:
+                break
     except SystemExit:
         raise
     finally:
-        # Временная сессия одиночного запроса не остаётся в списке сессий.
+        # Всё, что могло остаться в фоне (du, ждущие ввода процессы), — умереть
+        # вместе с ботинком. Затем — удаление временной сессии.
+        _kill_all_shells()
         shutil.rmtree(session_path, ignore_errors=True)
         if progress_fn:
-            _progress(f"временная сессия удалена: {session_path}")
+            _progress(f"сессия завершена и удалена: {session_path}")
 
 if __name__ == "__main__":
     main()
