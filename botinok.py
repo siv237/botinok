@@ -774,6 +774,16 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
                 
                 sm.log_step(session_path, f"tool_{func_name}_{int(time.time())}", tool_call, {"result": result}, {})
 
+            # Фоновые веб-задачи: инкрементные уведомления + напоминание о висящих.
+            try:
+                from tools import web_jobs as _wj
+                _wj_note = _wj.format_notifications()
+            except Exception:
+                _wj_note = ""
+            if _wj_note:
+                messages.append({"role": "user", "content": _wj_note})
+                sm.update_context(session_path, "user", _wj_note)
+
             payload["messages"] = messages
             
         return messages

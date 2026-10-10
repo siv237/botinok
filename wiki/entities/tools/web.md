@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [tool, network, integration]
-updated: 2026-09-21
-sources: 6
+updated: 2026-10-10
+sources: 7
 status: stable
 ---
 
@@ -24,7 +24,17 @@ status: stable
 | `downloads` | память загрузок: что/куда/целое (глобальная, вне сессий) |
 | `search` | поиск (DuckDuckGo HTML через httpx, fallback — lynx) |
 | `proxy` | прокси: `command=show/set/clear/test` (нормализация, проверка, подтверждение) |
+| `jobs` | список фоновых задач: что готово (✅), что идёт (⏳ с прогрессом) |
+| `job` | статус/полный результат фоновой задачи по `job_id` (`wait=true`, `command=kill`) |
 | `help` | справка |
+
+## Фоновый режим (`background=true`)
+К любому сетевому действию (`auto/open/extract/json/images/download/search`)
+можно добавить `background=true name=метка`: задача уходит в отдельный тред
+(`tools/web_jobs.py` → `WebJobRegistry`), `job_id` возвращается сразу, агент
+не блокируется и может запустить пачку. Обычные вызовы **остались
+синхронными**. Опрос `action=jobs`, сбор `action=job`. О завершении/сбое
+приходит инкрементное уведомление в ход модели. → `entities/tools/web-jobs.md`
 
 ## Помощник-навигатор после любого fetch
 Любой успешный `open`/`auto`/`extract` добавляет в харнес строку

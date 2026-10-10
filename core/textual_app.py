@@ -1508,7 +1508,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         try:
             if self.is_streaming:
                 return True
-            if any(t.get("status") == "running" for t in self.active_tools):
+            if any(t.get("status") == "running" and not t.get("job")
+                   for t in self.active_tools):
                 return True
             return self.stats_data.get("status", "") not in self._IDLE_STATUSES
         except Exception:
@@ -1624,6 +1625,9 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                     self.chat.scroll_end(animate=False)
         if self._stats_dirty or self._tools_dirty or self._footer_dirty:
             self.update_stats_display()
+        # Фоновые веб-задачи живут между ходами: панель обновляется и в покое,
+        # чтобы было видно «что уже закончено, что ещё идёт».
+        self._sync_web_jobs()
         self._update_shells_panel()
 
     # ------------------------------------------------ встроенный терминал
@@ -2174,7 +2178,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         # Что именно ждём: данные модели, возврат инструмента или решение
         # человека. «Молчание модели» капает ТОЛЬКО когда ждём ответ модели;
         # во время работы инструмента и ожидания кнопки это не «зависание».
-        running_tools = [t for t in self.active_tools if t.get("status") == "running"]
+        running_tools = [t for t in self.active_tools
+                         if t.get("status") == "running" and not t.get("job")]
         waiting_human = bool(self._confirmation_event is not None
                              and not self._confirmation_event.is_set())
         tool_hang = False
@@ -3141,7 +3146,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         """
         if not self.turn_in_progress():
             return
-        running = [t for t in self.active_tools if t.get("status") == "running"]
+        running = [t for t in self.active_tools
+                   if t.get("status") == "running" and not t.get("job")]
         if running and not self._stop_dialog_open:
             self._open_stop_dialog(running)
         elif not running:
@@ -3360,6 +3366,61 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                 break
         self._tools_dirty = True
         self.update_stats_display()
+
+    def _sync_web_jobs(self) -> None:
+        """Синхронизировать карточки фоновых веб-задач в панели инструментов.
+
+        Задача — не вызов инструмента: она живёт между ходами, её карточка
+        помечена флагом `job` и не участвует в детекторах «идёт ход» (Esc,
+        зависание), чтобы фон не имитировал активность агента.
+        """
+        try:
+            from tools.web_jobs import WebJobRegistry
+            snaps = WebJobRegistry.instance().list()
+        except Exception:
+            return
+        if not snaps and not any(t.get("job") for t in self.active_tools):
+            return
+        by_id = {t.get("job_id"): t for t in self.active_tools if t.get("job_id")}
+        changed = False
+        seen = set()
+        for j in snaps:
+            jid = j["job_id"]
+            seen.add(jid)
+            status = {"running": "running", "done": "completed",
+                      "error": "error"}.get(j["status"], "running")
+            detail = j.get("progress") or ""
+            if status == "completed":
+                detail = f"{j['result_len']} зн."
+            t = by_id.get(jid)
+            if t is None:
+                t = {"name": f"web·{j['name']}·{jid[-4:]}",
+                     "query": j.get("args", ""), "status": status, "size_kb": 0,
+                     "detail": detail, "start_time": time.time(), "end_time": None,
+                     "job_id": jid, "job": True, "result": ""}
+                self.active_tools.append(t)
+                changed = True
+            if t.get("status") != status:
+                t["status"] = status
+                if status != "running" and not t.get("end_time"):
+                    t["end_time"] = time.time()
+                changed = True
+            if detail and t.get("detail") != detail:
+                t["detail"] = detail
+                changed = True
+            preview = j.get("result_preview") or j.get("error") or ""
+            if preview and t.get("result") != preview:
+                t["result"] = preview
+                changed = True
+        for jid, t in by_id.items():
+            if jid not in seen:
+                try:
+                    self.active_tools.remove(t)
+                    changed = True
+                except ValueError:
+                    pass
+        if changed:
+            self._tools_dirty = True
 
     @staticmethod
     def _fmt_dur(sec: float) -> str:

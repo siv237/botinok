@@ -135,6 +135,11 @@ class ToolManager:
                                     "json — JSON + jq-фильтр; "
                                     "download — скачать файл (докачка, торренты/magnet, проверка sha256; память загрузок action=downloads); "
                                     "search — поиск в интернете; proxy — настройка/проверка прокси (command=show|set|clear|test); help — справка. "
+                                    "ФОН (параллельность): к любому сетевому action добавь background=true и name=метка — "
+                                    "задача уйдёт в отдельный тред, job_id вернётся сразу; запускай пачку таких задач, "
+                                    "занимайся другим, опрашивай action=jobs, забирай готовые action=job job_id=… "
+                                    "(wait=true — подождать, command=kill — убить); о завершении/сбое придёт уведомление. "
+                                    "Без background всё работает как раньше (синхронно). "
                                     "После любого получения страницы инструмент сообщает, что на ней есть (images/links/tables), и как это достать. "
                                     "Чем качать: большие файлы/докачка/торренты — aria2c; сложные HTTP-запросы (методы, тело, JSON) — HTTP-клиент; "
                                     "при сбое aria2c загрузка автоматически повторяется HTTP-клиентом. "
@@ -142,8 +147,8 @@ class ToolManager:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "action": {"type": "string", "enum": ["auto", "open", "extract", "json", "images", "download", "downloads", "search", "proxy", "help"],
-                                       "description": "Что сделать (по умолчанию auto). downloads — память загрузок; images — найти прямые картинки; proxy — прокси"},
+                            "action": {"type": "string", "enum": ["auto", "open", "extract", "json", "images", "download", "downloads", "search", "proxy", "jobs", "job", "help"],
+                                       "description": "Что сделать (по умолчанию auto). downloads — память загрузок; images — найти прямые картинки; proxy — прокси; jobs — список фоновых задач; job — статус/результат фоновой задачи"},
                             "url": {"type": "string", "description": "URL http/https (для auto/open/extract/json/download)"},
                             "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP-метод (по умолчанию GET). Для API, требующих POST (например Ollama /api/generate), задай method=POST"},
                             "json_body": {"type": "object", "description": ("Тело запроса как JSON-объект (POST/PUT/PATCH) — для веб-API. "
@@ -175,8 +180,12 @@ class ToolManager:
                             "no_proxy": {"type": "string", "description": "Список хостов в обход прокси (через запятую), для action=proxy command=set"},
                             "scope": {"type": "string", "enum": ["session", "global"],
                                       "description": "Куда записать прокси (action=proxy command=set/clear): session (по умолчанию) или global"},
-                            "command": {"type": "string", "enum": ["show", "set", "clear", "test"],
-                                        "description": "Подкоманда для action=proxy: show, set, clear, test"}
+                             "command": {"type": "string", "enum": ["show", "set", "clear", "test", "kill"],
+                                         "description": "Подкоманда: для action=proxy — show/set/clear/test; для action=job — kill (убить фоновую задачу)"},
+                             "background": {"type": "boolean", "description": "true — выполнить сетевое действие в фоне (отдельный тред) и сразу вернуть job_id; для action=search/open/extract/json/images/download/auto"},
+                             "name": {"type": "string", "description": "Короткая метка фоновой задачи (для background) — по ней удобно ориентироваться в action=jobs"},
+                             "job_id": {"type": "string", "description": "ID фоновой задачи (action=job)"},
+                             "wait": {"type": "boolean", "description": "Для action=job: подождать завершения до timeout_sec вместо немедленного статуса"}
                         },
                         "required": []
                     }
