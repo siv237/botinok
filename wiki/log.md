@@ -1220,3 +1220,27 @@ pytest: 62 passed (test_themes::test_app — предсуществующий).
 Вики: новая `entities/tools/web-jobs.md`, обновлены `entities/tools/web.md`,
 `concepts/web_kit.md`, `concepts/function_calling.md`, `index.md`,
 `raw/README.md`. CHANGELOG 0.4. Не коммичено.
+
+## [2026-10-10] fix | Шторм overflow-ресетов: дедуп памяток, порядок порогов, самопочинка снапшотов
+Диагноз сессии `20261010_202930_visual_run` (13 ресетов каскадом за 15 мин,
+0 trim-артефактов, FORGOTTEN_INDEX не сработал ни разу):
+- `_append_turn_guidance` вызывался на каждом tool-раунде и писал копию
+  TOOL_USAGE_REMINDER в `messages` — 325 копий ≈ 236k токенов system-мусора;
+  тримм и ресет system-реплики берегут ⇒ оба механизма бессильны, prompt
+  стоял ровно на хард-пороге 0.9·num_ctx, ресет не понижал его — каскад.
+- Пороги были инвертированы: бюджет тримма `num_ctx−1200` (260944) выше
+  хард-триггера `0.9·num_ctx` (235929) — сегментный тримм (этап 2) мёртв.
+Исправления (`core/textual_integration.py`, `core/session_manager.py`):
+- `_append_system_once()` — system-реплика добавляется только если такой
+  точной ещё нет; `_append_turn_guidance` использует её (повторные вызовы
+  на границах раундов стали no-op);
+- бюджет тримма = `min(num_ctx, 0.9·num_ctx) − reserve` — тримм теперь
+  всегда успевает перед big-bang-ресетом;
+- `_ollama_summarize_and_reset_context` выкидывает старые протоколы ресета
+  (`OVERFLOW_PROTOCOL_MARKERS`) — новый протокол единственный;
+- `load_messages_snapshot` самопочиняет снапшоты: дубли идентичных
+  system-реплик убираются при восстановлении (спасение накопленных сессий).
+Тест: `tests/test_reminder_dedup_thresholds.py` (16 checks). Смежные:
+trim_segments, forgotten_index, token_calibration, session_snapshot,
+session_recovery, pressure_inject, history_lazy — зелёные.
+CHANGELOG 0.4 «Исправления». Не коммичено.

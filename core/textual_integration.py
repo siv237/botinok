@@ -91,6 +91,22 @@ _TOKEN_K_EMA_ALPHA = 0.3
 _token_k_state = {"by_model": {}, "current": 1.0}
 
 
+def _append_system_once(messages: list, content: str) -> bool:
+    """Добавляет system-реплику, только такой же ещё нет в истории.
+
+    Без дедупа служебные памятки, добавляемые на каждый tool-раунд,
+    накапливались сотнями копий и раздували запрос за пределы контекста
+    (регресс 2026-10-10: 325 копий TOOL_USAGE_REMINDER ≈ 236k токенов).
+    """
+    if not content or not content.strip():
+        return False
+    for m in messages:
+        if m.get("role") == "system" and str(m.get("content", "")) == content:
+            return False
+    messages.append({"role": "system", "content": content})
+    return True
+
+
 def _estimate_tokens_uncalibrated(text: str) -> int:
     if not text:
         return 0
@@ -241,6 +257,10 @@ def _unit_indices(msgs: list, seg: list) -> list:
 
 
 FORGOTTEN_BLOCK_BUDGET = 600
+# Начало текста протокола overflow-ресета (prompts/context_overflow_protocol.txt
+# и fallback в _ollama_summarize_and_reset_context). Старые протоколы вытесняются
+# новым при очередном ресете — иначе их копии накапливаются между ресетами.
+OVERFLOW_PROTOCOL_MARKERS = ("Контекст был очищен", "Context cleared.")
 FORGOTTEN_BLOCK_HEADER = (
     "FORGOTTEN_INDEX — каталог автоматически вытеснённых из контекста ходов "
     "(механический индекс, не пересказ). Это указатели, а не история: "
@@ -308,7 +328,10 @@ def _build_forgotten_block(session_path, first_kept_ts):
 def _prepare_messages_for_ollama(sm, session_path, messages, num_ctx, reserve_tokens=1200):
     if num_ctx <= 0:
         return messages
-    budget = max(256, num_ctx - max(0, reserve_tokens))
+    # Бюджет тримма обязан лежать НИЖЕ хард-триггера (HARD_CTX_PCT·num_ctx),
+    # иначе big-bang-ресет всегда успевает первым и сегментный тримм — мёртвый
+    # код (регресс 2026-10-10: 13 ресетов каскадом, 0 trim-артефактов).
+    budget = max(256, min(num_ctx, int(num_ctx * HARD_CTX_PCT)) - max(0, reserve_tokens))
     system_msgs = [m for m in messages if m.get("role") == "system"]
     other_msgs = [m for m in messages if m.get("role") != "system"]
     used = sum(_estimate_message_tokens(m) for m in system_msgs)
@@ -659,7 +682,8 @@ def _ollama_summarize_and_reset_context(
     sm, model, session_path, messages, num_ctx,
     reason, reserve_tokens=1600,
 ):
-    system_msgs = [m for m in messages if m.get("role") == "system"]
+    system_msgs = [m for m in messages if m.get("role") == "system"
+                   and not str(m.get("content", "")).lstrip().startswith(OVERFLOW_PROTOCOL_MARKERS)]
 
     last_user_prompt = ""
     for m in reversed(messages):
@@ -1076,7 +1100,10 @@ def ask_ollama_textual(
             _update_stats(status="Ready")
 
     def _append_turn_guidance(resume_turn=False):
-        """Перед ходом добавляет памятку по инструментам.
+        """Перед ходом добавляет памятку по инструментам (одну, без дублей).
+
+        Вызывается и на границах tool-раундов; повторная такая же памятка
+        не добавляется (_append_system_once).
 
         При возобновлении сессии из памятки и политики инструментов вырезаются
         строки про обязательную проверку skills/experience — никакой «отменяющей»
@@ -1087,8 +1114,7 @@ def ask_ollama_textual(
         if tool_reminder_msg:
             if resume_session:
                 tool_reminder_msg = SessionManager.strip_skills_mandate(tool_reminder_msg)
-            if tool_reminder_msg.strip():
-                messages.append({"role": "system", "content": tool_reminder_msg})
+            _append_system_once(messages, tool_reminder_msg)
 
     def _stream_turn(user_text, resume_turn=False):
         nonlocal _stream_buf
