@@ -394,7 +394,6 @@ def _perform_update():
 
         # Обновляем .version, иначе баннер останется на версии установки.
         _write_version_file(script_dir)
-        launcher_note = _refresh_launcher(script_dir)
         
         # Проверяем, изменился ли requirements.txt
         if old_hash:
@@ -413,11 +412,9 @@ def _perform_update():
                     pip_output = pip_result.stdout if pip_result.returncode == 0 else pip_result.stderr
                     return True, (f"{pull_result.stdout}\n[Обнаружено изменение requirements.txt]"
                                   f"\nОбновление зависимостей:\n{pip_output}{_system_deps_warning()}"
-                                  f"\n{_ensure_system_deps()}"
-                                  + (f"\n{launcher_note}" if launcher_note else ""))
+                                  f"\n{_ensure_system_deps()}")
         
-        return True, (pull_result.stdout + _system_deps_warning() + "\n" + _ensure_system_deps()
-                      + (f"\n{launcher_note}" if launcher_note else ""))
+        return True, pull_result.stdout + _system_deps_warning() + "\n" + _ensure_system_deps()
     except Exception as e:
         return False, str(e)
 
@@ -1363,6 +1360,12 @@ def main():
         # Компоненты ставим ВСЕГДА, независимо от того, есть ли новый коммит:
         # иначе обновление на актуальной версии не доустанавливает chafa/ffmpeg.
         out(_ensure_system_deps())
+
+        # Лаунчер чиним тоже ВСЕГДА: старые копии без BOTINOK_LAUNCH_DIR
+        # ломают рабочую папку даже при актуальном коде.
+        launcher_note = _refresh_launcher(os.path.dirname(os.path.abspath(__file__)))
+        if launcher_note:
+            out(launcher_note)
 
         result, error = _check_remote_version()
         
