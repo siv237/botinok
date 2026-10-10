@@ -793,6 +793,10 @@ def _choose_or_resume_session(sm: SessionManager, stealth_mode: bool, default_su
     if stealth_mode or (not sys.stdin.isatty()):
         return sm.create_session(default_suffix), ""
 
+    # Пустые сессии от прошлых запусков («начал и вышел») прибираем молча;
+    # свежие (<10 мин) не трогаем — в них может жить другой экземпляр.
+    sm.prune_stale_empty_sessions()
+
     sessions = sm.list_sessions()
     if not sessions:
         return sm.create_session(default_suffix), ""
@@ -812,10 +816,14 @@ def _choose_or_resume_session(sm: SessionManager, stealth_mode: bool, default_su
         for s in sessions
     ]
 
+    def preview_and_sign(path: str):
+        # (первый запрос, последняя подпись шага) — экран покажет их вместе.
+        return (sm.load_first_user_prompt(path), sm.load_last_sign_note(path))
+
     from core.session_picker import pick_session
     try:
         action, chosen_path = pick_session(
-            session_data, latest_name, preview_loader=sm.load_first_user_prompt
+            session_data, latest_name, preview_loader=preview_and_sign
         )
     except KeyboardInterrupt:
         return None, ""
@@ -1080,6 +1088,8 @@ def main():
             # клики в шелле печатают escape-мусор. Последовательности idempotent.
             sys.stdout.write("\x1b[?1002l\x1b[?1003l\x1b[?1000l\x1b[?1006l\x1b[?1015l")
             sys.stdout.flush()
+            # Пользователь вышел, так и не начав диалог, — сессия не нужна.
+            sm.prune_empty_session(session_path)
         return
 
     # Определяем параметры из аргументов или конфига
@@ -1230,6 +1240,10 @@ def main():
                 )
     except SystemExit:
         raise
+    finally:
+        # Пустой запуск (отмена/ошибка до первого сообщения) не должен
+        # оставлять мёртвую папку в списке сессий.
+        sm.prune_empty_session(session_path)
 
 if __name__ == "__main__":
     main()

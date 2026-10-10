@@ -443,8 +443,14 @@ class _ListScreen(Screen):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _set_preview(self, path: str, preview: str) -> None:
-        self._meta.setdefault(path, {})["preview"] = preview
+    def _set_preview(self, path: str, preview) -> None:
+        # preview_loader может вернуть (первый запрос, последняя подпись шага).
+        sign = ""
+        if isinstance(preview, tuple):
+            preview, sign = (preview + ("",))[:2]
+        meta = self._meta.setdefault(path, {})
+        meta["preview"] = preview
+        meta["sign"] = str(sign or "")
         self._update_row_in_place(path)
 
     def _set_size(self, path: str, size: int) -> None:
@@ -508,10 +514,16 @@ class _ListScreen(Screen):
         return max(20, width - self.INFO_COL_WIDTH)
 
     def _text_for(self, s: dict, avail: int) -> str:
-        """`дата · срок · текст… размер` — размер прижат вправо."""
+        """`дата · срок · текст… размер` — размер прижат вправо.
+
+        Если у сессии есть подписи sign_step, к первому запросу добавляется
+        последняя: «первый запрос · ✓ чем закончился последний шаг». Так
+        видно, где сессия остановилась, а не только с чего начиналась.
+        """
         path = s.get("path") or ""
         meta = self._meta.get(path, {})
         preview = meta.get("preview")
+        sign = str(meta.get("sign") or "").strip()
         ts = _absolute_time(s.get("mtime"))
         rel = _relative_time(s.get("mtime"))
         if preview is None:
@@ -521,7 +533,22 @@ class _ListScreen(Screen):
         size_txt = _human_size(meta.get("size"))
         size_cell = " " * max(0, SIZE_COL_WIDTH - cell_width(size_txt)) + size_txt
         left_area = max(8, avail - SIZE_COL_WIDTH - 1)
-        left = cell_truncate(f"{ts}  ·  {rel}  ·  {first}", left_area, ellipsis="...")
+        prefix = f"{ts}  ·  {rel}  ·  "
+        if sign and first != "…":
+            room = max(10, left_area - cell_width(prefix))
+            sep = "  ·  "
+            first_w, sign_w = cell_width(first), cell_width(sign)
+            if first_w + sign_w + cell_width(sep) <= room:
+                body = f"{first}{sep}{sign}"
+            else:
+                # Короткий промпт уступает место подписи; длинному — половина.
+                first_room = min(first_w, max(10, room // 2))
+                sign_room = max(10, room - first_room - cell_width(sep))
+                body = (cell_truncate(first, first_room, ellipsis="…") + sep
+                        + cell_truncate(sign, sign_room, ellipsis="…"))
+        else:
+            body = first
+        left = cell_truncate(prefix + body, left_area, ellipsis="...")
         left += " " * max(0, left_area - cell_width(left))
         return left + " " + size_cell
 
@@ -537,7 +564,9 @@ class _ListScreen(Screen):
             path = s.get("path") or ""
             name = s.get("name") or "(unknown)"
             preview = self._meta.get(path, {}).get("preview")
-            if flt and flt not in name.lower() and flt not in str(preview or "").lower():
+            sign = self._meta.get(path, {}).get("sign")
+            hay = " ".join([name, str(preview or ""), str(sign or "")]).lower()
+            if flt and flt not in hay:
                 continue
             row = _SessionRow(path, self._text_for(s, estimate))
             rows.mount(row)
