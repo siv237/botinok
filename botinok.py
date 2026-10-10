@@ -336,6 +336,34 @@ def _ensure_system_deps(verbose: bool = True) -> str:
 
 
 
+def _refresh_launcher(script_dir: str) -> str:
+    """Пересоздать лаунчер в BIN_DIR: старые копии не знают про BOTINOK_LAUNCH_DIR."""
+    import shutil
+    launcher = shutil.which("botinok")
+    if not launcher or not os.path.isfile(launcher):
+        return ""
+    try:
+        with open(launcher, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        if "BOTINOK_LAUNCH_DIR" in content:
+            return "Лаунчер актуален."
+        new_content = content.replace(
+            'cd "$BOTINOK_HOME"',
+            'export BOTINOK_LAUNCH_DIR="$PWD"\ncd "$BOTINOK_HOME"',
+            1,
+        )
+        if new_content == content:
+            return "Не распознан формат лаунчера — прогони вручную: sudo bash install.sh"
+        with open(launcher, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        os.chmod(launcher, 0o755)
+        return f"Лаунчер обновлён: {launcher}"
+    except PermissionError:
+        return "Нет прав на обновление лаунчера — запусти `botinok --update` через sudo."
+    except Exception as e:
+        return f"Не удалось обновить лаунчер: {e}"
+
+
 def _perform_update():
     """Выполняет git pull для обновления и при необходимости обновляет зависимости Python."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -366,6 +394,7 @@ def _perform_update():
 
         # Обновляем .version, иначе баннер останется на версии установки.
         _write_version_file(script_dir)
+        launcher_note = _refresh_launcher(script_dir)
         
         # Проверяем, изменился ли requirements.txt
         if old_hash:
@@ -384,9 +413,11 @@ def _perform_update():
                     pip_output = pip_result.stdout if pip_result.returncode == 0 else pip_result.stderr
                     return True, (f"{pull_result.stdout}\n[Обнаружено изменение requirements.txt]"
                                   f"\nОбновление зависимостей:\n{pip_output}{_system_deps_warning()}"
-                                  f"\n{_ensure_system_deps()}")
+                                  f"\n{_ensure_system_deps()}"
+                                  + (f"\n{launcher_note}" if launcher_note else ""))
         
-        return True, pull_result.stdout + _system_deps_warning() + "\n" + _ensure_system_deps()
+        return True, (pull_result.stdout + _system_deps_warning() + "\n" + _ensure_system_deps()
+                      + (f"\n{launcher_note}" if launcher_note else ""))
     except Exception as e:
         return False, str(e)
 
