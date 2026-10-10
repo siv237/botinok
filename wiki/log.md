@@ -1094,3 +1094,37 @@ Terminal-Bench/SWE-bench-2026 (свинг скаффолда 22 балла пр�
 (ступенчатое раскрытие, FORGOTTEN_INDEX/биг-бенг/тримм, pressure, sign_step, tool_policy,
 шимы подсказок): узел без движения слайса — кандидат на удаление. Внешний контур —
 ботинок как харнес-адаптер в PawBench.
+
+## [2026-10-10] query | Темы оформления TUI: исследование
+
+Запрос: как сделать темы помимо чёрной (день/вечер/ночь, переключатель-пиктограмма,
+редактируемые конфиги). Результат — concepts/theming.md (draft). Инвентаризация цветов:
+CSS BotinokTextualApp (~40 правил, смесь hex и $токенов), ~300 inline-разметок [cyan]-style
+(textual_app 160, integration 92, остальные — viewer/shell/picker), pygments code_theme,
+chafa-баннер. Вывод: Textual 8.2.3 покрывает всё штатно — register_theme + реактивный
+App.theme (живой рестайл), Theme.variables (кастомные $токены в CSS), [$token] в markup
+(постепенная миграция). Конфиг: [UI] theme + [theme:<имя>] в config.cfg. Переключатель
+☀🌆🌙 — кликабельные Static в header_row (паттерн auto_flag). Реализация не начата.
+
+## [2026-10-10] ingest | Темы реализованы: ночь/день/вечер + иконка-цикл
+
+core/themes.py: night (клон textual-dark, дефолт, вид не менялся), day (белая),
+evening (голубая). CSS BotinokTextualApp токенизирован (кастомные $переменные =
+прежние литералы в night). В шапке одна иконка #theme_btn (левый верх) — показывает
+следующую тему цикла, клик переключает и пишет [UI] theme в config.cfg (построчно,
+комментарии целы). Проводка theme/config_path из ask_ollama_textual. Тест
+tests/test_themes.py (20 проверок, включая headless-клики) + регрессия
+chat_pager/escape_stream/confirm_inline/history_lazy — зелено. concepts/theming.md
+обновлён (stable). В git не коммичено (по указанию).
+
+## [2026-10-10] ingest | Темы: глобальное хранение + покрытие меню/визардов
+
+Тема запоминается в ~/.config/botinok/config.cfg ([UI] theme, построчно, комментарии
+целы) и действует на все Textual-приложения: чат, диалоги textual_prompts (через них и
+config_wizard), SessionPickerApp (иконка на обоих экранах), HistoryViewerApp. Общий
+ThemedAppMixin (core/themes.py): регистрация палитр, загрузка глобального выбора,
+make_theme_btn (иконка слева вверху, dock: top), on_click-цикл с персистом. Грабли:
+Textual вызывает on_click по всей MRO — дубль обработки в BotinokTextualApp давал
+двойной цикл, убран. Тест test_themes.py расширен до 26 проверок (global load/save,
+диалог берёт глобальную тему, клик пишет в global); регрессия wizard/chat_pager/
+escape/confirm/history — зелено. Не коммичено.

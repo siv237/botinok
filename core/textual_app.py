@@ -22,6 +22,7 @@ from rich.theme import Theme as RichTheme
 _PAGER_THEME = RichTheme({"markdown.code": "bold", "markdown.code_block": "none"})
 _PAGER_CODE_THEME = "ansi_light"
 from core.image_block import ImageBlock, refresh_visible_images
+from core import themes as botinok_themes
 from typing import Optional, Callable, List
 import io
 import json
@@ -619,31 +620,35 @@ class Composer(TextArea):
             app._composer_history(self, +1)
 
 
-class BotinokTextualApp(App):
+class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     """Textual приложение для Botinok."""
 
     CSS = """
     Screen { layout: vertical; }
     #header_row { height: 1; min-height: 1; max-height: 1; padding: 0; margin: 0;
-                  background: #0055aa; }
-    #header_row.dangerous { background: red; }
-    #header_row.proofreader { background: yellow; }
+                  background: $hdr-bg; }
+    #header_row.dangerous { background: $danger-bg; }
+    #header_row.proofreader { background: $warn-bg; }
     #header { width: 1fr; height: 1; padding: 0; margin: 0;
-              content-align: center middle; background: transparent; color: white; text-style: bold; }
+              content-align: center middle; background: transparent; color: $hdr-fg; text-style: bold; }
     /* Флаг автосогласия в шапке: виден только когда включён; клик — отключить. */
     #auto_flag { width: auto; height: 1; padding: 0 1; margin: 0; display: none;
-                 background: #cc8800; color: black; text-style: bold; }
+                 background: $flag-bg; color: $flag-fg; text-style: bold; }
     #auto_flag.on { display: block; }
+    /* Иконка переключателя тем в левом верхнем углу шапки: клик — цикл. */
+    .theme_btn { width: auto; height: 1; padding: 0 1; margin: 0; border: none;
+                 background: transparent; color: $hdr-fg; }
+    .theme_btn:hover { text-style: bold underline; }
     /* Кнопка «открыть текст чата в терминале» — без фона, лёгкий акцент. */
     #chat_pager_btn { width: auto; height: 1; min-height: 1; max-height: 1; min-width: 0;
                      padding: 0 1; margin: 0 0 0 0; border: none;
-                     background: transparent; color: #6b8f9a; text-style: bold; }
+                     background: transparent; color: $pager-fg; text-style: bold; }
     #chat_pager_btn:hover, #chat_pager_btn:focus {
-                     background: transparent; color: cyan; text-style: bold underline; }
+                     background: transparent; color: $hl; text-style: bold underline; }
     #main { height: 1fr; }
     #content { width: 2fr; height: 1fr; padding: 0; }
     #diag { height: auto; max-height: 16; width: 1fr; background: transparent; border: none; padding: 0; }
-    #diag CollapsibleTitle { width: 1fr; padding: 0; color: cyan; }
+    #diag CollapsibleTitle { width: 1fr; padding: 0; color: $hl; }
     #diag_scroll { height: auto; max-height: 14; }
     #diag_list { height: auto; }
     #diag_list .diag_row { height: auto; width: 1fr; }
@@ -653,13 +658,13 @@ class BotinokTextualApp(App):
                              border: none; padding: 0; }
     #diag_list CollapsibleTitle { padding: 0; width: 1fr; }
     #inline_confirm { height: auto; max-height: 60%; display: none;
-                      border: solid red; padding: 0 1; background: $surface; }
+                      border: solid $err; padding: 0 1; background: $surface; }
     #inline_confirm.active { display: block; }
     #inline_confirm ConfirmInline { height: auto; }
     #inline_confirm_body { height: auto; padding: 0 1; }
     #inline_confirm_cmd_scroll { height: auto; max-height: 12; overflow-y: auto; }
-    #inline_confirm_cmd { height: auto; background: #0f0f0f; color: #d0d0d0; padding: 0 1;
-                         border: round #5f87af; }
+    #inline_confirm_cmd { height: auto; background: $cmd-bg; color: $cmd-fg; padding: 0 1;
+                         border: round $cmd-border; }
     #inline_confirm_options { height: auto; max-height: 10; border: none;
                               padding: 0; background: transparent; width: 1fr; }
     #inline_confirm_options:focus { border: none; }
@@ -669,38 +674,38 @@ class BotinokTextualApp(App):
     #inline_confirm_auto, #confirm_auto { width: auto; height: auto; margin: 0 0 0 2; }
     /* Запасной модальный вариант: без вложенной рамки OptionList. */
     #confirm_options { border: none; padding: 0; background: transparent; width: 1fr; }
-    #inline_shell { height: 50%; display: none; border: solid cyan; padding: 0; }
+    #inline_shell { height: 50%; display: none; border: solid $hl; padding: 0; }
     #inline_shell.active { display: block; }
     #inline_shell ShellInline { height: 1fr; }
-    #inline_shell_title { height: 1; background: cyan; color: black;
+    #inline_shell_title { height: 1; background: $hl; color: $accent-fg;
                           text-style: bold; padding: 0 1; }
     #inline_shell_cmd, #shell_cmd { height: auto; max-height: 40%; display: none;
-                                    background: #0f0f0f; color: #d0d0d0;
+                                    background: $cmd-bg; color: $cmd-fg;
                                     padding: 0 1; border: none; }
     #inline_shell_cmd.show, #shell_cmd.show { display: block; }
     /* Раскрытая команда отделена рамкой (без цветного фона), чтобы визуально
        отличать её от результата под ней. */
-    #inline_shell_cmd.show, #shell_cmd.show { background: #0f0f0f; color: #d0d0d0;
-                                              border: round #5f87af; }
+    #inline_shell_cmd.show, #shell_cmd.show { background: $cmd-bg; color: $cmd-fg;
+                                              border: round $cmd-border; }
     /* Когда команда раскрыта — сокращённая (title) не показывается. */
     ShellInline.cmd-open #inline_shell_title { display: none; }
     ShellScreen.cmd-open #shell_title { display: none; }
-    #inline_shell_log { height: 1fr; border: none; padding: 0 1; background: #0c0c0c; }
+    #inline_shell_log { height: 1fr; border: none; padding: 0 1; background: $shell-bg; }
     #inline_shell_hint { height: 1; color: $text-muted; padding: 0 1; }
     #inline_shell_bottom { height: 3; }
     #inline_shell_input { height: 3; width: 1fr; }
     #inline_shell_buttons { height: 3; width: auto; align: right middle; }
     #inline_shell_buttons Button { min-width: 12; height: 3; margin: 0 1; }
-    #chat { height: 1fr; min-height: 3; border: solid green; padding: 0 1; overflow-y: auto; }
+    #chat { height: 1fr; min-height: 3; border: solid $ok; padding: 0 1; overflow-y: auto; }
     #chat_toolbar { dock: top; height: 1; min-height: 1; width: 1fr; align-horizontal: right; }
     #load_older { width: 1fr; height: 1; min-height: 1; margin: 0; padding: 0 1;
-                  background: transparent; border: none; color: cyan; }
+                  background: transparent; border: none; color: $hl; }
     #load_older:hover { background: $primary 30%; }
     .history_batch { height: auto; width: 1fr; }
     #right { width: 1fr; }
-    #shells { height: auto; max-height: 50%; display: none; border: solid cyan; padding: 0; }
+    #shells { height: auto; max-height: 50%; display: none; border: solid $hl; padding: 0; }
     #shells.has-items { display: block; }
-    #shells_title { height: 1; color: cyan; text-style: bold; padding: 0 1; }
+    #shells_title { height: 1; color: $hl; text-style: bold; padding: 0 1; }
     #shells_active { height: 1; padding: 0 1; color: $success; }
     #shells Horizontal { height: 1; }
     #shells Button { height: 1; min-height: 1; min-width: 0; margin: 0; padding: 0 1;
@@ -710,20 +715,20 @@ class BotinokTextualApp(App):
     #shells Static.stamp { width: auto; height: 1; padding: 0 1; color: $text-muted; }
     #shells Button.kill { width: 3; min-width: 3; text-align: center;
                           content-align: center middle; }
-    #stats { height: auto; border: round yellow; border-title-color: yellow;
+    #stats { height: auto; border: round $warn; border-title-color: $warn;
              border-title-style: bold; padding: 0 1; }
     #stats_rows { height: auto; }
     #ctx_bar { height: 1; }
-    #ctx_bar.low .bar--bar { color: green; }
-    #ctx_bar.mid .bar--bar { color: yellow; }
-    #ctx_bar.high .bar--bar { color: red; }
-    #tools { height: 1fr; border: round cyan; border-title-color: cyan;
+    #ctx_bar.low .bar--bar { color: $ok; }
+    #ctx_bar.mid .bar--bar { color: $warn; }
+    #ctx_bar.high .bar--bar { color: $err; }
+    #tools { height: 1fr; border: round $hl; border-title-color: $hl;
              border-title-style: bold; }
     #tools_list { height: 1fr; overflow-y: auto; }
     #tools_list Collapsible { width: 1fr; height: auto; background: transparent;
                               border: none; padding: 0; }
     #tools_list CollapsibleTitle { padding: 0; width: 1fr; color: $text; }
-    #footer { height: 3; border: round cyan; border-title-color: cyan; padding: 0 1; }
+    #footer { height: 3; border: round $hl; border-title-color: $hl; padding: 0 1; }
     Input { height: 3; }
     #input { height: 3; min-height: 3; max-height: 10; }
     /* Очередь «мыслей»: висит внизу над полем ввода, у каждой — крестик отмены. */
@@ -733,7 +738,7 @@ class BotinokTextualApp(App):
     .thought_chip { height: 1; }
     .thought_text { width: 1fr; color: $text-muted; }
     .thought_del { width: 3; min-width: 3; height: 1; border: none; padding: 0;
-                   background: transparent; color: red; }
+                   background: transparent; color: $err; }
     .thought_del:hover { background: $error 30%; }
     Collapsible { width: 1fr; height: auto; background: transparent; border: none; padding: 0; }
     CollapsibleTitle { color: $text-muted; padding: 0 1; width: 1fr; }
@@ -745,13 +750,19 @@ class BotinokTextualApp(App):
 
     def __init__(self, session_path: str = "", on_submit: Optional[Callable] = None,
                  on_slash_command: Optional[Callable] = None, version: str = "",
-                 initial_prompt: str = "", **kwargs):
+                 initial_prompt: str = "", theme: str = "",
+                 config_path: Optional[str] = None, **kwargs):
         super().__init__(**kwargs)
         self.session_path = session_path
         self.version = version
         self.initial_prompt = initial_prompt
         self.on_submit = on_submit
         self.on_slash_command = on_slash_command
+        # Темы (mixin зарегистрировал палитры и применил глобальный выбор);
+        # явный параметр theme — переопределение (например, из локального конфига).
+        self.config_path = config_path
+        if theme in botinok_themes.THEME_ORDER:
+            self.theme = theme
         self.chat: Optional[Vertical] = None
         self.stream_static: Optional[Static] = None
         self.stats_rows: Optional[Static] = None
@@ -1221,12 +1232,16 @@ class BotinokTextualApp(App):
         self.header_row = Horizontal(id="header_row")
         self.header_display = Static("", id="header")
         self.auto_flag = Static("АВТОСОГЛАСИЕ: ВКЛ ✕", id="auto_flag")
+        # Одна иконка в левом верхнем углу: показывает СЛЕДУЮЩУЮ тему цикла,
+        # клик — применить её.
+        self.theme_btn = self.make_theme_btn()
         self.chat_pager_btn = Button(">_", id="chat_pager_btn")
         try:
             self.chat_pager_btn.tooltip = "Открыть чат в терминале (F6)"
         except Exception:
             pass
         with self.header_row:
+            yield self.theme_btn
             yield self.header_display
             yield self.auto_flag
         with Horizontal(id="main"):
@@ -3032,6 +3047,7 @@ class BotinokTextualApp(App):
             pass
 
     def on_click(self, event) -> None:
+        # Иконка темы обрабатывается в ThemedAppMixin.on_click (MRO).
         # Клик по флагу автосогласия в шапке — выключить его.
         try:
             if getattr(event, "widget", None) is self.auto_flag and self.dangerous_auto_confirm:
@@ -3039,6 +3055,16 @@ class BotinokTextualApp(App):
                 self.append_log("[yellow]Автосогласие отключено.[/yellow]")
                 self._update_header()
                 event.stop()
+        except Exception:
+            pass
+
+    def apply_theme(self, name: str) -> None:
+        """Сменить тему (запоминается глобально, ~/.config/botinok/config.cfg)."""
+        if name not in botinok_themes.THEME_ORDER:
+            return
+        super().apply_theme(name)
+        try:
+            self.append_log(f"[dim]Тема: {botinok_themes.THEME_LABELS[name]}[/dim]")
         except Exception:
             pass
 

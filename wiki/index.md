@@ -69,6 +69,7 @@
 - [concepts/audio_multimodal.md](concepts/audio_multimodal.md) — мультимодальность: аудио через images[]/input_audio (требует omni-модель)
 - [concepts/stealth_pipe_mode.md](concepts/stealth_pipe_mode.md) — тихий режим и работа из конвейера (stdin)
 - [concepts/proofreader.md](concepts/proofreader.md) — режим корректора (Исполнитель → Корректор)
+- [concepts/theming.md](concepts/theming.md) — темы день/вечер/ночь: токены Textual, конфиг-секции, переключатель в шапке; draft
 - [concepts/config_priority.md](concepts/config_priority.md) — приоритет конфигов и wizard
 - [concepts/self_update.md](concepts/self_update.md) — автообновление из git (--update)
 

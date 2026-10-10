@@ -17,15 +17,18 @@ from textual.containers import Vertical
 from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
+from core import themes as botinok_themes
 
-class _SelectApp(App):
+
+class _SelectApp(botinok_themes.ThemedAppMixin, App):
     """Модальный выбор одного варианта из списка (замена inquirer.List)."""
 
     CSS = """
     _SelectApp { align: center middle; }
     #q_message { width: 90%; padding: 1 2; color: $text; }
-    #q_options { width: 90%; height: auto; max-height: 70%; border: solid cyan; }
-    """
+    #q_options { width: 90%; height: auto; max-height: 70%; border: solid $hl; }
+    #theme_btn { dock: top; }
+    """ + botinok_themes.THEME_BTN_CSS
 
     def __init__(self, message: str, choices: Sequence[Tuple[str, object]],
                  default: object = None, **kwargs):
@@ -36,6 +39,7 @@ class _SelectApp(App):
         self.result: Optional[object] = None
 
     def compose(self) -> ComposeResult:
+        yield self.make_theme_btn()
         with Vertical():
             yield Static(self.message, id="q_message")
             yield OptionList(id="q_options")
@@ -67,14 +71,15 @@ class _SelectApp(App):
             self.exit(None)
 
 
-class _TextApp(App):
+class _TextApp(botinok_themes.ThemedAppMixin, App):
     """Ввод строки (замена rich.prompt.Prompt)."""
 
     CSS = """
     _TextApp { align: center middle; }
     #t_message { width: 90%; padding: 1 2; }
     #t_input { width: 90%; }
-    """
+    #theme_btn { dock: top; }
+    """ + botinok_themes.THEME_BTN_CSS
 
     def __init__(self, message: str, default: str = "",
                  password: bool = False, **kwargs):
@@ -85,6 +90,7 @@ class _TextApp(App):
         self.result: Optional[str] = None
 
     def compose(self) -> ComposeResult:
+        yield self.make_theme_btn()
         with Vertical():
             yield Static(self.message, id="t_message")
             yield Input(value=self.default, password=self.password, id="t_input")
