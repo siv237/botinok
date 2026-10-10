@@ -1025,6 +1025,20 @@ class SessionManager:
         except Exception:
             return None
         messages = payload.get("messages", []) if isinstance(payload, dict) else []
+        # Самопочинка повреждённых снапшотов: исторически памятки-напоминания
+        # писались на каждый tool-раунд и накапливались сотнями копий
+        # (регресс 2026-10-10). При восстановлении оставляем по одной копии
+        # каждой идентичной system-реплики (первую).
+        seen_system = set()
+        deduped = []
+        for msg in messages:
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                key = str(msg.get("content", ""))
+                if key in seen_system:
+                    continue
+                seen_system.add(key)
+            deduped.append(msg)
+        messages = deduped
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
