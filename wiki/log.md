@@ -1306,3 +1306,39 @@ Pre-existing провал test_api_resilience::err_unknown — проверен 
 context.json, в ленте — событие «📚 Режим вики включён». Хук в текстовом
 цикле после успешного вызова skills; детектив `_wiki_mode_activation`.
 Тесты: activation_*/note_deduped.
+
+## [2026-10-11] query | Как работает сжатие контекста: что видит модель, чего не может
+Изучен текущий механизм (TI + session_digest + prompts): тримм сегментами с
+бюджетом ниже хард-триггера, FORGOTTEN_INDEX (600 ток., регенерация на запрос),
+big-bang reset с SESSION_PROTOCOL (триггеры: 90% ctx, повторы, 80 раундов),
+pressure-инжект 70/85% в TOOL_RESULT_SUMMARY, калибровка оценщика k.
+Выводы-пробелы: счётчики get_compression_stats идут только в UI — модель их
+не видит; самостоятельного вызова сжатия нет (ни action у session_memory);
+модели неизвестен абсолютный бюджет/расход. Страница concepts/context_management.md
+переписана по коду (была от 2026-08-23, до октябрьских фиксов).
+
+## [2026-10-11] feat | Осознанная компакция: агент видит цену контекста и жмёт compact сам
+Модель получила управление расходом контекста вместо ожидания авто-сброса:
+- context_map: харнес пишет context_map.json перед каждым запросом (user-корневые
+  блоки с ценой в токенах, % num_ctx, инструментами); читается session_memory
+  action=context_map;
+- context_stats: исторические цены по окнам session_digest (медиана tool-раунда по
+  приросту prompt_eval, средние цены инструментов, peak/p95, запас num_ctx,
+  rounds_left_est) — понимать «задача не влезет — разбить» до начала;
+- compact blocks="1,3-5" note=…: запрос в compact_request.json, исполняет харнес
+  на границе раунда (apply_pending_compacts): блоки уходят в артефакт, на их место
+  — заглушка COMPACTED_BLOCKS с освобождёнными токенами; рельсы: текущий ход не
+  сжимается, блоки <2% num_ctx пропускаются, кап 12; context.json цел — поднятие
+  get_turn/search; статистика stats.manual;
+- context_cost: tool-результат ≥5% num_ctx помечается ценой с указанием механизма;
+- pressure: добавлен уровень 50% «планируй» (было 70/85), строки уровня теперь с
+  абсолютными токенами (used/max);
+- дедуп identical-вызовов file_system/journal внутри хода → DEDUP_SAME_CALL с
+  указателем на артефакт (анти-спам, фокус); tool_policy и схема session_memory
+  обновлены.
+Тесты: tests/test_context_compact.py (новый), test_pressure_inject.py (уровень 50%
+и абсолютные числа). Прогон всего набора: зелено, кроме pre-existing
+test_api_resilience::err_unknown и test_web_progress (воспроизведены на HEAD).
+Визуал: COMPACTED_BLOCKS — структурированная многострочная заглушка (маркер+суть,
+затем поля •), в ленту — короткая строка «🗜 Память: сжато … блоки N → −X ток.
+(a%→b%)» вместо простыни; apply_pending_compacts возвращает (stub, brief).

@@ -44,6 +44,15 @@ MODELS_NO_TOOLS = set()
 TOOL_OUTPUT_MAX_CHARS = 100000
 STREAM_TOOL_TEXT_MAX_CHARS = 12000  # не используется, оставлено для совместимости
 HARD_CTX_PCT = 0.90
+# Осознанная компакция (запрос модели): подсказка context_cost в tool-результате
+# при цене блока ≥5% num_ctx; не сжимать блоки дешевле 2% (трясня ради крох);
+# максимум блоков в одном запросе компакции.
+COMPACT_HINT_PCT = 0.05
+MIN_COMPACT_PCT = 0.02
+MAX_COMPACT_BLOCKS = 12
+# Дедуп identical-вызовов внутри одного хода (только детерминированные
+# читалки: повтор такого же вызова — ошибка фокуса, а не осмысленный рефреш).
+DEDUP_TOOLS = ("file_system", "journal")
 MAX_TOOL_ROUNDS_PER_TURN = 80
 MAX_AUTO_RECOVERIES_PER_TURN = 2
 # Сколько раз подряд молча переспрашивать модель, если она вернула полностью
@@ -92,7 +101,7 @@ _token_k_state = {"by_model": {}, "current": 1.0}
 
 # Накопительный учёт «умных вытеснений» (для панели): сколько токенов контекста
 # сжато сегментным триммом и big-bang-ресетом за процесс.
-_compression_stats = {"tokens": 0, "trims": 0, "resets": 0, "last_reason": ""}
+_compression_stats = {"tokens": 0, "trims": 0, "resets": 0, "manual": 0, "last_reason": ""}
 
 
 def get_compression_stats() -> dict:
@@ -640,13 +649,20 @@ def _catalog_memo_store(session_path, tool_name, tool_args, result, sm):
 PRESSURE_LEVELS = (
     (0.85, "критично, завершай ход: не начинай новых разведок, фиксируй результат"),
     (0.70, "сворачивай рассуждения: не пересказывай известное, думай короче"),
+    (0.50, "планируй остаток: оцени задачу через session_memory action=context_stats, "
+           "разбивай на части, жми compact по отработанным блокам"),
 )
-_pressure_state = {"ratio": 0.0, "notified": 0}
+_pressure_state = {"ratio": 0.0, "notified": 0, "used": 0, "max": 0}
 
 
-def set_context_pressure(ratio) -> None:
+def set_context_pressure(ratio, used=0, max_ctx=0) -> None:
     try:
         _pressure_state["ratio"] = max(0.0, min(1.5, float(ratio or 0.0)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        _pressure_state["used"] = int(used or 0)
+        _pressure_state["max"] = int(max_ctx or 0)
     except (TypeError, ValueError):
         pass
 
@@ -654,19 +670,185 @@ def set_context_pressure(ratio) -> None:
 def reset_context_pressure() -> None:
     _pressure_state["ratio"] = 0.0
     _pressure_state["notified"] = 0
+    _pressure_state["used"] = 0
+    _pressure_state["max"] = 0
 
 
 def _pressure_note() -> str:
     """Строка уровня с гистерезисом: каждый уровень объявляется один раз до сброса."""
     ratio = _pressure_state["ratio"]
+    used, mx = _pressure_state.get("used", 0), _pressure_state.get("max", 0)
+    abs_part = f" ({used}/{mx} ток.)" if mx else ""
     for idx, (thr, text) in enumerate(PRESSURE_LEVELS):
         if ratio >= thr:
             level = len(PRESSURE_LEVELS) - idx
             if level <= _pressure_state["notified"]:
                 return ""
             _pressure_state["notified"] = level
-            return f"CONTEXT_PRESSURE: контекст ~{int(thr * 100)}% — {text}."
+            return f"CONTEXT_PRESSURE: контекст ~{int(thr * 100)}%{abs_part} — {text}."
     return ""
+
+
+def _context_blocks(messages: list) -> list:
+    """Блоки живого контекста: user-корневые сегменты не-system-сообщений.
+
+    Нумерация 1..N совпадает с аргументом blocks у session_memory compact.
+    Для каждого блока — оценка токенов, время, превью user-реплики, имена
+    инструментов: агент видит, кто именно съел контекст.
+    """
+    other = [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
+    blocks = []
+    for si, seg in enumerate(_segment_indices(other), start=1):
+        toks = sum(_estimate_message_tokens(other[x]) for x in seg)
+        user_prev, tools, ts = "", [], ""
+        for x in seg:
+            m = other[x]
+            if not ts and m.get("timestamp"):
+                ts = str(m["timestamp"])
+            if m.get("role") == "user" and not user_prev:
+                user_prev = " ".join(str(m.get("content") or "").split())[:80]
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    n = str(((tc or {}).get("function") or {}).get("name") or "")
+                    if n and n not in tools:
+                        tools.append(n)
+        blocks.append({"id": si, "messages": len(seg), "tokens": toks, "ts": ts,
+                       "user_preview": user_prev, "tools": tools})
+    return blocks
+
+
+def write_context_map(session_path: str, messages: list, num_ctx: int) -> None:
+    """Снимок карты контекста на каждый запрос: харнес пишет, session_memory читает."""
+    try:
+        blocks = _context_blocks(messages)
+        total = sum(b["tokens"] for b in blocks)
+        payload = {
+            "updated": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "num_ctx": int(num_ctx or 0),
+            "used_est": total,
+            "used_pct": int(total / num_ctx * 100) if num_ctx else 0,
+            "compression_stats": dict(_compression_stats),
+            "blocks": blocks,
+        }
+        with open(os.path.join(session_path, "context_map.json"), "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def apply_pending_compacts(sm, session_path: str, messages: list, num_ctx: int) -> str:
+    """Исполняет запрос агента на компакцию (compact_request.json) на границе раунда.
+
+    Сегменты уходят из messages в артефакт; на их место — одна system-заглушка
+    (механическая: блоки, освобождённые токены, артефакт, пометка агента).
+    Рельсы: текущий (последний) блок не сжимается, блоки дешевле MIN_COMPACT_PCT
+    пропускаются, кап MAX_COMPACT_BLOCKS. context.json не трогаем — история цела,
+    поднятое — session_memory search/get_turn. Пустая строка — запроса не было.
+    """
+    req_path = os.path.join(session_path, "compact_request.json")
+    try:
+        with open(req_path, "r", encoding="utf-8") as f:
+            req = json.load(f)
+        os.remove(req_path)
+    except (OSError, json.JSONDecodeError):
+        return "", ""
+    try:
+        from tools.session_memory import parse_block_ids
+        ids = parse_block_ids(req.get("blocks"))
+    except Exception:
+        return "", ""
+    note = str(req.get("note") or "")[:200]
+    if not ids:
+        return "", ""
+
+    other_pos = [i for i, m in enumerate(messages)
+                 if isinstance(m, dict) and m.get("role") != "system"]
+    segs = _segment_indices([messages[i] for i in other_pos])
+    n_segs = len(segs)
+    used_before = sum(_estimate_message_tokens(m) for m in messages)
+
+    skipped_current, unknown, small, chosen = [], [], [], []
+    for bid in ids[:MAX_COMPACT_BLOCKS]:
+        if bid < 1 or bid > n_segs:
+            unknown.append(bid)
+        elif bid == n_segs:
+            skipped_current.append(bid)
+        else:
+            gidx = [other_pos[p] for p in segs[bid - 1]]
+            toks = sum(_estimate_message_tokens(messages[i]) for i in gidx)
+            if num_ctx and toks < MIN_COMPACT_PCT * num_ctx:
+                small.append(bid)
+            else:
+                chosen.append((bid, gidx, toks))
+
+    if not chosen:
+        parts = []
+        if skipped_current:
+            parts.append(f"текущий ход не сжимается (блоки {','.join(map(str, skipped_current))})")
+        if small:
+            parts.append(f"мелкие блоки пропущены (<{int(MIN_COMPACT_PCT * 100)}% num_ctx): "
+                         f"{','.join(map(str, small))}")
+        if unknown:
+            parts.append(f"нет таких блоков: {','.join(map(str, unknown))}")
+        s = "COMPACT: ничего не сжато — " + "; ".join(parts) if parts else ""
+        return s, s
+
+    drop_idx, freed = set(), 0
+    tool_names = []
+    for bid, gidx, toks in chosen:
+        drop_idx.update(gidx)
+        freed += toks
+        for i in gidx:
+            m = messages[i]
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                for tc in m["tool_calls"]:
+                    n = str(((tc or {}).get("function") or {}).get("name") or "")
+                    if n and n not in tool_names:
+                        tool_names.append(n)
+    dropped = [messages[i] for i in sorted(drop_idx)]
+    artifact_name = f"context_compact_{int(time.time())}.json"
+    try:
+        artifact_path = sm.save_artifact(session_path, artifact_name,
+                                         json.dumps(dropped, ensure_ascii=False, indent=2))
+    except Exception:
+        artifact_path = f"./artifacts/{artifact_name}"
+    insert_at = min(drop_idx)
+    for i in sorted(drop_idx, reverse=True):
+        del messages[i]
+
+    used_after = used_before - freed
+    pct_b = int(used_before / num_ctx * 100) if num_ctx else 0
+    pct_a = int(used_after / num_ctx * 100) if num_ctx else 0
+    done_ids = [bid for bid, _, _ in chosen]
+    extra = []
+    if skipped_current:
+        extra.append(f"текущий ход не тронут ({','.join(map(str, skipped_current))})")
+    if small:
+        extra.append(f"мелкие пропущены (<{int(MIN_COMPACT_PCT * 100)}% num_ctx): "
+                     f"{','.join(map(str, small))}")
+    if unknown:
+        extra.append(f"нет блоков {','.join(map(str, unknown))}")
+    ids_str = ",".join(map(str, done_ids))
+    # Структурированная заглушка: первая строка — маркер и суть, дальше по полям.
+    # Читается и человеком, и моделью; маркер COMPACTED_BLOCKS — на первой строке.
+    lines = [
+        f"COMPACTED_BLOCKS: блоки {ids_str} сжаты по запросу агента",
+        f"• освобождено ≈{freed} токенов ({pct_b}%→{pct_a}% от num_ctx)",
+        f"• инструменты: {', '.join(tool_names) if tool_names else '—'}",
+        f"• артефакт: {artifact_path} — поднять: session_memory search/get_turn",
+    ]
+    if note:
+        lines.append(f"• пометка агента: {note}")
+    if extra:
+        lines.append("• пропущено: " + "; ".join(extra))
+    stub = "\n".join(lines)
+    brief = f"блоки {ids_str} → −{freed} ток. ({pct_b}%→{pct_a}%)"
+    messages.insert(insert_at, {"role": "system", "content": stub})
+
+    _compression_stats["tokens"] += freed
+    _compression_stats["manual"] = _compression_stats.get("manual", 0) + 1
+    _compression_stats["last_reason"] = "agent_requested"
+    return stub, brief
 
 
 def _web_jobs_notice() -> str:
@@ -1204,6 +1386,8 @@ def ask_ollama_textual(
         post_sign_silent = False
         length_stitches = 0
         stitched_parts = []
+        # Дедуп identical-вызовов хода: (tool, args-json) → artifact_path первого вызова.
+        _turn_calls = {}
         try:
             from tools import sign_step as _sign_step
             _sign_step.reset_turn(session_path)
@@ -1319,6 +1503,18 @@ def ask_ollama_textual(
 
             if current_model and current_model not in _token_k_state["by_model"]:
                 restore_token_calibration(os.path.join(session_path, "performance.log"), current_model)
+            # Осознанная компакция: исполнить запрос агента ДО подготовки запроса —
+            # карта пишется уже после неё, чтобы агент видел актуальную картину.
+            _compact_summary, _compact_brief = apply_pending_compacts(
+                sm, session_path, messages, current_ctx)
+            if _compact_summary:
+                if _compact_summary.startswith("COMPACT: ничего"):
+                    _write_log(f"[dim]🗜 {_compact_summary}[/dim]")
+                else:
+                    _write_log(f"[dim]🗜 Память: сжато по запросу агента — {_compact_brief}. "
+                               "Старое в артефакте, подниму по запросу.[/dim]")
+                sm.update_context(session_path, "system", _compact_summary)
+            write_context_map(session_path, messages, current_ctx)
             prepared = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=current_ctx)
             session_ctx_est = _estimate_messages_tokens(prepared)
             _cs = get_compression_stats()
@@ -1714,7 +1910,8 @@ def ask_ollama_textual(
             ttft_val = first_token_time - start_time if first_token_time else elapsed
             tps_val = (thinking_tokens + response_tokens + streaming_tool_tokens) / (time.time() - first_token_time) if first_token_time and (time.time() - first_token_time) > 0 else 0
             last_req_ctx = prompt_eval_count + eval_count
-            set_context_pressure(last_req_ctx / current_ctx if current_ctx else 0.0)
+            set_context_pressure(last_req_ctx / current_ctx if current_ctx else 0.0,
+                                 used=last_req_ctx, max_ctx=current_ctx)
             if prompt_eval_count:
                 calibrate_token_estimator(
                     current_model, prompt_eval_count, prepared,
@@ -2089,9 +2286,23 @@ def ask_ollama_textual(
                             pass
                         _write_log("[yellow]⚠️ Dangerous mode: ON (по запросу инструмента)[/yellow]")
 
+                _dk = None
+                if tool_name in DEDUP_TOOLS:
+                    try:
+                        _dk = (tool_name, json.dumps(tool_args, sort_keys=True,
+                                                     ensure_ascii=False))
+                    except (TypeError, ValueError):
+                        _dk = None
                 memo = _catalog_memo_check(session_path, tool_name, tool_args)
                 if memo:
                     tool_result = memo
+                elif _dk and _dk in _turn_calls:
+                    tool_result = (
+                        f"DEDUP_SAME_CALL: точно такой же {tool_name} уже выполнялся "
+                        f"в этом ходе (артефакт: {_turn_calls[_dk]}). Повтор тратит "
+                        "контекст впустую — работай с полученным; нужны свежие данные "
+                        "— измени аргументы."
+                    )
                 else:
                     tool_result = tm.call_tool(
                         tool_name,
@@ -2133,8 +2344,21 @@ def ask_ollama_textual(
                     artifact_path = sm.save_artifact(session_path, artifact_name, res_str[:200_000])
                 except Exception:
                     artifact_path = f"./artifacts/{artifact_name}"
+                if _dk:
+                    _turn_calls.setdefault(_dk, artifact_path)
 
                 compact_msg = _compact_tool_message(tool_name, tool_args, tool_result, artifact_path)
+                # Подсказка о цене блока: дорогой результат — предложить агенту
+                # осознанно освободить его, когда он отработан (кроме текущего хода).
+                _blk_est = _estimate_tokens(compact_msg)
+                if current_ctx and _blk_est >= COMPACT_HINT_PCT * current_ctx:
+                    compact_msg += (
+                        f"\ncontext_cost: этот результат ≈{_blk_est} токенов "
+                        f"({int(_blk_est / current_ctx * 100)}% от num_ctx). Когда он "
+                        "отработан — не держи его: session_memory action=context_map покажет, "
+                        "кто съел контекст, action=compact blocks=\"…\" освободит старые блоки "
+                        "(текущий ход с этого хода и доступен для сжатия в следующем)."
+                    )
 
                 res_tokens = len(str(compact_msg)) // 4
                 tool_tokens += res_tokens
