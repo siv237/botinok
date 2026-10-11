@@ -13,6 +13,7 @@
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -86,9 +87,17 @@ def classify_chat_models(backend, url, api_key, entries, verify=True):
         for e in need:
             e['chat'] = True  # сервер недоступен — не исключаем вслепую
         return out
-    for i, e in enumerate(need):
-        st = first_st if i == 0 else _chat_probe_status(path, api_key, e['id'], verify)
-        e['chat'] = (st == 200) if st in (200, 400, 422) else True
+    # Параллельно: при десятках моделей последовательный перебор с
+    # таймаутами выглядит как зависание мастера.
+    def _probe(item):
+        i, e = item
+        return i, (first_st if i == 0
+                   else _chat_probe_status(path, api_key, e['id'], verify, timeout=10))
+
+    with ThreadPoolExecutor(max_workers=min(8, len(need))) as pool:
+        for i, st in pool.map(_probe, list(enumerate(need))):
+            e = need[i]
+            e['chat'] = (st == 200) if st in (200, 400, 422) else True
     return out
 
 

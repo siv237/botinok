@@ -6,8 +6,10 @@ from core.openai_compat import (probe_reasoning, load_reasoning_cache,
                                 load_cache_entry, save_cache_entry,
                                 classify_chat_models)
 from core.session_manager import SessionManager
+from core import server_history
 from core.cli_io import out
-from core.textual_prompts import textual_confirm, textual_prompt, textual_select
+from core.textual_prompts import (textual_confirm, textual_prompt, textual_select,
+                                  textual_select_grouped)
 
 BACKEND_OLLAMA = "ollama"
 BACKEND_OPENAI = "openai"
@@ -267,13 +269,15 @@ class ConfigWizard:
             self.config.set('Ollama', 'ReasoningEffort', chosen)
         return chosen
 
-    def _configure_ollama(self):
-        """Настройка подключения к Ollama. Возвращает список имён моделей или None."""
+    def _configure_ollama(self, preset=None):
+        """Настройка подключения к Ollama. Возвращает список имён моделей или None.
+
+        preset — пункт истории: адрес берётся из него."""
         current_url = self.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
         out("\n1. Проверка Ollama API")
 
         base_verify = self.config.getboolean('Ollama', 'VerifySSL', fallback=True)
-        url = current_url
+        url = (preset or {}).get('url') or current_url
         verify = base_verify
         models = []
         while True:
@@ -310,26 +314,30 @@ class ConfigWizard:
             url = new_url.strip()
 
         self.config.set('Ollama', 'BaseUrl', url)
+        server_history.record(self.sm, BACKEND_OLLAMA, url)
         entries = [{'id': m['name'], 'context': self._model_context(m),
                     'capabilities': m.get('capabilities') or []} for m in models]
         # Ollama сам сообщает тип модели (capabilities) — эмбеддинги отсекаются.
         return [e for e in classify_chat_models(BACKEND_OLLAMA, url, '', entries)
                 if e.get('chat', True)]
 
-    def _configure_openai(self):
+    def _configure_openai(self, preset=None):
         """Настройка подключения к OpenAI-совместимому API.
 
         Позволяет указать BaseUrl и (опционально) API-ключ. Обязательно
         проверяет доступность списка моделей (/models): подключение
         принимается только если список удалось получить. Возвращает список
-        моделей вида list[dict]: {'id', 'context'}.
+        моделей вида list[dict]: {'id', 'context'}. preset — пункт истории:
+        адреса и ключ только предзаполняют обычные шаги.
         """
         out("\n1. Настройка OpenAI-совместимого API")
 
-        current_url = self.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
-        current_key = self.config.get('Ollama', 'ApiKey', fallback='')
+        current_url = (preset or {}).get('url') or \
+            self.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+        current_key = ((preset or {}).get('api_key') or '').strip() or \
+            self.config.get('Ollama', 'ApiKey', fallback='')
 
-        # 1. Сначала адрес.
+        # 1. Сначала адрес (предзаполнен, можно изменить).
         url = textual_prompt("Введите BaseUrl (например, http://localhost:8080)",
                              default=current_url)
         if url is None:
@@ -348,7 +356,8 @@ class ConfigWizard:
         if not change_key:
             api_key = current_key
         else:
-            api_key = textual_prompt("API-ключ (рекомендуется; пусто — пропустить)", default="")
+            api_key = textual_prompt("API-ключ (рекомендуется; пусто — пропустить)",
+                                     default=current_key)
             if api_key is None:
                 return None
             api_key = api_key.strip()
@@ -415,6 +424,7 @@ class ConfigWizard:
             url = new_url
 
         self.config.set('Ollama', 'BaseUrl', url)
+        server_history.record(self.sm, BACKEND_OPENAI, url, api_key)
         return models
 
     def run(self):
@@ -435,17 +445,33 @@ class ConfigWizard:
             ("OpenAI-совместимый API (llama-server, vLLM, OpenAI и др.)", BACKEND_OPENAI),
         ]
         backend_default = self.current_backend(self.config)
-        backend = textual_select("Выберите бэкенд (тип сервера)", backend_options, backend_default)
+        hist = server_history.recent(self.sm)
+        if hist:
+            backend = textual_select_grouped(
+                "Выберите бэкенд (тип сервера)", backend_options,
+                "История использования (выберите сервер)",
+                [(server_history.label(e), ('hist', e)) for e in hist],
+                backend_default)
+        else:
+            backend = textual_select("Выберите бэкенд (тип сервера)",
+                                     backend_options, backend_default)
         if backend is None:
             out("Настройка прервана.")
             return
 
+        # Пункт истории: бэкенд, адрес и ключ берём из него, дальше мастер
+        # идёт обычно — поля предзаполнены, их можно изменить.
+        preset = None
+        if isinstance(backend, tuple) and backend[0] == 'hist':
+            preset = backend[1]
+            backend = preset.get('backend') or BACKEND_OLLAMA
+
         self.config.set('Ollama', 'Backend', backend)
 
         if backend == BACKEND_OPENAI:
-            models = self._configure_openai()
+            models = self._configure_openai(preset=preset)
         else:
-            models = self._configure_ollama()
+            models = self._configure_ollama(preset=preset)
 
         if models is None:
             out("Настройка прервана.")
