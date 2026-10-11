@@ -66,6 +66,12 @@ def add_recv(n: int) -> None:
         _recv_samples.append((now, _recv_total))
 
 
+def last_recv_time() -> float:
+    """Время последнего принятого байта (0 если ничего не приходило)."""
+    with _lock:
+        return _recv_samples[-1][0] if _recv_samples else 0.0
+
+
 def add_request() -> None:
     global _req_turn, _req_total
     with _lock:

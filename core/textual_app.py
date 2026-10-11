@@ -2173,7 +2173,9 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         if visible_total != getattr(self, "_visible_total", -1):
             self._visible_total = visible_total
             self._visible_at = now
-        activity_at = max(self._last_chunk_time, getattr(self, "_visible_at", 0.0) or 0.0)
+        activity_at = max(self._last_chunk_time,
+                          getattr(self, "_visible_at", 0.0) or 0.0,
+                          net_meter.last_recv_time())
 
         if self._first_token_at:
             first_val = f"{self._first_token_at - self._stream_started_at:.1f} с"

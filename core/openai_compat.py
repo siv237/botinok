@@ -221,6 +221,14 @@ class OpenAIStreamResponse:
                         'thinking': thought,
                     },
                 }, ensure_ascii=False).encode('utf-8')
+            elif delta.get('tool_calls'):
+                # Пульс активности: модель стримит аргументы инструмента
+                # (может идти минуты без единого «видимого» токена). Строка
+                # нужна, чтобы харнес видел жизнь в потоке и не кричал «зависло».
+                yield json.dumps({
+                    'message': {'role': 'assistant'},
+                    'tool_delta': True,
+                }, ensure_ascii=False).encode('utf-8')
 
         final_msg = {'role': 'assistant'}
         if tool_calls_acc:
