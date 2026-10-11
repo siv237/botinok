@@ -12,6 +12,9 @@ from contextlib import redirect_stdout
 
 PERSONAL_DIR = Path.home() / ".botinok" / "skills"
 PROJECT_DIR = Path("skills")
+# Вкомпонованные скилы рядом с самим ботинком (поставляются в репозитории):
+# доступны в любом проекте сразу после установки/обновления.
+BUNDLED_DIR = Path(__file__).resolve().parent.parent / "skills"
 
 def ensure_dirs():
     PERSONAL_DIR.mkdir(parents=True, exist_ok=True)
@@ -19,10 +22,13 @@ def ensure_dirs():
 def find_skill(name):
     personal_path = PERSONAL_DIR / name
     project_path = PROJECT_DIR / name
+    bundled_path = BUNDLED_DIR / name
     if (personal_path / "SKILL.md").exists():
         return personal_path, "personal"
     elif (project_path / "SKILL.md").exists():
         return project_path, "project"
+    elif (bundled_path / "SKILL.md").exists():
+        return bundled_path, "bundled"
     elif personal_path.exists():
         md_files = list(personal_path.glob("*.md"))
         if md_files:
@@ -167,13 +173,17 @@ def cmd_list():
             if item.is_dir() and item.name not in all_skills:
                 desc = get_skill_description(item)
                 all_skills[item.name] = {"source": "project", "desc": desc}
+    if BUNDLED_DIR.exists():
+        for item in sorted(BUNDLED_DIR.iterdir()):
+            if item.is_dir() and item.name not in all_skills:
+                desc = get_skill_description(item)
+                all_skills[item.name] = {"source": "bundled", "desc": desc}
     if not all_skills:
         print("No skills found.")
         return []
     print("Local skills:\n")
     for name, info in all_skills.items():
-        source_icon = "personal" if info["source"] == "personal" else "project"
-        print(f"  {source_icon} {name}: {info['desc']}")
+        print(f"  {info['source']} {name}: {info['desc']}")
     return list(all_skills.keys())
 
 def cmd_get(name):
