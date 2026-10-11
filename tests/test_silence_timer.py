@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -18,6 +19,8 @@ from textual.widgets import Static  # noqa: E402
 
 from core.textual_app import BotinokTextualApp  # noqa: E402
 import core.textual_integration as ti  # noqa: E402
+import core.net_meter as net_meter  # noqa: E402
+from core.openai_compat import OpenAIStreamResponse  # noqa: E402
 
 FAILURES = []
 
@@ -80,9 +83,37 @@ class _StubSM:
         return f"[{name}]"
 
 
+def test_tool_delta_heartbeat():
+    """SSE с одними tool_calls-дельтами обязан порождать пульс активности."""
+    class FakeResp:
+        status_code = 200
+        def iter_lines(self):
+            return iter([
+                b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"code_editor","arguments":"{\\"pa"}}]}}]}',
+                b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\\":\\"x\\"}"}}]}}]}',
+                b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+                b'data: {"usage":{"prompt_tokens":10,"completion_tokens":5}}',
+                b'data: [DONE]',
+            ])
+        def close(self):
+            pass
+    out = [json.loads(l.decode()) for l in OpenAIStreamResponse(FakeResp()).iter_lines()]
+    pulses = [c for c in out if c.get("tool_delta")]
+    final = out[-1]
+    check("tool_delta_pulses", len(pulses) >= 2, str(out))
+    check("final_tool_calls_aggregated",
+          final.get("done") and final.get("message", {}).get("tool_calls", [{}])[0]
+          .get("function", {}).get("name") == "code_editor", str(final))
+    check("no_double_tool_calls", sum(1 for c in out if c.get("message", {}).get("tool_calls")) == 1)
+
+
 async def main_async() -> int:
+    with net_meter._lock:
+        net_meter._recv_samples.clear()
     print("== счётчик «Выжато» ==")
     test_compression_counter()
+    print("== пульс tool_calls в SSE ==")
+    test_tool_delta_heartbeat()
 
     print("== таймер молчания по видимым счётчикам ==")
     app = BotinokTextualApp()
@@ -131,6 +162,15 @@ async def main_async() -> int:
         await asyncio.sleep(0.2)
         txt3 = _panel(app)
         check("new_request_resets_silence", "норма" in txt3 and "зависло" not in txt3, txt3[-400:])
+
+        # сеть живёт (байты идут), а разбираемого текста нет — не «зависло»
+        app._last_chunk_time = time.time() - 70.0
+        app._visible_at = time.time() - 70.0
+        net_meter.add_recv(4096)
+        app.update_stats_display()
+        await asyncio.sleep(0.2)
+        txt4 = _panel(app)
+        check("network_activity_not_hung", "зависло" not in txt4 and "норма" in txt4, txt4[-400:])
     return 0
 
 
