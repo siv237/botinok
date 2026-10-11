@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Тест pressure-инжекта с гистерезисом (этап 5 плана
-wiki/concepts/context_memory_research.md): строка уровня один раз при пересечении
-70%/85%, не повторяется до сброса, живёт внутри TOOL_RESULT_SUMMARY.
+wiki/concepts/context_memory_research.md + уровень 50% «планируй»): строка уровня
+один раз при пересечении 50%/70%/85%, не повторяется до сброса, живёт внутри
+TOOL_RESULT_SUMMARY; при заданных абсолютных числах содержит расход токенов.
 
 Запуск: venv/bin/python -u tests/test_pressure_inject.py
 """
@@ -29,10 +30,16 @@ def check(name: str, cond: bool, extra: str = "") -> None:
 
 
 def main() -> int:
-    # 1) ниже порога — тишина
+    # 1) ниже нижнего порога — тишина
     reset_context_pressure()
-    set_context_pressure(0.5)
-    check("silent_below_70", _pressure_note() == "")
+    set_context_pressure(0.4)
+    check("silent_below_50", _pressure_note() == "")
+
+    # 1b) пересечение 50% — уровень «планируй», повтор подавлен
+    set_context_pressure(0.52)
+    n0 = _pressure_note()
+    check("fires_at_50", "CONTEXT_PRESSURE" in n0 and "50%" in n0 and "context_stats" in n0, n0)
+    check("no_repeat_50", _pressure_note() == "")
 
     # 2) пересечение 70% — одно сообщение, повтор подавлен
     set_context_pressure(0.72)
@@ -79,6 +86,15 @@ def main() -> int:
     set_context_pressure(None)
     set_context_pressure("abc")
     check("garbage_ratio_safe", _pressure_note() == "")
+
+    # 9) абсолютные числа: расход/бюджет в строке уровня
+    reset_context_pressure()
+    set_context_pressure(0.72, used=57600, max_ctx=80000)
+    n9 = _pressure_note()
+    check("absolute_numbers_in_note", "57600/80000" in n9, n9)
+    reset_context_pressure()
+    set_context_pressure(0.72)
+    check("no_abs_when_unknown", "/" not in _pressure_note())
 
     print("=" * 70)
     if FAILURES:

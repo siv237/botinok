@@ -539,6 +539,185 @@ class SessionIndex:
             self.build()
 
 
+def parse_block_ids(value) -> list:
+    """Разбирает спецификацию блоков: "1,3,5-7", [1, "3-4"], 5 → [1,3,4,5,7]."""
+    if value is None:
+        return []
+    if isinstance(value, (int, float)):
+        value = str(int(value))
+    elif isinstance(value, (list, tuple)):
+        value = ",".join(str(v) for v in value)
+    ids = set()
+    for part in str(value).replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, _, hi = part.partition("-")
+            try:
+                a, b = int(lo), int(hi)
+            except ValueError:
+                continue
+            if a > b:
+                a, b = b, a
+            ids.update(range(max(1, a), b + 1))
+        else:
+            try:
+                n = int(part)
+            except ValueError:
+                continue
+            if n >= 1:
+                ids.add(n)
+    return sorted(ids)
+
+
+def _action_context_map(session_path: str) -> Dict:
+    """Карта живого контекста: кто сколько токенов съел (пишет харнес)."""
+    path = os.path.join(session_path, "context_map.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {
+            "error": "карта контекста ещё не построена",
+            "hint": "харнес пишет context_map.json перед каждым запросом модели — "
+                    "попробуй после ближайшего ответа.",
+        }
+    blocks = data.get("blocks") or []
+    num_ctx = data.get("num_ctx") or 0
+    for b in blocks:
+        b["pct"] = int(b.get("tokens", 0) / num_ctx * 100) if num_ctx else 0
+    top = sorted(blocks, key=lambda b: b.get("tokens", 0), reverse=True)[:5]
+    return {
+        "updated": data.get("updated"),
+        "num_ctx": num_ctx,
+        "used_est": data.get("used_est"),
+        "used_pct": data.get("used_pct"),
+        "compression_stats": data.get("compression_stats"),
+        "top_consumers": [t.get("id") for t in top],
+        "blocks": blocks,
+        "hint": "Освободить отработанные блоки: action=compact blocks=\"1,3-5\" "
+                "(текущий/последний блок не сжимается; поднятое — get_turn/search, "
+                "история в context.json цела).",
+    }
+
+
+def _action_compact(session_path: str, blocks, note: str = "") -> Dict:
+    """Ставит запрос на осознанную компакцию блоков; исполняет харнес."""
+    ids = parse_block_ids(blocks)
+    if not ids:
+        return {
+            "error": "не указаны блоки",
+            "hint": "blocks=\"1,3-5\" — id блоков из action=context_map (id поля blocks).",
+            "_next_actions": ["action=\"context_map\""],
+        }
+    req = {
+        "blocks": ids,
+        "note": str(note or "")[:200],
+        "requested_at": datetime.now().isoformat(),
+    }
+    try:
+        with open(os.path.join(session_path, "compact_request.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(req, f, ensure_ascii=False)
+    except OSError as e:
+        return {"error": f"не удалось записать запрос: {e}"}
+    return {
+        "queued": True,
+        "blocks": ids,
+        "note": req["note"],
+        "hint": "Харнес применит сжатие на следующем шаге: блоки уйдут в артефакт, "
+                "на их место придёт system-реплика COMPACTED_BLOCKS со счётчиком "
+                "освобождённых токенов. Текущий ход не сжимается; мелкие блоки "
+                "(<2% num_ctx) пропускаются.",
+        "_next_actions": ["action=\"context_map\""],
+    }
+
+
+def _action_context_stats(session_path: str) -> Dict:
+    """Историческая стоимость контекста: чтобы агент ПЛАНИРОВАЛ задачу до начала.
+
+    Считается по окнам session_digest (реальные prompt_eval_count/eval_count) —
+    это прошлые прикидки, а не гадалка: типичная цена tool-раунда, цены
+    инструментов, запас до конца контекста, прогноз «сколько раундов осталось».
+    """
+    try:
+        from core import session_digest
+        windows = session_digest.build_windows(session_path)
+    except Exception as e:
+        return {"error": f"дайджест недоступен: {e}"}
+    reqs = [w for w in windows if w.ctx_used]
+    if not reqs:
+        return {"error": "завершённых вызовов модели ещё нет — считать нечего",
+                "hint": "статистика появится после первых ответов модели."}
+
+    ctxs = sorted(w.ctx_used for w in reqs)
+    n = len(ctxs)
+    med_ctx = ctxs[n // 2]
+    p95_ctx = ctxs[min(n - 1, int(n * 0.95))]
+    generated = sum(w.eval_count for w in reqs)
+
+    # Цена tool-раунда: прирост prompt_eval между соседними окнами (положительные
+    # приросты; ресеты/триммы дают провалы — их отбрасываем).
+    growths = []
+    for i in range(1, n):
+        d = reqs[i].prompt_eval_count - reqs[i - 1].prompt_eval_count
+        if d > 0:
+            growths.append(d)
+    growths.sort()
+    med_growth = growths[len(growths) // 2] if growths else 0
+
+    # Цены инструментов: средний размер результата в токенах (size_kb*1024/4).
+    per_tool: Dict[str, List[int]] = {}
+    for w in windows:
+        for t in w.tools:
+            name = str(t.get("tool") or "?")
+            try:
+                tok = int(float(t.get("size_kb") or 0) * 1024 / 4)
+            except (TypeError, ValueError):
+                tok = 0
+            per_tool.setdefault(name, []).append(tok)
+    tools_cost = sorted(
+        ({"tool": k, "calls": len(v), "avg_tokens": sum(v) // len(v)}
+         for k, v in per_tool.items()),
+        key=lambda x: x["avg_tokens"], reverse=True)[:8]
+
+    out: Dict = {
+        "requests": n,
+        "ctx_used_median": med_ctx,
+        "ctx_used_p95": p95_ctx,
+        "ctx_used_peak": ctxs[-1],
+        "generated_total": generated,
+        "round_cost_median": med_growth,
+        "round_cost_recent": (sum(growths[-5:]) // min(5, len(growths))) if growths else 0,
+        "tool_avg_tokens": tools_cost,
+    }
+
+    # Запас: из context_map.json (num_ctx харнеса) минус последний prompt_eval.
+    try:
+        with open(os.path.join(session_path, "context_map.json"), "r",
+                  encoding="utf-8") as f:
+            cm = json.load(f)
+        num_ctx = int(cm.get("num_ctx") or 0)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        num_ctx = 0
+    if num_ctx:
+        headroom = max(0, num_ctx - reqs[-1].prompt_eval_count)
+        out["num_ctx"] = num_ctx
+        out["headroom_tokens"] = headroom
+        if med_growth:
+            out["rounds_left_est"] = headroom // med_growth
+        out["plan_hint"] = (
+            f"Типичный tool-раунд стоит ≈{med_growth or '?'} токенов; запас ≈{headroom} "
+            f"≈ {out.get('rounds_left_est', '?')} раундов. Задача дороже запаса — разбей "
+            "её на части и жми compact по отработанным блокам (context_map — кто съел)."
+        )
+    else:
+        out["plan_hint"] = ("num_ctx неизвестен (карта контекста ещё не писалась) — "
+                            "запроси action=context_map после ближайшего ответа.")
+    return out
+
+
 def session_memory_tool(
     action: str = "summary",
     session_path: Optional[str] = None,
@@ -597,6 +776,13 @@ def session_memory_tool(
         "restore": "restore", "rebuild": "restore", "exact": "restore",
         "load": "restore", "resume_exact": "restore", "snapshot": "restore",
         "windows": "windows", "digest": "windows", "окна": "windows",
+        "context_map": "context_map", "map": "context_map", "карта": "context_map",
+        "budget": "context_map", "бюджет": "context_map", "ctx": "context_map",
+        "compact": "compact", "compress": "compact", "сжать": "compact",
+        "сжатие": "compact", "free": "compact", "освободить": "compact",
+        "context_stats": "context_stats", "cost": "context_stats",
+        "цена": "context_stats", "смета": "context_stats", "plan": "context_stats",
+        "планируй": "context_stats",
     }
     _VALID = set(_ALIASES.values())
     raw_action = str(action if isinstance(action, str) else "").strip().lower()
@@ -712,9 +898,20 @@ def session_memory_tool(
     elif action == "windows":
         result = _action_windows(session_path, limit, offset)
 
+    elif action == "context_map":
+        result = _action_context_map(session_path)
+
+    elif action == "compact":
+        blocks_arg = (kwargs.get("blocks") or kwargs.get("block")
+                      or kwargs.get("ids") or turn_id)
+        result = _action_compact(session_path, blocks_arg, str(kwargs.get("note") or ""))
+
+    elif action == "context_stats":
+        result = _action_context_stats(session_path)
+
     else:
         result = {"error": f"Unknown action: {action}", "available_actions": [
-            "resume_brief", "summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain", "windows"
+            "resume_brief", "summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain", "windows", "context_map", "compact", "context_stats"
         ]}
     
     # Архивариус не молчит: контекст, совет и следующие шаги — всегда.
@@ -762,6 +959,10 @@ def _help_text(session_path: str) -> str:
         "  • action=turns limit=20 offset=0           — список ходов\n"
         "  • action=timeline limit=30                 — хронология\n"
         "  • action=windows limit=20                  — окна вызовов модели (облака терминов, указатели)\n"
+        "  • action=context_map                       — карта живого контекста: кто сколько токенов съел\n"
+        "  • action=context_stats                     — цены прошлого: типичный раунд, инструменты,\n"
+        "                                               запас контекста — планируй ДО начала большой задачи\n"
+        "  • action=compact blocks=\"1,3-5\"            — освободить отработанные блоки (по твоей оценке)\n"
         "  • action=help                              — эта справка\n"
         "\n"
         "Можно звать усечённо: action=turn/123, action=list, action=find query=...\n"
