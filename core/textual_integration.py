@@ -90,6 +90,28 @@ def _tool_stream_has_payload(text: str) -> bool:
 _TOKEN_K_EMA_ALPHA = 0.3
 _token_k_state = {"by_model": {}, "current": 1.0}
 
+# Накопительный учёт «умных вытеснений» (для панели): сколько токенов контекста
+# сжато сегментным триммом и big-bang-ресетом за процесс.
+_compression_stats = {"tokens": 0, "trims": 0, "resets": 0, "last_reason": ""}
+
+
+def get_compression_stats() -> dict:
+    return dict(_compression_stats)
+
+
+def _compress_reason_ru(reason: str) -> str:
+    """Краткая человеческая причина сжатия для уведомления в ленте."""
+    r = str(reason or "")
+    if r.startswith("hard_ctx_threshold_reached"):
+        return "заполнилась больше чем на 90%"
+    if r.startswith("repetition_detected"):
+        return "заклинил на повторах"
+    if "loop" in r.lower():
+        return "ходил по кругу"
+    if "recoveries_exhausted" in r:
+        return "не вышло продолжить мягко"
+    return r or "неизвестная причина"
+
 
 def _append_system_once(messages: list, content: str) -> bool:
     """Добавляет system-реплику, только такой же ещё нет в истории.
@@ -374,6 +396,8 @@ def _prepare_messages_for_ollama(sm, session_path, messages, num_ctx, reserve_to
     trimmed = system_msgs + kept
     artifact_path = ""
     if dropped:
+        _compression_stats["tokens"] += _estimate_messages_tokens(dropped)
+        _compression_stats["trims"] += 1
         artifact_name = f"context_trim_{int(time.time())}.json"
         try:
             artifact_path = sm.save_artifact(session_path, artifact_name, json.dumps(list(reversed(dropped)), ensure_ascii=False, indent=2))
@@ -794,6 +818,10 @@ def _ollama_summarize_and_reset_context(
         "content": protocol_content or f"Context cleared. Continue task: {last_user_prompt[:100]}",
     }
 
+    _compression_stats["tokens"] += _estimate_messages_tokens(
+        [m for m in messages if m.get("role") != "system"])
+    _compression_stats["resets"] += 1
+    _compression_stats["last_reason"] = str(reason or "")
     messages.clear()
     messages.extend(system_msgs + [protocol_msg])
     reset_context_pressure()
@@ -1116,6 +1144,10 @@ def ask_ollama_textual(
                 tool_reminder_msg = SessionManager.strip_skills_mandate(tool_reminder_msg)
             _append_system_once(messages, tool_reminder_msg)
 
+    # база для уведомлений ленты о сжатии контекста (событие = дельта);
+    # живёт всю сессию, чтобы сброс в конце хода не остался без события
+    _comp_base = get_compression_stats()
+
     def _stream_turn(user_text, resume_turn=False):
         nonlocal _stream_buf
         stream_active.set()
@@ -1261,7 +1293,22 @@ def ask_ollama_textual(
                 restore_token_calibration(os.path.join(session_path, "performance.log"), current_model)
             prepared = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=current_ctx)
             session_ctx_est = _estimate_messages_tokens(prepared)
-            _update_stats(session_ctx=session_ctx_est, session_ctx_max=current_ctx)
+            _cs = get_compression_stats()
+            _d_tokens = _cs["tokens"] - _comp_base["tokens"]
+            _d_trims = _cs["trims"] - _comp_base["trims"]
+            _d_resets = _cs["resets"] - _comp_base["resets"]
+            if _d_resets:
+                _write_log(f"[dim]♻️ Память очищена целиком: −~{_d_tokens} токенов "
+                           f"({_compress_reason_ru(_cs.get('last_reason', ''))}); дневник сессии цел.[/dim]")
+            elif _d_trims:
+                _pct = int(session_ctx_est / current_ctx * 100) if current_ctx else 0
+                _write_log(f"[dim]🧹 Память подожата: −~{_d_tokens} токенов "
+                           f"(было занято {_pct}%); старое в оглавлении, подниму по запросу.[/dim]")
+            if _d_trims or _d_resets:
+                _comp_base.update(_cs)
+            _update_stats(session_ctx=session_ctx_est, session_ctx_max=current_ctx,
+                          compressed_tokens=_cs["tokens"], compress_trims=_cs["trims"],
+                          compress_resets=_cs["resets"])
 
             tools = tm.get_tool_definitions()
             try:

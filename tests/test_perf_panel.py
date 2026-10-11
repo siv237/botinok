@@ -147,7 +147,9 @@ async def main_async() -> int:
         check("text_speed_ignores_pause", "160.0 Б/с" in _panel(app), _panel(app))
 
         # Зависание: молчание > 30 с — красный статус и подсказка.
+        # Молчание = видимые счётчики НЕ растут (и чанки не приходят).
         app._last_chunk_time = time.time() - 45.0
+        app._visible_at = time.time() - 45.0
         app.update_stats_display()
         await asyncio.sleep(0.2)
         txt = _panel(app)

@@ -889,6 +889,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self._tools_placeholder: Optional[Static] = None
         self._start_time = time.time()
         self._last_chunk_time = 0.0
+        self._visible_total = -1
+        self._visible_at = 0.0
         # Живые метрики текущего потока: когда начался поток, когда пришёл
         # первый фрагмент и когда сменилась фаза (для таймеров на панели).
         self._stream_started_at = 0.0
@@ -2164,6 +2166,15 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         tool_len = len(getattr(self, "_last_tool_content", "") or "")
         printing = response_len > 0
 
+        # «Молчание» считаем с момента, когда видимые счётчики перестали расти:
+        # если байты идут (думает/пишет/готовит команду) — это не зависание,
+        # даже когда строки стрима не парсятся или воркер упирается в UI.
+        visible_total = thinking_len + response_len + tool_len
+        if visible_total != getattr(self, "_visible_total", -1):
+            self._visible_total = visible_total
+            self._visible_at = now
+        activity_at = max(self._last_chunk_time, getattr(self, "_visible_at", 0.0) or 0.0)
+
         if self._first_token_at:
             first_val = f"{self._first_token_at - self._stream_started_at:.1f} с"
         elif self._task_active() and self._stream_started_at:
@@ -2215,8 +2226,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             wait_value = (f"[bold yellow]{self._fmt_secs(retry_wait)}"
                           f" — попытка {retries}[/bold yellow]")
         else:
-            if self._last_chunk_time > 0:
-                model_silence = now - self._last_chunk_time
+            if self._task_active() and activity_at > 0:
+                model_silence = now - activity_at
             elif self._task_active() and self._stream_started_at:
                 model_silence = now - self._stream_started_at
             if model_silence >= 30:
@@ -2277,6 +2288,12 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         cs = "green" if ctx_pct < 70 else "yellow" if ctx_pct < 90 else "red"
         lines.append(row("Диалог занял:", f"[{cs}]{ctx_used}/{ctx_max} ({ctx_pct:.1f}%)[/{cs}]"))
         lines.append(row("Объём запроса:", f"{s.get('last_req_ctx', 0)} токенов"))
+        comp_tokens = s.get("compressed_tokens", 0) or 0
+        comp_trims = s.get("compress_trims", 0) or 0
+        comp_resets = s.get("compress_resets", 0) or 0
+        if comp_trims or comp_resets:
+            lines.append(row("Память сжималась:", f"[bold cyan]~{comp_tokens} токенов[/bold cyan]"
+                                             f" [dim](поджал {comp_trims}, очистил {comp_resets})[/dim]"))
         lines.append("")
 
         # Сырой обмен с моделью: «АПИ отдано» / «АПИ принято» (за запрос и всего).
@@ -2931,6 +2948,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
 
     def start_assistant_turn(self) -> None:
         self._last_chunk_time = 0.0
+        self._visible_total = -1
+        self._visible_at = 0.0
         self._stream_started_at = time.time()
         self._first_token_at = None
         self._stream_active_time = 0.0
@@ -3556,6 +3575,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         stopped = self._stop_requested
         self.is_streaming = False
         self._last_chunk_time = 0.0
+        self._visible_total = -1
+        self._visible_at = 0.0
         # Финальная перерисовка панели: ход закончен, тикер в покое не крутится —
         # иначе останемся на последнем кадре спиннера вместо «готово ✔».
         self._stats_dirty = True
