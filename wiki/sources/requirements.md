@@ -1,7 +1,7 @@
 ---
 type: source
 tags: [config, integration]
-updated: 2026-09-17
+updated: 2026-10-11
 sources: 2
 status: stable
 ---
@@ -23,8 +23,11 @@ status: stable
 `rich` (прямая зависимость), `inquirer` и `readchar` — заменены Textual
 (`core/textual_prompts.py`, `core/session_picker.py`).
 
+## Тестовые зависимости
+`requirements-dev.txt`: `pytest`, `pytest-asyncio` (async-тесты требуют маркер `@pytest.mark.asyncio`, strict-режим). Прогон: `venv/bin/python -m pytest tests/`.
+
 ## Обновление пакетов
-`botinok --update-packages` / `-U` (или `--update`): `pip install --upgrade pip setuptools wheel -r requirements.txt`. → `concepts/self_update.md`
+`botinok --update` (при изменении `requirements.txt` в pull — автоматически): `pip install -r requirements.txt`. Лаунчер `botinok --update-packages` / `-U`: `pip install --upgrade pip setuptools wheel -r requirements.txt`, затем `--ensure-deps`. → `concepts/self_update.md`
 
 ## Производные страницы
 Зависимости разнесены по страницам инструментов/интерфейсов, перечисленных выше.

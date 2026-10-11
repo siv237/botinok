@@ -14,6 +14,8 @@ import os
 import sys
 import tempfile
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from textual.theme import BUILTIN_THEMES  # noqa: E402
@@ -87,6 +89,7 @@ def test_resolve_save() -> None:
         T.GLOBAL_CONFIG_PATH = old_global
 
 
+@pytest.mark.asyncio
 async def test_app() -> None:
     os.environ["BOTINOK_SESSIONS_DIR"] = tempfile.mkdtemp(prefix="botinok_themes_s_")
     d = tempfile.mkdtemp(prefix="botinok_themes_c_")

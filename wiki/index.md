@@ -45,7 +45,8 @@
 | image | [entities/tools/image.md](entities/tools/image.md) | Показать изображение в чате: файл/URL → каталог проекта → id → рендер по скроллу |
 | audio | [entities/tools/audio.md](entities/tools/audio.md) | Анализ аудио мультимодальной (omni) моделью |
 | skills | [entities/tools/skills.md](entities/tools/skills.md) | Менеджер AI-навыков (личные/проектные, ClawHub) |
-| session_memory | [entities/tools/session-memory.md](entities/tools/session-memory.md) | Архивариус: restore (EXACT) / resume_brief / get_turn / гибкий поиск |
+| session_memory | [entities/tools/session-memory.md](entities/tools/session-memory.md) | Архивариус: restore (EXACT) / resume_brief / get_turn / гибкий поиск / context_map / compact |
+| sign_step | [entities/tools/sign-step.md](entities/tools/sign-step.md) | Чекпоинты прогресса: подписи goal/done/status с валидацией по observed, живут через сбросы контекста |
 
 ## Концепции (concepts)
 Абстрактные механизмы и подходы.
@@ -60,7 +61,8 @@
 - [concepts/web_kit.md](concepts/web_kit.md) — единый веб-кит: один добыватель, харнес подсказок, контекстная дисциплина
 - [concepts/edit_kit.md](concepts/edit_kit.md) — edit-кит: редактор с каркасом-советником, fuzzy, атомарность, чекпоинты
 - [concepts/streaming_tui.md](concepts/streaming_tui.md) — стриминг, панель «Производительность» (живые метрики, профили сервера, зависания, трафик), плавность UI
-- [concepts/token_calibration.md](concepts/token_calibration.md) — калибратор «байты→токены»: срезы usage, каскадные метки на деплой, медиана/MAD, дрейф; фаза 1 — тихий сбор
+- [concepts/token_calibration.md](concepts/token_calibration.md) — калибратор «байты→токены»: срезы usage, каскадные метки на деплой, медиана/MAD, дрейф; панель считает токены
+- [concepts/reasoning_modes.md](concepts/reasoning_modes.md) — режимы рассуждения: автоопределение уровней самим API, кэш, выбор в мастере, чип 🧠 в шапке
 - [concepts/thought_queue.md](concepts/thought_queue.md) — очередь «мыслей»: сказать модели, не прерывая; доставка блоком на границе раунда, крестик отмены
 - [concepts/terminal_unicode_width.md](concepts/terminal_unicode_width.md) — ширина Unicode в терминале: почему «плывут» панели и как лечим
 - [concepts/embedded_terminal.md](concepts/embedded_terminal.md) — встроенный терминал: PTY-сессии, свернуть/вернуть, общий доступ человека и агента
@@ -81,10 +83,10 @@
 ## Источники (sources)
 Резюме исходных документов.
 - [sources/readme.md](sources/readme.md) — README.md (главное описание)
-- [sources/changelog.md](sources/changelog.md) — CHANGELOG.md (0.1, 0.2)
+- [sources/changelog.md](sources/changelog.md) — CHANGELOG.md (0.1–0.4)
 - [sources/config_cfg.md](sources/config_cfg.md) — config.cfg (ключи и значения)
 - [sources/prompts_readme.md](sources/prompts_readme.md) — система системных промптов
 - [sources/install_script.md](sources/install_script.md) — install.sh (установщик)
-- [sources/requirements.md](sources/requirements.md) — requirements.txt (зависимости Python)
-- [sources/scrollback_feature.md](sources/scrollback_feature.md) — SCROLLBACK_FEATURE.md (фича прокрутки TUI)
+- [sources/requirements.md](sources/requirements.md) — requirements.txt / requirements-dev.txt (зависимости Python и тестов)
+- [sources/scrollback_feature.md](sources/scrollback_feature.md) — SCROLLBACK_FEATURE.md (superseded: документ удалён из репо в 0.4)
 - [sources/git_history.md](sources/git_history.md) — хронология коммитов и основные вехи

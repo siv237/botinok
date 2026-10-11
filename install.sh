@@ -25,7 +25,10 @@ get_version_from_git() {
     if [ -n "$repo_dir" ] && [ -d "$repo_dir/.git" ]; then
         commit_date=$(git -C "$repo_dir" log -1 --format=%cd --date=format:%d.%m.%Y 2>/dev/null || echo "unknown")
         commit_hash=$(git -C "$repo_dir" log -1 --format=%h 2>/dev/null | cut -c1-4 || echo "????")
-        echo "0.2 | ${commit_date} | ${commit_hash}"
+        local ver
+        ver=$(sed -n 's/^_BOTINOK_VERSION = f"\([0-9][0-9.]*\) .*/\1/p' "$repo_dir/botinok.py" 2>/dev/null | head -1)
+        [ -z "$ver" ] && ver="unknown"
+        echo "${ver} | ${commit_date} | ${commit_hash}"
         return 0
     fi
 

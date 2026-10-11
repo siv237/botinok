@@ -1431,3 +1431,19 @@ test_context_compact, test_escape_stream — зелёные.
   статусе вне полёта, скорость по строке «Скорость:»), test_silence_timer («12 345»),
   test_web_progress (Stub: _tok_from_kb/_tool_status_ru), test_api_resilience («Неизвестная
   ошибка сервера»); новый test_skills_state_backfill в test_context_compact.
+
+## [2026-10-11] release | Релиз 0.4 + lint вики
+- CHANGELOG: секция `[0.4]` получила дату 2026-10-11 и дополнена крупными пунктами из git-истории с тега 0.3 (калибратор токенов, русскоязычный интерфейс и честная шапка, история серверов + SSL в мастере, окно API-ключа при 401/403, скилл llm-wiki, синтаксис-проверка code_editor; фиксы: chafa 1.8/ICC, мышь и MarkupError в TUI, чистый --stealth, лаунчер/BOTINOK_LAUNCH_DIR, «зависло» при печати аргументов).
+- README: добавлен bullet про reasoning-режимы; сверен с кодом (флаги, режимы, бэкенды) — актуален.
+- Ingest: overview.md переписан под 0.4 (версия, дерево core/, таблица инструментов, карта механизмов, вехи); sources/changelog.md и sources/git_history.md дополнены вехами 0.3/0.4; созданы concepts/reasoning_modes.md и entities/tools/sign-step.md; index.md обновлён (новые страницы, sign_step, описание session_memory).
+- Lint: все markdown-ссылки вики (~79 целей) существуют; orphan-страниц не найдено.
+- Тесты: venv/bin/python -m pytest tests/ → 86 passed (починен test_themes::test_app — добавлен @pytest.mark.asyncio, без него strict-режим pytest-asyncio валил сбор).
+
+## [2026-10-11] lint | второй прогон перед релизом 0.4
+- install.sh: `.version` писалась с жёстким «0.2» — теперь версия берётся из `_BOTINOK_VERSION` в botinok.py.
+- README/агенты: добавлен флаг `--reasoning` (+env); AGENTS.md: версия 0.3 → 0.4.
+- entities/botinok_cli.md: флаги сверены с argparse и лаунчером (добавлены --once/--version/--backend/--base-url/--api-key/--reasoning/--view-history, одиночный запрос; --update-packages/-U помечен как флаг лаунчера).
+- sources/readme.md: резюме переписано под README 0.4; sources/requirements.md: requirements-dev.txt, убрано несуществующее обновление pip у --update.
+- raw/README.md: манифест актуализирован (новые core-модули, update.sh, skills/llm-wiki, инструменты; CHANGELOG 0.1–0.4; SCROLLBACK_FEATURE.md помечен удалённым — страница уже superseded).
+- Создан requirements-dev.txt (pytest, pytest-asyncio).
+- Проверки: bash -n (install.sh, update.sh, botinok), compileall (botinok.py, core, tools, tests) — ОК; все ссылки промптов из кода существуют; ссылки вики — 81 цель цела; тесты 86 passed.

@@ -21,20 +21,32 @@
 | `core/session_picker.py` | Textual-экран выбора/возобновления сессии | `entities/botinok_cli.md` |
 | `core/cli_io.py` | Plain-вывод CLI без Rich (`out`, `term_width`) | `sources/requirements.md` |
 | `core/text_width.py` | Нормализация ширины Unicode/эмодзи и обрезка по ячейкам | `concepts/terminal_unicode_width.md` |
-| `core/openai_compat.py` | Адаптер OpenAI-совместимых бэкендов | `entities/openai_compat.md` |
+| `core/openai_compat.py` | Адаптер OpenAI-совместимых бэкендов, reasoning-уровни, usage | `entities/openai_compat.md`, `concepts/reasoning_modes.md` |
 | `core/config_wizard.py` | Интерактивный мастер настройки (--wizard) | `concepts/config_priority.md` |
+| `core/server_history.py` | История серверов мастера (адрес/ключ) | `concepts/config_priority.md` |
+| `core/api_key_gate.py` | Окно ввода API-ключа при 401/403 | `entities/openai_compat.md` |
+| `core/token_calibrator.py` | Калибратор «байты→токены» по фактическому usage | `concepts/token_calibration.md` |
+| `core/session_digest.py` | Скользящее окно памяти, FORGOTTEN_INDEX, подписи sign_step | `concepts/context_management.md` |
+| `core/process_control.py` | Реестр процессов, остановка дерева по Esc | `entities/process_control.md` |
+| `core/net_config.py` | Единый прокси для веб-инструментов | `entities/net_config.md` |
+| `core/themes.py` | Темы ночь/день/вечер | `concepts/theming.md` |
+| `core/image_render.py` / `image_block.py` / `image_catalog.py` / `image_refs.py` | Рендер и каталог картинок в чате | `concepts/image_rendering.md` |
+| `core/syntax_check.py` / `file_kinds.py` | Синтаксис-проверка code_editor, реестр типов | `concepts/edit_kit.md` |
 | `core/image_ascii.py` | ASCII-генерация изображений для консоли | `concepts/vision_multimodal.md` |
-| `tools/*.py` | 14 инструментов (+ алиас `web_extractor`; служебный модуль `web_jobs.py` — реестр фоновых задач web) (см. `entities/tools/`) | `entities/tools/*` |
+| `tools/*.py` | Инструменты: единый `web` (+legacy-алиасы `web_search`/`open_url`/`web_extract`/`curl`), `web_jobs`, `download_manager`, `safe_ops`, `file_system`, `code_editor`, `shell_exec`, `session_memory`, `sign_step`, `experience`, `skills`, `github`, `journal`, `vision`, `audio`, `image_show`, служебный `tools_catalog` (см. `entities/tools/`) | `entities/tools/*` |
 | `prompts/*.txt` | Системные промпты (копируются в сессию) | `sources/prompts_readme.md` |
 | `prompts/README.md` | Документация по системе промптов | `sources/prompts_readme.md` |
 | `config.cfg` | Конфигурация по умолчанию (Ollama, Storage, Tools, UI) | `sources/config_cfg.md`, `entities/config_system.md` |
 | `install.sh` | Установщик (системные зависимости, /opt/botinok, алиас) | `sources/install_script.md` |
+| `update.sh` | Обновление из git | `concepts/self_update.md` |
 | `README.md` | Главное описание проекта | `sources/readme.md` |
-| `CHANGELOG.md` | Журнал версий (0.1, 0.2) | `sources/changelog.md` |
+| `CHANGELOG.md` | Журнал версий (0.1–0.4) | `sources/changelog.md` |
 | `requirements.txt` | Зависимости Python (pip install -r) | `sources/requirements.md` |
-| `SCROLLBACK_FEATURE.md` | Описание фичи «бесконечная прокрутка» TUI | `sources/scrollback_feature.md`, `concepts/scrollback.md` |
+| `requirements-dev.txt` | Тестовые зависимости (pytest, pytest-asyncio) | `sources/requirements.md` |
+| `SCROLLBACK_FEATURE.md` | ~~Описание фичи «бесконечная прокрутка»~~ — удалён из репо; фича живёт в TUI | `sources/scrollback_feature.md`, `concepts/scrollback.md` |
 | `.git` (история) | Хронология коммитов | `sources/git_history.md` |
 | `skills/excel/SKILL.md` | Пример навыка (excel) | `concepts/skills_system.md` |
+| `skills/llm-wiki/SKILL.md` | Скилл ведения этой вики (WIKI_MODE) | `concepts/skills_system.md` |
 | `assets/logo.png` | Логотип проекта | — |
 
 ## Производные артефакты (не raw, не включать в ингвест)

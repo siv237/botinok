@@ -1,7 +1,7 @@
 ---
 type: source
 tags: [version]
-updated: 2026-08-23
+updated: 2026-10-11
 sources: 1
 status: stable
 ---
@@ -18,10 +18,12 @@ status: stable
 5. **Релиз 0.2** (fixes: ans-переменная, изображения, конфиги; RHEL; логотип).
 6. **Меню сессий**: интерактивная таблица с курсорной навигацией и фильтрацией; многострочный ввод; `session_memory` (объектный доступ к истории).
 7. **Переход на Textual**: замена Rich Live → Textual TUI; плавный стриминг, спойлеры, FPS, паритет интерфейсов. → `comparisons/rich_vs_textual.md`
-8. **OpenAI-совместимые бэкенды** (актуально, коммит `fb084e8`): llama-server, vLLM и др. → `entities/openai_compat.md`
+8. **OpenAI-совместимые бэкенды** (коммит `fb084e8`): llama-server, vLLM и др.; релиз **0.3** (тег `botinok-0.3`, 2026-08-24). → `entities/openai_compat.md`
+9. **Переезд на Textual целиком и ветка 0.4** (с апреля): встроенный терминал (PTY), inline-подтверждения, многострочный ввод, панель «Производительность», edit-кит `code_editor`, единый `web` с aria2c, safe_ops, dangerous-политика внутри/вне сессии, надёжное сохранение/восстановление сессий.
+10. **Финализация 0.4** (лето–осень): скользящее окно памяти + `sign_step` + калибратор токенов, осознанная compact-память, reasoning-режимы (чип 🧠), темы, картинки в чате, одиночный запрос/stealth/pipe, история серверов и SSL в мастере, окно API-ключа при 401/403, скилл llm-wiki, интерфейс по-русски; релиз **0.4** (2026-10-11). → `overview.md`, `sources/changelog.md`
 
 ## Статистика
-~112 коммитов; ветки: `main`, `backup-main-20260409_222705`; upstream `origin/main`. Крупные рефакторинги — интерфейс (Rich→Textual) и бэкенд (Ollama→+OpenAI-compat).
+~230 коммитов (дубли вех — worktree-ветки); ветки: `main`, `backup-main-20260409_222705`; upstream `origin/main`; теги `botinok-0.1/0.2/0.3/0.4`. Крупные рефакторинги — интерфейс (Rich→Textual), бэкенд (Ollama→+OpenAI-compat), память (биг-банг→скользящее окно).
 
 ## Противоречия для lint
 - Даты в CHANGELOG (0.2 = 2025-03-30) расходятся с git (2026-03). → `sources/changelog.md`
