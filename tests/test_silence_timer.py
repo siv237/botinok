@@ -107,11 +107,22 @@ def test_tool_delta_heartbeat():
     check("no_double_tool_calls", sum(1 for c in out if c.get("message", {}).get("tool_calls")) == 1)
 
 
+def test_skill_path_reported():
+    """skills get/run обязаны печатать папку скилла — модель не ищет паттерн по диску."""
+    from tools.skills import skills
+    out = skills(action="run", name="llm-wiki")
+    check("run_prints_folder", out and "папка скилла:" in out, str(out)[:120])
+    out2 = skills(action="get", name="llm-wiki")
+    check("get_prints_folder", out2 and "папка скилла:" in out2, str(out2)[:120])
+
+
 async def main_async() -> int:
     with net_meter._lock:
         net_meter._recv_samples.clear()
     print("== счётчик «Выжато» ==")
     test_compression_counter()
+    print("== путь к скиллу ==")
+    test_skill_path_reported()
     print("== пульс tool_calls в SSE ==")
     test_tool_delta_heartbeat()
 

@@ -1290,3 +1290,10 @@ ru_server в test_perf_panel — весь набор зелёный. Не ком
 - тесты: tool_delta-пульс (агрегат tool_calls не дублируется), сеть не
   «зависает», perf-panel очищает сэмплы перед hang-сценарием.
 Pre-existing провал test_api_resilience::err_unknown — проверен на HEAD, не от этих правок.
+
+## [2026-10-11] fix | Скилл llm-wiki: путь к паттерну печатается, поиск по диску запрещён
+Модель, вызвав скилл, не знала где `llm-wiki.md` и запускала поиск по диску.
+`tools/skills.py`: `get` и `run` теперь печатают «папка скилла: <path>»
+(для bundled — абсолютный путь установки). `skills/llm-wiki/SKILL.md` шаг 1:
+читать `<папка скилла>/llm-wiki.md` напрямую, искать по диску запрещено.
+Тест run_prints_folder/get_prints_folder.

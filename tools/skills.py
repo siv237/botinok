@@ -198,7 +198,7 @@ def cmd_get(name):
             skill_file = md_files[0]
     if skill_file.exists():
         content = skill_file.read_text()
-        print(f"{name} ({source}):\n")
+        print(f"{name} ({source}) — папка скилла: {path}\n")
         print(content[:2000])
         if len(content) > 2000:
             print(f"\n... [{len(content) - 2000} more chars]")
@@ -257,8 +257,8 @@ def cmd_run(name: str, task: str = "") -> str:
         return f"No SKILL.md in: {name}"
     content = skill_file.read_text()
     if not task:
-        return f"{name} content:\n\n{content}"
-    return f"{name} (for task: {task}):\n\n{content}"
+        return f"{name} (папка скилла: {path}) content:\n\n{content}"
+    return f"{name} (for task: {task}; папка скилла: {path}):\n\n{content}"
 
 def cmd_clawhub_search(query: str, limit: int = 10) -> list:
     results = clawhub_search(query, limit)
