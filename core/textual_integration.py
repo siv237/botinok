@@ -1532,7 +1532,8 @@ def ask_ollama_textual(
                 _comp_base.update(_cs)
             _update_stats(session_ctx=session_ctx_est, session_ctx_max=current_ctx,
                           compressed_tokens=_cs["tokens"], compress_trims=_cs["trims"],
-                          compress_resets=_cs["resets"])
+                          compress_resets=_cs["resets"],
+                          compress_manual=_cs.get("manual", 0))
 
             tools = tm.get_tool_definitions()
             try:

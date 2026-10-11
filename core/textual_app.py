@@ -2293,9 +2293,19 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         comp_tokens = s.get("compressed_tokens", 0) or 0
         comp_trims = s.get("compress_trims", 0) or 0
         comp_resets = s.get("compress_resets", 0) or 0
-        if comp_trims or comp_resets:
-            lines.append(row("Память сжималась:", f"[bold cyan]~{comp_tokens} токенов[/bold cyan]"
-                                             f" [dim](поджал {comp_trims}, очистил {comp_resets})[/dim]"))
+        comp_manual = s.get("compress_manual", 0) or 0
+        if comp_trims or comp_resets or comp_manual:
+            lines.append(row("Память сжималась:", f"[bold cyan]~{comp_tokens} токенов[/bold cyan]"))
+            # Разбивка по способам — отдельной тёмной строкой, только ненулевые:
+            # основная строка не должна переноситься и ломать сетку панели.
+            ways = []
+            if comp_trims:
+                ways.append(f"поджал {comp_trims}")
+            if comp_resets:
+                ways.append(f"очистил {comp_resets}")
+            if comp_manual:
+                ways.append(f"по запросу агента {comp_manual}")
+            lines.append(f"[dim]  {' · '.join(ways)}[/dim]")
         lines.append("")
 
         # Сырой обмен с моделью: «АПИ отдано» / «АПИ принято» (за запрос и всего).
