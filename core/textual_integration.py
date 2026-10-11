@@ -38,6 +38,8 @@ from core.api_key_gate import is_auth_error, key_entry_url, save_api_key
 from core.textual_app import BotinokTextualApp
 from core import themes as botinok_themes
 from core.terminal_keys import install as install_terminal_keys
+from core import token_calibrator
+from core import net_meter
 
 MODELS_NO_TOOLS = set()
 
@@ -53,6 +55,10 @@ MAX_COMPACT_BLOCKS = 12
 # Дедуп identical-вызовов внутри одного хода (только детерминированные
 # читалки: повтор такого же вызова — ошибка фокуса, а не осмысленный рефреш).
 DEDUP_TOOLS = ("file_system", "journal")
+# Напоминалка о чекпоинтах sign_step: чем больше сожжено контекста, тем важнее
+# отметить прогресс (сброс сотрёт непрописанное). Срабатывает при заполнении
+# контекста ≥40% и отсутствии подписи в ходе — один раз за ход.
+SIGN_CHECKPOINT_REMINDER_PCT = 0.40
 MAX_TOOL_ROUNDS_PER_TURN = 80
 MAX_AUTO_RECOVERIES_PER_TURN = 2
 # Сколько раз подряд молча переспрашивать модель, если она вернула полностью
@@ -99,6 +105,31 @@ def _tool_stream_has_payload(text: str) -> bool:
 _TOKEN_K_EMA_ALPHA = 0.3
 _token_k_state = {"by_model": {}, "current": 1.0}
 
+# Текущий деплой для калибратора токенов (ставится на каждом ходе). Плотность
+# token_calibrator — основной оценщик, когда по деплою накоплены замеры;
+# EMA-коэффициент len//4 остаётся запасным путём (например, после resume).
+_calib_deploy = ""
+
+
+def _set_calib_deploy(model: str, server: str) -> None:
+    global _calib_deploy
+    try:
+        _calib_deploy = token_calibrator.deploy_fingerprint(model, server)
+    except Exception:
+        _calib_deploy = ""
+
+
+def _prompt_density():
+    """Откалиброванная плотность промпта (токенов на символ) или None."""
+    try:
+        if _calib_deploy:
+            dens, status = token_calibrator.density(_calib_deploy, "prompt", "*")
+            if status == "calibrated":
+                return dens
+    except Exception:
+        pass
+    return None
+
 # Накопительный учёт «умных вытеснений» (для панели): сколько токенов контекста
 # сжато сегментным триммом и big-bang-ресетом за процесс.
 _compression_stats = {"tokens": 0, "trims": 0, "resets": 0, "manual": 0, "last_reason": ""}
@@ -108,9 +139,10 @@ def get_compression_stats() -> dict:
     return dict(_compression_stats)
 
 
-# Разовая метка на весь сеанс: скилл llm-wiki активирован. System-реплики
-# не триммятся и переживают сброс — модель «видит» режим до конца сессии;
-# дедуп (_append_system_once) исключает повторы.
+# Разовая метка на весь сеанс: скилл llm-wiki активирован. В messages нота
+# переживает тримм, но НЕ big-bang-ресет (messages.clear()) — для этого есть
+# SKILLS_ACTIVE-памятка, восстанавливаемая из enabled_skills.json каждый раунд.
+# В context.json нота пишется ровно один раз на сессию (_wiki_note_persisted).
 WIKI_MODE_NOTE = (
     "WIKI_MODE: в этой сессии задействован скилл llm-wiki (паттерн LLM Wiki). "
     "Работай по схеме вики проекта: сначала wiki/index.md → страницы → ответ; "
@@ -134,6 +166,140 @@ def _wiki_mode_activation(tool_args, res_str: str) -> bool:
         return False
     action = str(args.get("action", "")).lower()
     return action in ("get", "run") or "папка скилла" in res
+
+
+_SKILLS_STATE_FILE = "enabled_skills.json"
+SKILLS_ACTIVE_PREFIX = "SKILLS_ACTIVE:"
+# Сессии, по которым уже выполнен разовый бэкфилл состояния (tools.log/context.json).
+_skills_state_scanned = set()
+# Сессии, где WIKI_MODE_NOTE уже лежит в context.json — повторная запись не нужна.
+_wiki_note_persisted = set()
+
+
+def _skill_activation_name(tool_args, res_str: str) -> str:
+    """Имя подключённого скилла по вызову и результату; '' — не активация."""
+    try:
+        args = tool_args if isinstance(tool_args, dict) else json.loads(str(tool_args or "{}"))
+    except Exception:
+        return ""
+    if not isinstance(args, dict):
+        return ""
+    action = str(args.get("action", "")).lower()
+    name = str(args.get("name", "")).strip().lower().replace("_", "-")
+    res = str(res_str or "")
+    if action not in ("get", "run") or not name:
+        return ""
+    if res.lower().startswith(("error", "не найден", "unknown")) or "не найден" in res[:80].lower():
+        return ""
+    return name
+
+
+def _record_skill_name(session_path: str, name: str, stamp: str = None) -> None:
+    path = os.path.join(session_path, _SKILLS_STATE_FILE)
+    data = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    if name in data:
+        return
+    data[name] = stamp or time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def record_skill_activation(session_path: str, tool_name: str, tool_args, res_str: str) -> None:
+    """Учёт подключённого скилла: skills get/run прошли успешно → имя в файл сессии.
+
+    Файл переживает overflow-reset и выход из сессии — по нему восстанавливается
+    памятка SKILLS_ACTIVE (какие скиллы были подключены и как их перечитать).
+    """
+    if tool_name != "skills":
+        return
+    name = _skill_activation_name(tool_args, res_str)
+    if not name:
+        return
+    _record_skill_name(session_path, name)
+
+
+def _backfill_session_state(session_path: str) -> None:
+    """Разовый на сессию бэкфилл по неизменяемым архивам (resume/старый код).
+
+    Активации, случившиеся до появления enabled_skills.json (скилл подключён в
+    прошлых запусках процесса), терялись: SKILLS_ACTIVE не генерировался, и
+    модель после resume не видела ни вики, ни скиллов. Сканируем tools.log
+    (завершённые skills get/run) и context.json (уже вшитый WIKI_MODE).
+    """
+    if session_path in _skills_state_scanned:
+        return
+    _skills_state_scanned.add(session_path)
+    if not os.path.exists(os.path.join(session_path, _SKILLS_STATE_FILE)):
+        found = {}
+        try:
+            with open(os.path.join(session_path, "tools.log"), "r",
+                      encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or '"skills"' not in line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    if rec.get("tool") != "skills" or rec.get("status") != "completed":
+                        continue
+                    name = _skill_activation_name(rec.get("arguments"),
+                                                  rec.get("full_result"))
+                    if name and name not in found:
+                        found[name] = str(rec.get("timestamp") or "backfill")[:19]
+        except OSError:
+            found = {}
+        for name, stamp in found.items():
+            _record_skill_name(session_path, name, stamp)
+    if session_path in _wiki_note_persisted:
+        return
+    try:
+        with open(os.path.join(session_path, "context.json"), "r",
+                  encoding="utf-8", errors="ignore") as f:
+            if "WIKI_MODE:" in f.read():
+                _wiki_note_persisted.add(session_path)
+    except OSError:
+        pass
+
+
+def refresh_skills_active_note(messages: list, session_path: str) -> None:
+    """Живая system-памятка о подключённых скиллах: одна, всегда актуальная.
+
+    Перезаписывается на каждый раунд (старая с тем же префиксом удаляется),
+    поэтому переживает overflow-reset (messages.clear()) и возвращается при
+    resume — файл сессии неизменяем. Модель знает, какие скиллы были подключены,
+    и что их инструкции могли быть вытеснены — перечитывает, а не догадывается.
+    """
+    _backfill_session_state(session_path)
+    try:
+        with open(os.path.join(session_path, _SKILLS_STATE_FILE), "r",
+                  encoding="utf-8") as f:
+            data = json.load(f)
+        names = sorted(str(k) for k in (data or {}) if str(k).strip())
+    except (OSError, json.JSONDecodeError):
+        names = []
+    for m in list(messages):
+        if m.get("role") == "system" and str(m.get("content", "")).startswith(SKILLS_ACTIVE_PREFIX):
+            messages.remove(m)
+    if not names:
+        return
+    note = (f"{SKILLS_ACTIVE_PREFIX} в этой сессии подключались скиллы: "
+            + ", ".join(names)
+            + ". Их инструкции — ранние tool-результаты; они могли быть вытеснены "
+            "или сняты сбросом контекста. Не догадывайся о их содержимом — "
+            "перечитай: skills action=get name=<имя>.")
+    messages.append({"role": "system", "content": note})
 
 
 def _compress_reason_ru(reason: str) -> str:
@@ -181,8 +347,19 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _estimate_message_tokens(msg: dict) -> int:
-    base = 8
     content = msg.get("content", "")
+    dens = _prompt_density()
+    if dens is not None:
+        # Плотность измерена как prompt_tokens / символы контента и уже
+        # поглощает служебный оверхед шаблона — отдельные +8 не нужны.
+        chars = len(content) if isinstance(content, str) else 0
+        if "tool_calls" in msg and msg["tool_calls"]:
+            try:
+                chars += len(json.dumps(msg["tool_calls"], ensure_ascii=False))
+            except Exception:
+                chars += len(str(msg["tool_calls"]))
+        return max(1, int(chars * dens))
+    base = 8
     t = base + _estimate_tokens(content)
     if "tool_calls" in msg and msg["tool_calls"]:
         try:
@@ -994,6 +1171,7 @@ def _ollama_summarize_and_reset_context(
                 "num_predict": 450,
             },
         }
+        data = {}
         if is_openai_backend(sm):
             data = chat_once(
                 sm,
@@ -1012,6 +1190,25 @@ def _ollama_summarize_and_reset_context(
             if res.status_code == 200:
                 data = res.json()
                 summary_text = data.get("message", {}).get("content") or summary_text
+        # Срез калибратора и для нестримингового резюмирования.
+        try:
+            _pc = int(data.get("prompt_eval_count") or 0)
+            _ec = int(data.get("eval_count") or 0)
+            if _pc or _ec:
+                token_calibrator.record_api_call(
+                    deploy=token_calibrator.deploy_fingerprint(
+                        model, _server_label(sm)),
+                    kind="summary",
+                    roles={"summary": sum(len(str(m.get("content") or ""))
+                                          for m in summary_messages)},
+                    prompt_tokens=_pc,
+                    response_chars=len(summary_text or ""),
+                    completion_tokens=_ec,
+                    reasoning_tokens=int(data.get("reasoning_tokens") or 0),
+                )
+                net_meter.add_usage(_pc, _ec)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -1143,6 +1340,14 @@ def ask_ollama_textual(
     ollama_chat_url = f"{ollama_base_url}/api/chat"
     verify_ssl = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
     request_timeout = sm.config.getint('Ollama', 'RequestTimeout', fallback=300)
+
+    # Калибратор «байты→токены»: тихий сбор пар (payload ↔ usage) рядом с базой
+    # сессий. Фаза 1 ничего не меняет в панели — только копит замеры.
+    try:
+        token_calibrator.init(token_calibrator.default_store_path(
+            getattr(sm, 'base_path', None)))
+    except Exception:
+        pass
 
     if messages and not any(m.get("role") == "system" and "BOTINOK" in str(m.get("content", "")) for m in messages):
         identity_content = sm.load_prompt(session_path, "identity")
@@ -1370,6 +1575,7 @@ def ask_ollama_textual(
         current_verify_ssl = _verify_ssl
         current_timeout = _request_timeout
         server_label = _server_label(sm)
+        _set_calib_deploy(current_model, server_label)
 
         if current_model in MODELS_NO_TOOLS:
             _ensure_chat_only_system_message(messages)
@@ -1383,6 +1589,7 @@ def ask_ollama_textual(
         proof_rounds = 0
         sign_nudges = 0
         sign_hidden = False
+        _sign_reminded = False
         post_sign_silent = False
         length_stitches = 0
         stitched_parts = []
@@ -1515,6 +1722,9 @@ def ask_ollama_textual(
                                "Старое в артефакте, подниму по запросу.[/dim]")
                 sm.update_context(session_path, "system", _compact_summary)
             write_context_map(session_path, messages, current_ctx)
+            # Памятка о подключённых скиллах — живая, перезаписывается каждый раунд:
+            # переживает overflow-reset (messages.clear()) и возвращается при resume.
+            refresh_skills_active_note(messages, session_path)
             prepared = _prepare_messages_for_ollama(sm, session_path, messages, num_ctx=current_ctx)
             session_ctx_est = _estimate_messages_tokens(prepared)
             _cs = get_compression_stats()
@@ -1522,11 +1732,11 @@ def ask_ollama_textual(
             _d_trims = _cs["trims"] - _comp_base["trims"]
             _d_resets = _cs["resets"] - _comp_base["resets"]
             if _d_resets:
-                _write_log(f"[dim]♻️ Память очищена целиком: −~{_d_tokens} токенов "
+                _write_log(f"[dim]♻️ Память очищена целиком: −{_d_tokens} токенов "
                            f"({_compress_reason_ru(_cs.get('last_reason', ''))}); дневник сессии цел.[/dim]")
             elif _d_trims:
                 _pct = int(session_ctx_est / current_ctx * 100) if current_ctx else 0
-                _write_log(f"[dim]🧹 Память подожата: −~{_d_tokens} токенов "
+                _write_log(f"[dim]🧹 Память подожата: −{_d_tokens} токенов "
                            f"(было занято {_pct}%); старое в оглавлении, подниму по запросу.[/dim]")
             if _d_trims or _d_resets:
                 _comp_base.update(_cs)
@@ -1850,6 +2060,7 @@ def ask_ollama_textual(
                             "load_duration_ms": chunk.get("load_duration", 0) / 1_000_000,
                             "prompt_eval_count": chunk.get("prompt_eval_count", 0),
                             "eval_count": chunk.get("eval_count", 0),
+                            "reasoning_tokens": chunk.get("reasoning_tokens", 0),
                             "eval_duration_ms": chunk.get("eval_duration", 0) / 1_000_000,
                         }
                         sm.log_chunk(session_path, "metrics", "", metrics=metrics)
@@ -1918,6 +2129,34 @@ def ask_ollama_textual(
                     current_model, prompt_eval_count, prepared,
                     persist_path=os.path.join(session_path, "performance.log"),
                 )
+            # Тихий срез для калибратора токенов: объёмы текста ↔ точные usage.
+            try:
+                _calib_roles = {}
+                for _m in prepared or []:
+                    _r = str(_m.get("role") or "?")
+                    _c = _m.get("content")
+                    _n = len(_c) if isinstance(_c, str) else 0
+                    if _m.get("tool_calls"):
+                        try:
+                            _n += len(json.dumps(_m["tool_calls"], ensure_ascii=False))
+                        except Exception:
+                            pass
+                    _calib_roles[_r] = _calib_roles.get(_r, 0) + _n
+                token_calibrator.record_api_call(
+                    deploy=token_calibrator.deploy_fingerprint(current_model, server_label),
+                    kind="tool_round" if any(str(m.get("role")) == "tool"
+                                             for m in (prepared or [])) else "plain",
+                    roles=_calib_roles,
+                    prompt_tokens=prompt_eval_count,
+                    response_chars=len(full_response),
+                    thinking_chars=len(full_thinking),
+                    tool_chars=len(streaming_tool_text),
+                    completion_tokens=eval_count,
+                    reasoning_tokens=int(metrics.get("reasoning_tokens") or 0),
+                )
+                net_meter.add_usage(prompt_eval_count, eval_count)
+            except Exception:
+                pass
 
             _update_stats(
                 status="Processing tool calls..." if tool_calls else "Done",
@@ -2106,6 +2345,8 @@ def ask_ollama_textual(
                              "goal (что делал за ход, ≤15 слов), done (что сделано, ≤15 слов), "
                              "status (progress|blocked|decision|answered), "
                              "entities — только что реально встречалось в ходе (пути, URL, имена; ≤6). "
+                             "В следующий раз отмечай сделанное по ходу (sign_step(done=…) после "
+                             "каждого значимого шага) — так прогресс не теряется. "
                              "Ничего больше не вызывай и не повторяй ответ.")
                     messages.append({"role": "user", "content": nudge})
                     # Пинк — служебный: в messages он есть (модель его видит),
@@ -2360,15 +2601,36 @@ def ask_ollama_textual(
                         "кто съел контекст, action=compact blocks=\"…\" освободит старые блоки "
                         "(текущий ход с этого хода и доступен для сжатия в следующем)."
                     )
+                # Чекпоинты sign_step: индикатор важности — заполненность контекста
+                # (чем больше сожжено, тем больнее терять непрописанный прогресс).
+                _ctx_ratio = _pressure_state.get("ratio", 0.0)
+                if (_sign_step is not None and not _sign_reminded
+                        and _ctx_ratio >= SIGN_CHECKPOINT_REMINDER_PCT
+                        and current_model not in MODELS_NO_TOOLS
+                        and not _sign_step.has_signature(session_path)):
+                    _sign_reminded = True
+                    compact_msg += (
+                        f"\ncheckpoint_reminder: контекст заполнен на ~{int(_ctx_ratio * 100)}%, "
+                        "а прогресс хода ещё не отмечен — при сбросе он потеряется. "
+                        "Сделал значимое — sign_step(done=…) коротко зафиксируй "
+                        "и продолжай без паузы."
+                    )
 
-                res_tokens = len(str(compact_msg)) // 4
+                res_tokens = _estimate_tokens(compact_msg)
                 tool_tokens += res_tokens
 
                 sm.log_tool_call(session_path, tool_name, tool_args, tool_result, status="completed", call_id=tc_id)
 
+                if tool_name == "skills":
+                    record_skill_activation(session_path, tool_name, tool_args, res_str)
                 if tool_name == "skills" and _wiki_mode_activation(tool_args, res_str):
                     if _append_system_once(messages, WIKI_MODE_NOTE):
-                        sm.update_context(session_path, "system", WIKI_MODE_NOTE)
+                        # в архив — ровно один раз на сессию: после каждого
+                        # сброса нота возвращалась в messages и дублировалась
+                        # в context.json десятками копий
+                        if session_path not in _wiki_note_persisted:
+                            _wiki_note_persisted.add(session_path)
+                            sm.update_context(session_path, "system", WIKI_MODE_NOTE)
                         _write_log("[dim]📚 Режим вики включён: скилл llm-wiki активен до конца сессии.[/dim]")
 
                 media_extra = None

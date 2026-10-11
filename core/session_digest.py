@@ -120,7 +120,8 @@ class Window:
     call_args: List[str] = field(default_factory=list)   # аргументы tool_calls, порождённых этим окном
     msg_indices: List[int] = field(default_factory=list)  # номера записей context.json.history
     turn_ids: List[int] = field(default_factory=list)     # номера ходов session_memory
-    sign: Optional[Dict] = None                           # подпись sign_step (этап 6), если есть
+    sign: Optional[Dict] = None                           # подпись sign_step (этап 6), последняя для окна
+    signs: List[Dict] = field(default_factory=list)      # все подписи/чекпоинты окна (2026-10-11)
     cloud: str = ""                                       # предвычисленное облако (build_digest_lines)
     selfpath: str = ""                                    # имя своей папки сессии (шум в облаке)
 
@@ -240,7 +241,7 @@ def build_windows(session_path: str) -> List[Window]:
                 except AttributeError:
                     continue
 
-    # подписи sign_step (этап 6): window_id → goal/done/status/entities
+    # подписи sign_step (этап 6 + чекпоинты): window_id → список goal/done/status
     try:
         with open(os.path.join(session_path, "signatures.json"), "r", encoding="utf-8", errors="ignore") as f:
             records = json.load(f)
@@ -248,12 +249,14 @@ def build_windows(session_path: str) -> List[Window]:
             by_window = {}
             for rec in records:
                 try:
-                    by_window[int(rec.get("window_id", -1))] = rec
+                    by_window.setdefault(int(rec.get("window_id", -1)), []).append(rec)
                 except (TypeError, ValueError):
                     continue
             for w in windows:
-                if w.window_id in by_window:
-                    w.sign = by_window[w.window_id]
+                lst = by_window.get(w.window_id)
+                if lst:
+                    w.signs = lst
+                    w.sign = lst[-1]
     except (OSError, json.JSONDecodeError):
         pass
     return windows
@@ -335,6 +338,9 @@ def window_line(window: Window) -> str:
         done = str(window.sign.get("done") or "").strip()
         if goal or done:
             head += f"   goal: {goal} | done: {done}"
+        extra = len(window.signs) - 1
+        if extra > 0:
+            head += f" (+{extra} чекпоинтов)"
     tail = f"   {_turn_pointer(window)} | tools: {_tool_signatures(window)} | ctx={window.ctx_used}"
     return head + "\n" + tail
 

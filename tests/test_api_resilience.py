@@ -41,7 +41,7 @@ def main() -> int:
     check("err_nested", ti._extract_api_error(
         {"error": {"message": "Loading model", "type": "unavailable_error"}}) == "Loading model")
     check("err_detail", ti._extract_api_error({"detail": "bad request"}) == "bad request")
-    check("err_unknown", ti._extract_api_error({}) == "Unknown Error")
+    check("err_unknown", ti._extract_api_error({}) == "Неизвестная ошибка сервера")
 
     # Подпись сервера: имя реального бэкенда.
     class _Cfg:

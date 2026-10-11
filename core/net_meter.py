@@ -29,6 +29,14 @@ _recv_total = 0
 _req_turn = 0
 _req_total = 0
 
+# Точные токены usage (prompt/completion) за запрос и за сессию — их сообщает
+# сервер в финальном чанке; панель показывает их, байты остаются внутри
+# (детектор тишины, скорость, диагностика).
+_ptok_turn = 0
+_ctok_turn = 0
+_ptok_total = 0
+_ctok_total = 0
+
 # Опорные точки (время, накопленный приём) для расчёта живой скорости.
 _recv_samples: "deque[tuple[float, int]]" = deque(maxlen=256)
 
@@ -82,10 +90,25 @@ def add_request() -> None:
 def reset_turn() -> None:
     """Сброс счётчиков «за текущий запрос» (сессионные не трогаем)."""
     global _sent_turn, _recv_turn, _req_turn
+    global _ptok_turn, _ctok_turn
     with _lock:
         _sent_turn = 0
         _recv_turn = 0
         _req_turn = 0
+        _ptok_turn = 0
+        _ctok_turn = 0
+
+
+def add_usage(prompt_tokens: int, completion_tokens: int) -> None:
+    """Точные usage-токены завершённого запроса (за ход и за сессию)."""
+    global _ptok_turn, _ctok_turn, _ptok_total, _ctok_total
+    with _lock:
+        p = int(prompt_tokens or 0)
+        c = int(completion_tokens or 0)
+        _ptok_turn += p
+        _ctok_turn += c
+        _ptok_total += p
+        _ctok_total += c
 
 
 def recv_rate(window: float = 3.0, max_gap: float = 1.0) -> float:
@@ -121,6 +144,10 @@ def snapshot() -> Dict[str, int]:
             "recv_total": _recv_total,
             "req_turn": _req_turn,
             "req_total": _req_total,
+            "ptok_turn": _ptok_turn,
+            "ctok_turn": _ctok_turn,
+            "ptok_total": _ptok_total,
+            "ctok_total": _ctok_total,
         }
 
 

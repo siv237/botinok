@@ -250,6 +250,8 @@ class OpenAIStreamResponse:
             'done_reason': finish_reason or 'stop',
             'prompt_eval_count': usage.get('prompt_tokens', 0),
             'eval_count': usage.get('completion_tokens', 0),
+            'reasoning_tokens': (usage.get('completion_tokens_details') or {}).get(
+                'reasoning_tokens', 0),
             'eval_duration': 0,
             'total_duration': 0,
         }, ensure_ascii=False).encode('utf-8')
@@ -300,4 +302,6 @@ def chat_once(sm, ollama_payload, timeout=300, verify_ssl=True):
         'done': True,
         'prompt_eval_count': usage.get('prompt_tokens', 0),
         'eval_count': usage.get('completion_tokens', 0),
+        'reasoning_tokens': (usage.get('completion_tokens_details') or {}).get(
+            'reasoning_tokens', 0),
     }

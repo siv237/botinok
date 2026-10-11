@@ -75,6 +75,7 @@ status: stable
 
 ## Отображаемые метрики
 Метрики сохраняются в YAML-футер сессии (`BOTINOK_SESSION_METADATA`). → `entities/session_directory.md`, `entities/session_manager.md`
+Перевод байтовых счётчиков в токены — калибратор по срезам usage (фаза 1 — тихий сбор): → `concepts/token_calibration.md`
 
 ## Панель «Производительность» (простая и живая)
 Требование: пока задача не завершена, в панели **всегда есть движение**; если

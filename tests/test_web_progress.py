@@ -137,8 +137,11 @@ def main() -> int:
     from core.textual_app import BotinokTextualApp
 
     class Stub:
-        _fmt_kb = staticmethod(BotinokTextualApp._fmt_kb)
+        _tok_from_kb = BotinokTextualApp._tok_from_kb
+        _fmt_tok = BotinokTextualApp._fmt_tok
         _fmt_dur = staticmethod(BotinokTextualApp._fmt_dur)
+        _tool_status_ru = BotinokTextualApp._tool_status_ru
+        _TOOL_STATUS_RU = BotinokTextualApp._TOOL_STATUS_RU
         _tool_state = BotinokTextualApp._tool_state
         _truncate = staticmethod(BotinokTextualApp._truncate)
         _rich_escape = BotinokTextualApp._rich_escape
@@ -160,22 +163,25 @@ def main() -> int:
     # --- «состояние» для правого края: detail, иначе время ---
     import time as _t
     check("state_detail", BotinokTextualApp._tool_state(
-        Stub, {"detail": "🔎 найдено 8", "status": "running", "start_time": _t.time()}) == "🔎 найдено 8")
+        Stub(), {"detail": "🔎 найдено 8", "status": "running", "start_time": _t.time()}) == "🔎 найдено 8")
     check("state_running_timer", BotinokTextualApp._tool_state(
-        Stub, {"detail": "", "status": "running", "start_time": _t.time() - 5}).startswith("⏱"))
+        Stub(), {"detail": "", "status": "running", "start_time": _t.time() - 5}).startswith("⏱"))
     check("state_done_duration", BotinokTextualApp._tool_state(
-        Stub, {"detail": "", "status": "completed", "start_time": 100, "end_time": 103}) == "3с")
+        Stub(), {"detail": "", "status": "completed", "start_time": 100, "end_time": 103}) == "3с")
     check("state_done_size", BotinokTextualApp._tool_state(
-        Stub, {"detail": "", "status": "completed", "size_kb": 0.66,
-               "start_time": 100, "end_time": 103}) == "0.66 KB · 3с")
+        Stub(), {"detail": "", "status": "completed", "size_kb": 0.66,
+               "start_time": 100, "end_time": 103}) == "0.7 КБ · 3с",
+        BotinokTextualApp._tool_state(
+            Stub(), {"detail": "", "status": "completed", "size_kb": 0.66,
+                   "start_time": 100, "end_time": 103}))
     check("state_done_detail_and_size", BotinokTextualApp._tool_state(
-        Stub, {"detail": "✅ скачано", "status": "completed", "size_kb": 53.9,
-               "start_time": 100, "end_time": 101}) == "✅ скачано · 53.90 KB")
+        Stub(), {"detail": "✅ скачано", "status": "completed", "size_kb": 53.9,
+               "start_time": 100, "end_time": 101}) == "✅ скачано · 53.9 КБ")
     check("state_no_size_dupe", BotinokTextualApp._tool_state(
-        Stub, {"detail": "✅ 0.66 KB", "status": "completed", "size_kb": 0.66,
-               "start_time": 100, "end_time": 101}) == "✅ 0.66 KB")
+        Stub(), {"detail": "✅ 0.7 КБ", "status": "completed", "size_kb": 0.66,
+               "start_time": 100, "end_time": 101}) == "✅ 0.7 КБ")
     check("state_empty", BotinokTextualApp._tool_state(
-        Stub, {"detail": "", "status": "completed", "start_time": 0, "end_time": 0}) == "")
+        Stub(), {"detail": "", "status": "completed", "start_time": 0, "end_time": 0}) == "")
 
     # --- заголовок всегда одной строкой и не длиннее панели ---
     long_name = {"name": "session_memory_very_long_name", "status": "completed",

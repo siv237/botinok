@@ -70,7 +70,7 @@ def main() -> int:
             line = session_digest.window_line(signed[0])
             check("line_has_goal", "goal: качать данные" in line and "done: качал" in line, line[:200])
 
-        # 3) левая entity: первая — ошибка с именами, вторая — отказ без подписи
+        # 3) левая entity: первая — ошибка с именами, вторая — отказ от ошибок
         sign_step.reset_turn(sess)
         sign_step.observe(sess, ["file_system", "notes.txt"])
         r1 = sign_step.sign_step_tool(goal="g", done="d", status="progress",
@@ -80,9 +80,36 @@ def main() -> int:
         r2 = sign_step.sign_step_tool(goal="g", done="d", status="progress",
                                       entities=["тоже_левая_zz"], session_path=sess)
         check("second_fail_gives_up", r2 == "ok" and not sign_step.has_signature(sess))
-        # отказ = дальше не мучаем
-        r3 = sign_step.sign_step_tool(goal="g", done="d", status="progress", entities=[], session_path=sess)
-        check("gave_up_stays_ok", r3 == "ok" and not sign_step.has_signature(sess))
+        # после отказа валидные подписи принимаем (чекпоинты позже в ходу — благо)
+        r3 = sign_step.sign_step_tool(goal="g", done="отметка после отказа",
+                                      status="progress", entities=[], session_path=sess)
+        check("gave_up_accepts_valid", r3 == "ok" and sign_step.has_signature(sess))
+        # левая entity после отказа — молча ok, не плодит записей
+        n_before = len(json.load(open(os.path.join(sess, "signatures.json"), encoding="utf-8")))
+        r4 = sign_step.sign_step_tool(goal="g", done="d", status="progress",
+                                      entities=["лева_после_otказа"], session_path=sess)
+        n_after = len(json.load(open(os.path.join(sess, "signatures.json"), encoding="utf-8")))
+        check("post_giveup_bogus_silent", r4 == "ok" and n_after == n_before)
+
+        # 3b) чекпоинты: несколько подписей на окно, seq, digest печатает +N
+        sign_step.reset_turn(sess)
+        sign_step.observe(sess, ["code_editor", "core/app.py"])
+        sign_step.sign_step_tool(goal="починить app", done="исправил баг",
+                                 status="progress", entities=["core/app.py"], session_path=sess)
+        sign_step.sign_step_tool(goal="", done="тесты прошли",
+                                 status="progress", entities=[], session_path=sess)
+        recs = json.load(open(os.path.join(sess, "signatures.json"), encoding="utf-8"))
+        last_two = [r for r in recs if r.get("done") in ("исправил баг", "тесты прошли")]
+        check("two_checkpoints", len(last_two) == 2, str(recs)[-200:])
+        check("seq_assigned", sorted(r.get("seq") for r in last_two) == [0, 1]
+              or len({r.get("seq") for r in last_two}) == 2, str(last_two))
+        windows = session_digest.build_windows(sess)
+        multi = [w for w in windows if len(w.signs) >= 2]
+        check("digest_multi_signs", bool(multi))
+        if multi:
+            check("sign_is_last", multi[0].sign.get("done") == "тесты прошли", str(multi[0].sign))
+            line = session_digest.window_line(multi[0])
+            check("line_checkpoint_count", "чекпоинтов)" in line, line[:200])
 
         # 4) ретрай с валидными entity после первой ошибки — принимается
         sign_step.reset_turn(sess)

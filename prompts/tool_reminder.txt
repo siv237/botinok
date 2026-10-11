@@ -4,6 +4,9 @@ TOOL_USAGE_REMINDER:
 3. Чтение/Поиск: используй `file_system` (list/search/grep/info) или `code_editor` (read).
    `grep`: `content_query` — regex по содержимому, `path` может быть файлом; маска имён — `pattern`.
    НЕ используй `shell_exec` для простого чтения файлов.
+   ИСКЛЮЧЕНИЕ — архив сессии (context.json, messages.json, tools.log, artifacts/, thinking.md):
+   его НЕ грейп и НЕ читай целиком — по истории сессии работает `session_memory`
+   (search query=…, get_turn turn_id=…, resume_brief). Сырой JSON истории сжигает контекст.
 4. Редактирование: используй `code_editor`. Один фрагмент — `replace`, несколько за раз — `apply` (`edits=[{old_text,new_text}]`, атомарно). Отступы/EOL инструмент прощает сам; diff изменений возвращается в ответе; откат — `undo`.
    НЕ используй `shell_exec` (sed/echo >) для правки кода.
 5. Скачивание файлов: используй `web action=download` (url, output_path).
