@@ -11,7 +11,9 @@
 
 import configparser
 import os
+import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -21,6 +23,7 @@ import core.config_wizard as cw  # noqa: E402
 from core.config_wizard import ConfigWizard  # noqa: E402
 
 FAILURES = []
+_TMP = tempfile.mkdtemp(prefix="botinok_wizard_ssl_")
 
 
 def check(name: str, cond: bool, extra: str = "") -> None:
@@ -45,6 +48,9 @@ def make_wizard():
     cfg.set('Ollama', 'BaseUrl', 'https://self-signed.local:11434')
     cfg.set('Ollama', 'VerifySSL', 'true')
     w.config = cfg
+    # Пустая история серверов: isolated config_path в temp.
+    w.sm = type("FakeSM", (), {
+        "config_path": os.path.join(tempfile.mkdtemp(dir=_TMP), "config.cfg")})()
     return w
 
 
@@ -145,6 +151,7 @@ def main():
     run_case("consent_ignore_ollama", case_consent_ignore_ollama)
     run_case("refuse_then_http_ollama", case_refuse_then_http_ollama)
     run_case("consent_ignore_openai", case_consent_ignore_openai)
+    shutil.rmtree(_TMP, ignore_errors=True)
     if FAILURES:
         print(f"\nПровалено: {len(FAILURES)} — {FAILURES}")
         return 1
