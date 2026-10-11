@@ -3347,9 +3347,19 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self._tools_dirty = True
         self.update_stats_display()
 
+    # Старт нового запроса к модели: таймер «молчания» отсчитывается с этого
+    # момента. Молчание прошлого раунда (работа инструментов, подготовка
+    # следующего запроса, ожидание первого токена) — не вина модели.
+    _RESET_SILENCE_STATUSES = ("Connecting...", "Generating...", "Resuming generation...")
+
     def update_stats(self, **data) -> None:
         # Принимаем весь набор полей из stats_data плюс любые дополнения
         # (server, retries и т.п.) без жёсткой сигнатуры.
+        if data.get("status") in self._RESET_SILENCE_STATUSES:
+            now = time.time()
+            self._last_chunk_time = now
+            self._visible_at = now
+            self._visible_total = -1
         self.stats_data.update(data)
         self._stats_dirty = True
         self.update_stats_display()
