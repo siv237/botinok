@@ -1297,3 +1297,12 @@ Pre-existing провал test_api_resilience::err_unknown — проверен 
 (для bundled — абсолютный путь установки). `skills/llm-wiki/SKILL.md` шаг 1:
 читать `<папка скилла>/llm-wiki.md` напрямую, искать по диску запрещено.
 Тест run_prints_folder/get_prints_folder.
+
+## [2026-10-11] feat | WIKI_MODE: напоминание о режиме вики на всю сессию
+При активации скилла llm-wiki (skills get/run) в `messages` кладётся одна
+короткая system-реплика `WIKI_MODE: …` (`WIKI_MODE_NOTE`) — system-строки не
+триммятся и переживают сброс, режим «светится» в контексте до конца сессии;
+повторов нет благодаря `_append_system_once` (дедуп). Дублируется в
+context.json, в ленте — событие «📚 Режим вики включён». Хук в текстовом
+цикле после успешного вызова skills; детектив `_wiki_mode_activation`.
+Тесты: activation_*/note_deduped.

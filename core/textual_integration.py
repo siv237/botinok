@@ -99,6 +99,34 @@ def get_compression_stats() -> dict:
     return dict(_compression_stats)
 
 
+# Разовая метка на весь сеанс: скилл llm-wiki активирован. System-реплики
+# не триммятся и переживают сброс — модель «видит» режим до конца сессии;
+# дедуп (_append_system_once) исключает повторы.
+WIKI_MODE_NOTE = (
+    "WIKI_MODE: в этой сессии задействован скилл llm-wiki (паттерн LLM Wiki). "
+    "Работай по схеме вики проекта: сначала wiki/index.md → страницы → ответ; "
+    "новый источник — ingest (затронутые страницы + index.md + запись в log.md); "
+    "вопрос — query со ссылками на страницы; ценный ответ оформляй новой страницей; "
+    "raw-источники неизменяемы."
+)
+
+
+def _wiki_mode_activation(tool_args, res_str: str) -> bool:
+    """Активация скилла llm-wiki: skills get/run по нему (не повторный list)."""
+    try:
+        args = tool_args if isinstance(tool_args, dict) else json.loads(str(tool_args or "{}"))
+    except Exception:
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
+    name = str(args.get("name", "")).lower().replace("_", "-")
+    res = str(res_str or "")
+    if "llm-wiki" not in name and not ("llm-wiki" in res and "папка скилла" in res):
+        return False
+    action = str(args.get("action", "")).lower()
+    return action in ("get", "run") or "папка скилла" in res
+
+
 def _compress_reason_ru(reason: str) -> str:
     """Краткая человеческая причина сжатия для уведомления в ленте."""
     r = str(reason or "")
@@ -2112,6 +2140,11 @@ def ask_ollama_textual(
                 tool_tokens += res_tokens
 
                 sm.log_tool_call(session_path, tool_name, tool_args, tool_result, status="completed", call_id=tc_id)
+
+                if tool_name == "skills" and _wiki_mode_activation(tool_args, res_str):
+                    if _append_system_once(messages, WIKI_MODE_NOTE):
+                        sm.update_context(session_path, "system", WIKI_MODE_NOTE)
+                        _write_log("[dim]📚 Режим вики включён: скилл llm-wiki активен до конца сессии.[/dim]")
 
                 media_extra = None
                 if tool_name == "vision" and isinstance(tool_result, dict) and tool_result.get("image_data"):
