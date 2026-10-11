@@ -33,7 +33,8 @@ from core.tool_manager import (
     DANGEROUS_SHELL_ACTIONS,
 )
 from core.path_utils import resolve_session_path
-from core.openai_compat import is_openai_backend, chat_stream_request, chat_once
+from core.openai_compat import (is_openai_backend, chat_stream_request, chat_once,
+                                apply_native_think, load_cache_entry)
 from core.api_key_gate import is_auth_error, key_entry_url, save_api_key
 from core.textual_app import BotinokTextualApp
 from core import themes as botinok_themes
@@ -1171,6 +1172,7 @@ def _ollama_summarize_and_reset_context(
                 "num_predict": 450,
             },
         }
+        apply_native_think(sm, payload)
         data = {}
         if is_openai_backend(sm):
             data = chat_once(
@@ -1369,6 +1371,11 @@ def ask_ollama_textual(
                             initial_prompt=initial_prompt,
                             theme=botinok_themes.load_theme_name(sm.config),
                             config_path=getattr(sm, "config_path", None))
+    # Живой SessionManager нужен TUI для чтения/записи ReasoningEffort
+    # (клик по чипу рассуждения в шапке). Всё остальное (списки моделей,
+    # рассуждение) — лениво по клику в шапке и на дисковом кэше:
+    # при старте ни одного лишнего запроса к серверу.
+    app.sm = sm
     app.set_model_info(model, dangerous=dangerous_mode,
                        server=_server_label(sm), ctx=num_ctx)
     # Первый запуск с openai-бэкендом без ключа — окошко ключа сразу при старте.
@@ -1771,6 +1778,7 @@ def ask_ollama_textual(
                 payload["tools"] = tools_list
             elif payload.get("tools") is not None:
                 payload.pop("tools", None)
+            apply_native_think(sm, payload)
 
             _update_stats(status="Generating...")
 
@@ -2765,6 +2773,7 @@ def ask_ollama_textual(
 
     def _get_ollama_models():
         # OpenAI-совместимый бэкенд: список берём из /v1/models с Bearer-ключом.
+        # Не-LLM (эмбеддинги и пр.) отсекаем по классификации из кэша шапки.
         if is_openai_backend(sm):
             try:
                 from core.openai_compat import _api_url, _api_headers
@@ -2773,9 +2782,20 @@ def ask_ollama_textual(
                                  verify=_verify_ssl)
                 if r.status_code == 200:
                     data = r.json()
-                    return [m.get("id") or m.get("name")
-                            for m in data.get("data", [])
-                            if m.get("id") or m.get("name")]
+                    names = [m.get("id") or m.get("name")
+                             for m in data.get("data", [])
+                             if m.get("id") or m.get("name")]
+                    try:
+                        _b = 'openai'
+                        _u = sm.config.get('Ollama', 'BaseUrl', fallback='')
+                        ent = load_cache_entry(
+                            sm, f"models|{_b}|{_u.rstrip('/')}", ttl=24 * 3600)
+                        nonchat = {m.get('id') for m in (ent or {}).get('models') or []
+                                   if m.get('chat') is False}
+                        names = [n for n in names if n not in nonchat] or names
+                    except Exception:
+                        pass
+                    return names
             except Exception:
                 pass
             return []
@@ -2784,7 +2804,9 @@ def ask_ollama_textual(
             r = requests.get(url, timeout=5, verify=_verify_ssl)
             if r.status_code == 200:
                 data = r.json()
-                return [m["name"] for m in data.get("models", [])]
+                return [m["name"] for m in data.get("models", [])
+                        if not (m.get("capabilities") and
+                                "completion" not in m.get("capabilities"))]
         except Exception:
             pass
         return []

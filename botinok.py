@@ -51,7 +51,7 @@ from core.cli_io import out, term_width
 from core.textual_prompts import textual_confirm
 from core.session_manager import SessionManager
 from core.tool_manager import ToolManager, requires_dangerous
-from core.openai_compat import is_openai_backend, chat_stream_request
+from core.openai_compat import is_openai_backend, chat_stream_request, apply_native_think
 from core.api_key_gate import (is_auth_error, key_entry_url, save_api_key,
                                prompt_key_console)
 from core.textual_history_viewer import view_history
@@ -905,6 +905,7 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
     # Some Ollama models don't support tools; for them we run chat-only mode.
     if model not in MODELS_NO_TOOLS:
         payload["tools"] = tools_list
+    apply_native_think(sm, payload)
 
     sm.write_file_header(session_path, "thinking.md", model, num_ctx, prompt)
     sm.write_file_header(session_path, "response.md", model, num_ctx, prompt)
@@ -1335,6 +1336,11 @@ def main():
     parser.add_argument("--api-key",
                         default=(os.environ.get("BOTINOK_API_KEY") or "").strip() or None,
                         help="Ключ для openai-бэкенда, без ввода в мастере (env BOTINOK_API_KEY)")
+    parser.add_argument("--reasoning", metavar="EFFORT",
+                        default=(os.environ.get("BOTINOK_REASONING") or "").strip().lower() or None,
+                        help="Режим рассуждения: auto (не отправлять) или значение, "
+                             "поддерживаемое API (none/low/medium/… — список диктует сервер); "
+                             "только в этой сессии, в конфиг не пишется (env BOTINOK_REASONING)")
 
     args = parser.parse_args()
 
@@ -1353,7 +1359,9 @@ def main():
         os.environ["BOTINOK_BASE_URL"] = args.base_url
     if args.api_key:
         os.environ["BOTINOK_API_KEY"] = args.api_key
-    if args.backend or args.base_url or args.api_key:
+    if args.reasoning:
+        os.environ["BOTINOK_REASONING"] = args.reasoning
+    if args.backend or args.base_url or args.api_key or args.reasoning:
         from core.session_manager import apply_env_overrides
         apply_env_overrides(sm.config)
 

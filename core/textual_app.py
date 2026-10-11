@@ -25,6 +25,10 @@ _PAGER_THEME = RichTheme({"markdown.code": "bold", "markdown.code_block": "none"
 _PAGER_CODE_THEME = "ansi_light"
 from core.image_block import ImageBlock, refresh_visible_images
 from core import themes as botinok_themes
+from core.openai_compat import (get_reasoning_effort, probe_reasoning_cached,
+                                is_openai_backend, load_reasoning_cache,
+                                reasoning_cache_key, load_cache_entry,
+                                save_cache_entry, classify_chat_models)
 from typing import Optional, Callable, List
 import io
 import json
@@ -146,6 +150,249 @@ SPOILER_PREVIEW = 80
 # иначе любой прокрут вверх колесом будет неправильно считаться «я всё ещё внизу»
 # и автопрокрутка вернёт к выводу, мешая чтению.
 SCROLL_BOTTOM_EPS = 1
+
+
+class ReasoningScreen(ModalScreen):
+    """Модалка переключения режима рассуждения.
+
+    auto — фиксированный дефолт ботинка (параметр не отправляется); остальной
+    список диктует сам API (probe_reasoning читает его перечисление из ответа
+    400), поэтому новые уровни поддерживаются без изменений кода."""
+
+    def __init__(self, current: str, levels: List[str], default_level=None,
+                 on_resolve: Optional[Callable] = None, probing: bool = False,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.current = current or "auto"
+        self.levels = list(levels or [])
+        self.default_level = default_level
+        self.on_resolve = on_resolve
+        self.probing = probing
+        self._options: Optional[OptionList] = None
+
+    def _build_options(self):
+        opts = [Option("auto — не отправлять параметр (дефолт ботинка)"
+                       + ("  ◀ текущий" if self.current == "auto" else ""),
+                       id="auto")]
+        for lvl in self.levels:
+            marks = []
+            if self.default_level == lvl:
+                marks.append("дефолт API")
+            if self.current == lvl:
+                marks.append("текущий")
+            suffix = ("  — " + ", ".join(marks)) if marks else ""
+            opts.append(Option(f"{lvl}{suffix}", id=lvl))
+        return opts
+
+    def compose(self) -> ComposeResult:
+        head = "[bold cyan]🧠 Рассуждение (reasoning)[/bold cyan]\n"
+        if self.probing:
+            head += "[dim]Определяю поддержку у API…[/dim]\n"
+        head += "[dim]↑↓ — выбор · Enter — применить · esc — отменить[/dim]"
+        yield Static(head, id="reasoning_head")
+        self._options = OptionList(*self._build_options(), id="reasoning_options")
+        yield self._options
+
+    def on_mount(self) -> None:
+        if self._options:
+            self._options.focus()
+
+    def refresh_levels(self, levels, default_level=None) -> None:
+        """Дополнить список, когда зондирование API завершилось."""
+        self.levels = list(levels or [])
+        self.default_level = default_level
+        self.probing = False
+        if self._options is not None:
+            try:
+                self._options.clear_options()
+                for opt in self._build_options():
+                    self._options.add_option(opt)
+            except Exception:
+                pass
+
+    def _resolve(self, value: str) -> None:
+        try:
+            if self.on_resolve:
+                self.on_resolve(value)
+        finally:
+            self.app.pop_screen()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self._resolve(str(getattr(event.option, "id", "") or ""))
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.app.pop_screen()
+            event.stop()
+
+
+class ModelScreen(ModalScreen):
+    """Выбор модели этого сервера: клик по имени модели в шапке.
+    Список тянется с сервера (кэш сутки), текущая помечена."""
+
+    def __init__(self, current: str, models: List[dict],
+                 on_resolve: Optional[Callable] = None, loading: bool = False,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.current = current or ""
+        self.models = list(models or [])
+        self.on_resolve = on_resolve
+        self.loading = loading
+        self._options: Optional[OptionList] = None
+
+    def _build_options(self):
+        opts = []
+        for m in self.models:
+            mid = str(m.get('id') or "")
+            if not mid or m.get('chat', True) is False:
+                continue  # не-LLM (эмбеддинги и т.п.) ботинку не подходят
+            ctx = m.get('context')
+            label = mid + (f"  ({int(ctx)} ctx)" if ctx else "")
+            if mid == self.current:
+                label += "  ◀ текущая"
+            opts.append(Option(label, id=mid))
+        return opts
+
+    def compose(self) -> ComposeResult:
+        head = "[bold cyan]📦 Модель этого сервера[/bold cyan]\n"
+        if self.loading:
+            head += "[dim]Загружаю список с сервера…[/dim]\n"
+        head += "[dim]↑↓ — выбор · Enter — применить · esc — отменить[/dim]"
+        yield Static(head, id="model_head")
+        self._options = OptionList(*self._build_options(), id="model_options")
+        yield self._options
+
+    def on_mount(self) -> None:
+        if self._options and self.models:
+            self._options.focus()
+
+    def refresh_models(self, models: List[dict]) -> None:
+        self.models = list(models or [])
+        self.loading = False
+        if self._options is not None:
+            try:
+                self._options.clear_options()
+                for opt in self._build_options():
+                    self._options.add_option(opt)
+                self._options.focus()
+            except Exception:
+                pass
+
+    def _resolve(self, value: str) -> None:
+        try:
+            if self.on_resolve:
+                self.on_resolve(value)
+        finally:
+            self.app.pop_screen()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self._resolve(str(getattr(event.option, "id", "") or ""))
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.app.pop_screen()
+            event.stop()
+
+
+class CtxScreen(ModalScreen):
+    """Размер контекста: клик по «Контекст» в шапке. Лесенка от максимума
+    модели (вдвое вниз, не ниже 8192) плюс свой вариант вручную."""
+
+    def __init__(self, current: int, max_ctx=None,
+                 on_resolve: Optional[Callable] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.current = int(current or 8192)
+        self.max_ctx = int(max_ctx) if max_ctx else None
+        self.on_resolve = on_resolve
+        self._options: Optional[OptionList] = None
+        self._custom_mode = False
+
+    def _sizes(self):
+        ladder = []
+        v = self.max_ctx or self.current
+        while v >= 8192 and len(ladder) < 8:
+            if v not in ladder:
+                ladder.append(v)
+            v //= 2
+        if self.current >= 8192 and self.current not in ladder:
+            ladder.append(self.current)
+        if not ladder:
+            ladder = [s for s in (8192, 16384, 32768, 65536, 131072, 262144)
+                      if not self.max_ctx or s <= self.max_ctx] or [8192]
+        ladder.sort(reverse=True)
+        return ladder
+
+    def _build_options(self):
+        opts = []
+        for i, size in enumerate(self._sizes()):
+            desc = []
+            if self.max_ctx and size == self.max_ctx:
+                desc.append("максимум модели")
+            if size == self.current:
+                desc.append("текущий")
+            label = f"{size:>7}" + ("  — " + ", ".join(desc) if desc else "")
+            opts.append(Option(label, id=str(size)))
+        opts.append(Option("Свой вариант…", id="custom"))
+        return opts
+
+    def compose(self) -> ComposeResult:
+        head = "[bold cyan]📐 Размер контекста[/bold cyan]\n"
+        head += ("[dim]↑↓ — выбор · Enter — применить · esc — отменить[/dim]")
+        yield Static(head, id="ctx_head")
+        self._options = OptionList(*self._build_options(), id="ctx_options")
+        yield self._options
+
+    def on_mount(self) -> None:
+        if self._options:
+            self._options.focus()
+
+    def apply_max_ctx(self, max_ctx) -> None:
+        """Дополнить лесенку, когда максимум модели стал известен (фон-замер)."""
+        if max_ctx:
+            self.max_ctx = int(max_ctx)
+            if self._options is not None:
+                try:
+                    keep = self._options.highlighted
+                    self._options.clear_options()
+                    for opt in self._build_options():
+                        self._options.add_option(opt)
+                    if keep is not None:
+                        self._options.highlighted = min(keep, self._options.option_count - 1)
+                except Exception:
+                    pass
+
+    def _resolve(self, value: str) -> None:
+        try:
+            if self.on_resolve:
+                self.on_resolve(value)
+        finally:
+            self.app.pop_screen()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        opt_id = str(getattr(event.option, "id", "") or "")
+        if opt_id == "custom":
+            self._custom_mode = True
+            self.mount(Input(placeholder="размер контекста в токенах, напр. 24576",
+                             id="ctx_input"))
+            self.query_one("#ctx_input", Input).focus()
+        else:
+            self._resolve(opt_id)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        raw = event.value.strip().replace(" ", "").replace("_", "")
+        try:
+            n = int(raw)
+            if n < 1024:
+                raise ValueError
+        except ValueError:
+            self.query_one("#ctx_input", Input).value = ""
+            return
+        self._resolve(str(n))
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.app.pop_screen()
+            event.stop()
 
 
 class ConfirmationScreen(ModalScreen):
@@ -754,6 +1001,10 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     #auto_flag { width: auto; height: 1; padding: 0 1; margin: 0; display: none;
                  background: $flag-bg; color: $flag-fg; text-style: bold; }
     #auto_flag.on { display: block; }
+    #reasoning_head { width: 100%; padding: 1; }
+    #reasoning_options { height: auto; max-height: 16; }
+    #model_head, #ctx_head { width: 100%; padding: 1; }
+    #model_options, #ctx_options { height: auto; max-height: 16; }
     /* Иконка переключателя тем в левом верхнем углу шапки: клик — цикл. */
     .theme_btn { width: auto; height: 1; padding: 0 1; margin: 0; border: none;
                  background: transparent; color: $hdr-fg; }
@@ -891,6 +1142,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self.header_display: Optional[Static] = None
         self.header_row: Optional[Horizontal] = None
         self.auto_flag: Optional[Static] = None
+        # SessionManager для чтения/записи ReasoningEffort (ставит интеграция).
+        self.sm = None
         self.diag: Optional[Collapsible] = None
         self.diag_list: Optional[Vertical] = None
         self.diag_scroll: Optional[VerticalScroll] = None
@@ -1354,6 +1607,10 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     def compose(self) -> ComposeResult:
         self.header_row = Horizontal(id="header_row")
         self.header_display = Static("", id="header")
+        try:
+            self.header_display.tooltip = "Рассуждение: клик — быстрая смена режима (тип — у модели)"
+        except Exception:
+            pass
         self.auto_flag = Static("АВТОСОГЛАСИЕ: ВКЛ ✕", id="auto_flag")
         # Одна иконка в левом верхнем углу: показывает СЛЕДУЮЩУЮ тему цикла,
         # клик — применить её.
@@ -2029,12 +2286,17 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         vram = normalize_cells(self.stats_data.get("vram", "..."))
         ctx = self.stats_data.get("session_ctx_max", 8192)
         model = normalize_cells(self.model_name)
+        # Тип рассуждения — сразу рядом с моделью; клик по чипу справа меняет.
+        try:
+            eff = (get_reasoning_effort(self.sm) if self.sm is not None else None) or "auto"
+        except Exception:
+            eff = "auto"
         # Видеопамять сообщает только Ollama; на OpenAI-совместимом сервере
         # строка «No models loaded» ложная — не показываем её в шапке.
         server_raw = str(self.stats_data.get("server", "") or "").strip().lower()
         is_ollama = server_raw in ("", "ollama") or server_raw.startswith("ollama")
         vram_part = f" | {vram}" if is_ollama and vram and vram != "..." else ""
-        return f"{agent_type}{danger_tag} | Модель: {model} | Контекст: {ctx}{vram_part}"
+        return f"{agent_type}{danger_tag} | Модель: {model} | 🧠 {eff} | Контекст: {ctx}{vram_part}"
 
     def _update_header(self) -> None:
         if not self.header_display:
@@ -3357,8 +3619,250 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                 self.append_log("[yellow]Автосогласие отключено.[/yellow]")
                 self._update_header()
                 event.stop()
+            elif getattr(event, "widget", None) is self.header_display:
+                # Шапка — панель быстрого переключения: клик по имени модели
+                # меняет модель, по «Контекст» — контекст, по остальному —
+                # рассуждение (тип печатается у модели). Координату берём из
+                # screen_x: при всплытии события x перебазируется родителем.
+                seg_model = self._header_segment("Модель:", " | 🧠")
+                seg_ctx = self._header_segment("Контекст:", None)
+                x = None
+                try:
+                    sx = getattr(event, "screen_x", None)
+                    if sx is None:
+                        sx = getattr(event, "x", None)
+                    if sx is not None:
+                        x = sx - self.header_display.region.x
+                except Exception:
+                    x = None
+                if x is not None and seg_model and seg_model[0] <= x < seg_model[1]:
+                    self.show_model_modal()
+                elif x is not None and seg_ctx and seg_ctx[0] <= x < seg_ctx[1]:
+                    self.show_ctx_modal()
+                else:
+                    self.show_reasoning_modal()
+                event.stop()
         except Exception:
             pass
+
+    def show_reasoning_modal(self) -> None:
+        """Клик по чипу рассуждения в шапке: быстрая смена режима прямо в
+        сессии. Список уровней берётся мгновенно из дискового кэша
+        предыдущих проверок (визард или прошлый клик); зонд — только при
+        первом обращении, в фоне, не блокируя меню."""
+        sm = getattr(self, "sm", None)
+        if sm is None:
+            return
+        try:
+            current = (sm.config.get('Ollama', 'ReasoningEffort', fallback='auto')
+                       or 'auto').strip().lower() or 'auto'
+        except Exception:
+            current = 'auto'
+        backend = 'openai' if is_openai_backend(sm) else 'ollama'
+        url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+        info = load_reasoning_cache(sm, reasoning_cache_key(backend, url, self.model_name))
+        screen = ReasoningScreen(
+            current,
+            (info or {}).get('levels', []),
+            (info or {}).get('default'),
+            on_resolve=self._apply_reasoning,
+            probing=info is None)
+        self.push_screen(screen)
+        if info is None:
+            def _worker():
+                try:
+                    res = probe_reasoning_cached(
+                        sm, backend, url,
+                        sm.config.get('Ollama', 'ApiKey', fallback=''),
+                        self.model_name,
+                        verify=sm.config.getboolean('Ollama', 'VerifySSL', fallback=True))
+                except Exception:
+                    res = None
+                if res is not None:
+                    try:
+                        self.call_from_thread(screen.refresh_levels,
+                                              res['levels'], res['default'])
+                    except Exception:
+                        pass
+            threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_reasoning(self, value: str) -> None:
+        """Применить выбор из модалки: запись конфига живому SessionManager.
+        Следующий запрос подхватит значение (читается на каждую сборку payload)."""
+        sm = getattr(self, "sm", None)
+        if sm is None:
+            return
+        try:
+            value = (value or 'auto').strip().lower()
+            if not value or value == 'auto':
+                if sm.config.has_option('Ollama', 'ReasoningEffort'):
+                    sm.config.remove_option('Ollama', 'ReasoningEffort')
+            else:
+                sm.config.set('Ollama', 'ReasoningEffort', value)
+            sm.save_config()
+            self.append_log(f"[dim]Рассуждение: {value}[/dim]")
+        except Exception:
+            pass
+        self._update_header()
+
+    def _header_segment(self, start_marker, end_marker):
+        """Колонки фрагмента центрированной шапки между маркерами (для
+        разбоя кликов) или None, если вычислить не удалось."""
+        try:
+            from rich.cells import cell_len
+            text = self._render_header_text()
+            i0 = text.find(start_marker)
+            if i0 < 0:
+                return None
+            i1 = text.find(end_marker, i0) if end_marker else -1
+            if i1 < 0:
+                i1 = len(text)
+            width = self.header_display.size.width
+            left = max(0, (width - cell_len(text)) // 2)
+            return (left + cell_len(text[:i0]), left + cell_len(text[:i1]))
+        except Exception:
+            return None
+
+    def show_model_modal(self) -> None:
+        """Клик по имени модели в шапке: выбор модели этого сервера.
+        Список из суточного кэша мгновенно; при пустом кэше — фон-зонд."""
+        sm = getattr(self, "sm", None)
+        if sm is None:
+            return
+        backend = 'openai' if is_openai_backend(sm) else 'ollama'
+        url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+        key = f"models|{backend}|{url.rstrip('/')}"
+        ent = load_cache_entry(sm, key, ttl=24 * 3600)
+        models = (ent or {}).get('models') or []
+        # Классифицированный кэш ('cls') — мгновенный путь. Без метки
+        # (список старых версий) показываем сразу, но доопрашиваем в фоне.
+        classified = bool((ent or {}).get('cls'))
+        screen = ModelScreen(self.model_name, models,
+                             on_resolve=self._apply_model_choice,
+                             loading=not models)
+        self.push_screen(screen)
+        if not models or not classified:
+            def _worker():
+                lst = self._fetch_server_models()
+                if lst is not None:
+                    save_cache_entry(sm, key, {'models': lst, 'cls': 1})
+                    try:
+                        self.call_from_thread(screen.refresh_models, lst)
+                    except Exception:
+                        pass
+            threading.Thread(target=_worker, daemon=True).start()
+
+    def _fetch_server_models(self):
+        """Список моделей сервера: /v1/models (openai) или /api/tags (ollama),
+        с классификацией chat-совместимости по фактическому типу."""
+        sm = getattr(self, "sm", None)
+        if sm is None:
+            return None
+        try:
+            import requests as _rq
+            verify = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
+            url = sm.config.get('Ollama', 'BaseUrl',
+                                fallback='http://localhost:11434')
+            out = []
+            if is_openai_backend(sm):
+                from core.openai_compat import _api_url, _api_headers
+                r = _rq.get(_api_url(sm, '/v1/models'), headers=_api_headers(sm),
+                            timeout=5, verify=verify)
+                if r.status_code != 200:
+                    return None
+                for m in (r.json().get('data') or []):
+                    mid = m.get('id') or m.get('name')
+                    if not mid:
+                        continue
+                    ctx = None
+                    for k in ('max_input_tokens', 'context_length', 'max_model_len'):
+                        v = m.get(k)
+                        if isinstance(v, (int, float)) and v > 0:
+                            ctx = int(v)
+                            break
+                    out.append({'id': mid, 'context': ctx})
+                return classify_chat_models('openai', url,
+                                            sm.config.get('Ollama', 'ApiKey', fallback=''),
+                                            out, verify=verify)
+            r = _rq.get(url.rstrip('/') + '/api/tags', timeout=5, verify=verify)
+            if r.status_code != 200:
+                return None
+            for m in (r.json().get('models') or []):
+                nm = m.get('name')
+                if not nm:
+                    continue
+                ctx = (m.get('details') or {}).get('context_length')
+                out.append({'id': nm,
+                            'context': int(ctx) if isinstance(ctx, (int, float)) else None,
+                            'capabilities': (m.get('capabilities') or [])})
+            return classify_chat_models('ollama', url, '', out, verify=verify)
+        except Exception:
+            return None
+
+    def _apply_model_choice(self, name: str) -> None:
+        """Смена модели тем же путём, что slash-команда /model: интеграция
+        обновит _current_model, запишет конфиг и обновит шапку."""
+        cb = getattr(self, 'on_slash_command', None)
+        if cb and name:
+            try:
+                cb(f"/model {name}")
+            except Exception:
+                pass
+
+    def show_ctx_modal(self) -> None:
+        """Клик по «Контекст» в шапке: лесенка размеров (от максимума
+        модели из кэша списка) + свой вариант вручную."""
+        try:
+            current = int(self.stats_data.get("session_ctx_max", 8192) or 8192)
+        except Exception:
+            current = 8192
+        max_ctx = None
+        sm = getattr(self, "sm", None)
+        url = ""
+        if sm is not None:
+            try:
+                backend = 'openai' if is_openai_backend(sm) else 'ollama'
+                url = sm.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+                ent = load_cache_entry(sm, f"models|{backend}|{url.rstrip('/')}", ttl=24 * 3600)
+                for m in (ent or {}).get('models') or []:
+                    if m.get('id') == self.model_name and m.get('context'):
+                        max_ctx = int(m['context'])
+                        break
+            except Exception:
+                max_ctx = None
+        screen = CtxScreen(current, max_ctx, on_resolve=self._apply_ctx_choice)
+        self.push_screen(screen)
+        if max_ctx is None and sm is not None:
+            # Максимум модели неизвестен — дознаёмся в фоне и достроим лесенку.
+            def _worker():
+                lst = self._fetch_server_models()
+                if lst is None:
+                    return
+                try:
+                    save_cache_entry(sm, f"models|{backend}|{url.rstrip('/')}",
+                                     {'models': lst, 'cls': 1})
+                except Exception:
+                    pass
+                mx = None
+                for m in lst:
+                    if m.get('id') == self.model_name and m.get('context'):
+                        mx = int(m['context'])
+                        break
+                if mx:
+                    try:
+                        self.call_from_thread(screen.apply_max_ctx, mx)
+                    except Exception:
+                        pass
+            threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_ctx_choice(self, value: str) -> None:
+        """Смена контекста тем же путём, что slash-команда /ctx."""
+        cb = getattr(self, 'on_slash_command', None)
+        if cb and value:
+            try:
+                cb(f"/ctx {value}")
+            except Exception:
+                pass
 
     def apply_theme(self, name: str) -> None:
         """Сменить тему (запоминается глобально, ~/.config/botinok/config.cfg)."""

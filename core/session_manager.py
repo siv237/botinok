@@ -23,7 +23,8 @@ def apply_env_overrides(config) -> None:
     env_backend = os.getenv("BOTINOK_BACKEND", "").strip().lower()
     env_base = os.getenv("BOTINOK_BASE_URL", "").strip()
     env_key = os.getenv("BOTINOK_API_KEY", "").strip()
-    if not (env_backend or env_base or env_key):
+    env_reasoning = os.getenv("BOTINOK_REASONING", "").strip().lower()
+    if not (env_backend or env_base or env_key or env_reasoning):
         return
     if not config.has_section('Ollama'):
         config.add_section('Ollama')
@@ -33,6 +34,15 @@ def apply_env_overrides(config) -> None:
         config.set('Ollama', 'BaseUrl', env_base.rstrip('/'))
     if env_key:
         config.set('Ollama', 'ApiKey', env_key)
+    if env_reasoning:
+        # auto — явно «не отправлять параметр», перебивает даже прописанный
+        # в конфиге ReasoningEffort; прочие значения — как есть (API сам
+        # скажет, поддерживает ли он их).
+        if env_reasoning == 'auto':
+            if config.has_option('Ollama', 'ReasoningEffort'):
+                config.remove_option('Ollama', 'ReasoningEffort')
+        else:
+            config.set('Ollama', 'ReasoningEffort', env_reasoning)
 
 
 class SessionManager:
