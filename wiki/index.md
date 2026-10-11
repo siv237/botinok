@@ -63,6 +63,7 @@
 - [concepts/streaming_tui.md](concepts/streaming_tui.md) — стриминг, панель «Производительность» (живые метрики, профили сервера, зависания, трафик), плавность UI
 - [concepts/token_calibration.md](concepts/token_calibration.md) — калибратор «байты→токены»: срезы usage, каскадные метки на деплой, медиана/MAD, дрейф; панель считает токены
 - [concepts/reasoning_modes.md](concepts/reasoning_modes.md) — режимы рассуждения: автоопределение уровней самим API, кэш, выбор в мастере, чип 🧠 в шапке
+- [concepts/keybox_plan.md](concepts/keybox_plan.md) — Ключница (план): запрос учётки у человека, cookie jar, AES-GCM+scrypt хранение, askpass для ssh/sudo; draft
 - [concepts/thought_queue.md](concepts/thought_queue.md) — очередь «мыслей»: сказать модели, не прерывая; доставка блоком на границе раунда, крестик отмены
 - [concepts/terminal_unicode_width.md](concepts/terminal_unicode_width.md) — ширина Unicode в терминале: почему «плывут» панели и как лечим
 - [concepts/embedded_terminal.md](concepts/embedded_terminal.md) — встроенный терминал: PTY-сессии, свернуть/вернуть, общий доступ человека и агента

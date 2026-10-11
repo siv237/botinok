@@ -1447,3 +1447,8 @@ test_context_compact, test_escape_stream — зелёные.
 - raw/README.md: манифест актуализирован (новые core-модули, update.sh, skills/llm-wiki, инструменты; CHANGELOG 0.1–0.4; SCROLLBACK_FEATURE.md помечен удалённым — страница уже superseded).
 - Создан requirements-dev.txt (pytest, pytest-asyncio).
 - Проверки: bash -n (install.sh, update.sh, botinok), compileall (botinok.py, core, tools, tests) — ОК; все ссылки промптов из кода существуют; ссылки вики — 81 цель цела; тесты 86 passed.
+
+## [2026-10-11] plan | Ключница — план реализации
+- По итогам дизайн-разговора (web-формы/SSO на примере portal.corp, сценарий поддержки с чужой UNIX-учётки, prompt-injection) зафиксирован примитив «запросить учётку у человека»: значения вне контекста модели, решение о хранении — за человеком (чекбокс), лестница трения настраиваемая.
+- v1: диалог (TUI-виджет dangerous mode / getpass / отказ в pipe) + RAM-кэш по цели + cookie jar в web + привязка к хосту + маскирование в логах. v2: хранение `keys.enc` AES-GCM(scrypt(мастер-пароль)) на `cryptography` (узаконить в requirements.txt — в venv сейчас сирота); askpass-хелпер (unix-socket) для ssh/sudo; kinit через stdin; grant/мультиреципиенты (age/gpg) отложены.
+- Страница: concepts/keybox_plan.md (draft). Проверено на этой машине: age нет, gpg есть, cryptography 46.0.6 в venv (сирота, никем из requirements не требуется), ssh-ключ RSA без пароля.
