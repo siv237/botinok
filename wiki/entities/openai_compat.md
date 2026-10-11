@@ -24,7 +24,7 @@ baseurl = http://localhost:8080
 - `is_openai_backend(sm)` — признак по конфигу (`openai`, `openai-compatible`).
 - `to_openai_messages(messages)` — маппинг ролей, tool_calls, `thinking` (в историю API не передаётся).
 - `_to_openai_payload(ollama_payload)` — `num_predict` → `max_tokens`, `stream_options.include_usage`.
-- `OpenAIStreamResponse` — обёртка над SSE-стримом; имитирует `requests.Response.iter_lines()`, отдаёт NDJSON-чанки в формате Ollama, аккумулирует дельты tool_calls и usage. `reasoning_content`/`thinking` → поле `thinking`.
+- `OpenAIStreamResponse` — обёртка над SSE-стримом; имитирует `requests.Response.iter_lines()`, отдаёт NDJSON-чанки в формате Ollama, аккумулирует дельты tool_calls и usage. `reasoning_content`/`thinking` → поле `thinking`. Финальный чанк несёт и `reasoning_tokens` (из `completion_tokens_details`) — для калибратора токенов. → `concepts/token_calibration.md`
 - `chat_stream_request(sm, payload)` / `chat_once(sm, payload)` — стриминговый и нестриминговый запросы.
 
 ## Связи

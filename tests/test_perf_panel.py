@@ -118,33 +118,42 @@ async def main_async() -> int:
         txt = _panel(app)
         check("ru_server", "Ollama" in txt, txt)
         check("ru_status", "Модель" in txt and ("думает" in txt or "печатает" in txt), txt)
-        check("live_thinking", "Размышляет" in txt and "120 Б" in txt, txt)
-        check("live_response", "Написал ответ" in txt and "40 Б" in txt, txt)
-        check("live_speed", "Б/с" in txt, txt)
+        check("live_thinking", "Размышляет" in txt and "ток" in txt, txt)
+        check("live_response", "Написал ответ" in txt and "ток" in txt, txt)
+        check("live_speed", "ток/с" in txt, txt)
         check("no_english", "TTFT" not in txt and "TPS" not in txt and "SessionCtx" not in txt, txt)
         check("ollama_vram", "Видеопамять" in txt, txt)
         check("ollama_tool_draft", "Готовит команду" in txt, txt)
-        check("traffic_rows", "АПИ отдано" in txt and "АПИ принято" in txt, txt)
+        check("traffic_rows", "Модель получила" in txt and "Модель отдала" in txt, txt)
 
-        # Сырые байты: каждый байт двигает число (без округления, скрывающего рост).
+        # Панель в токенах: usage-токены показываются, байты транспорта — нет.
+        # Статус вне полёта (usage пришёл) — числа равны точному usage без живой надбавки.
+        app.stats_data["status"] = "Processing tool calls..."
         net_meter.reset_turn()
         net_meter.add_sent(3)
         net_meter.add_recv(7)
         net_meter.add_request()
+        net_meter.add_usage(11, 5)
         app.update_stats_display()
         await asyncio.sleep(0.2)
         txt = _panel(app)
-        check("bytes_sent_raw", "3 Б" in txt, txt)
-        check("bytes_recv_raw", "7 Б" in txt, txt)
+        check("usage_sent_tok", "11 ток" in txt, txt)
+        check("usage_recv_tok", "5 ток" in txt, txt)
+        check("no_transport_bytes", "3 Б" not in txt and "7 Б" not in txt, txt)
 
-        # Живая скорость текста: 160 Б за 1 с активной генерации.
-        check("speed_positive", "160.0 Б/с" in txt, txt)
+        # Живая скорость текста: 160 Б за 1 с активной генерации — в ток/с.
+        def _spd_line(t):
+            return next((ln for ln in t.splitlines() if "Скорость:" in ln), "")
+        check("speed_positive", "ток/с" in _spd_line(txt)
+              and "0 ток/с" not in _spd_line(txt), txt)
 
         # Пауза не занижает скорость: первый токен давно, но активное время 1 с.
         app._first_token_at = time.time() - 600.0
         app.update_stats_display()
         await asyncio.sleep(0.2)
-        check("text_speed_ignores_pause", "160.0 Б/с" in _panel(app), _panel(app))
+        txt2 = _panel(app)
+        check("text_speed_ignores_pause", "ток/с" in _spd_line(txt2)
+              and "0 ток/с" not in _spd_line(txt2), txt2)
 
         # Зависание: молчание > 30 с — красный статус и подсказка.
         # Молчание = видимые счётчики НЕ растут, чанки не приходят, сеть молчит.
@@ -174,7 +183,7 @@ async def main_async() -> int:
         check("openai_server", "OpenAI-совместимый" in txt, txt)
         check("openai_hides_vram", "Видеопамять" not in txt, txt)
         check("openai_hides_draft", "Готовит команду" not in txt, txt)
-        check("openai_keeps_traffic", "АПИ отдано" in txt, txt)
+        check("openai_keeps_traffic", "Модель получила" in txt, txt)
 
     print("=" * 70)
     if FAILURES:

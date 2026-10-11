@@ -215,6 +215,89 @@ def test_session_memory_actions():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_skills_active_survives_reset():
+    d = tempfile.mkdtemp(prefix="skills_note_")
+    try:
+        msgs = make_messages()
+        # ошибки не пишутся
+        ti.record_skill_activation(d, "skills", {"action": "get", "name": "Foo_Bar"}, "Error: нет")
+        check("error_not_recorded", not os.path.exists(os.path.join(d, "enabled_skills.json")))
+        # успешный get/run — пишутся
+        ti.record_skill_activation(d, "skills", {"action": "get", "name": "Foo_Bar"}, "папка скилла: /x")
+        ti.record_skill_activation(d, "skills", {"action": "run", "name": "web-kit"}, "результат")
+        ti.record_skill_activation(d, "skills", {"action": "list"}, "каталог…")
+        with open(os.path.join(d, "enabled_skills.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        check("names_recorded_norm", "foo-bar" in data and "web-kit" in data, str(data))
+        check("list_ignored", "list" not in data)
+
+        ti.refresh_skills_active_note(msgs, d)
+        notes = [m for m in msgs if str(m.get("content", "")).startswith("SKILLS_ACTIVE:")]
+        check("note_added", len(notes) == 1 and "foo-bar" in notes[0]["content"])
+        # перезапись: не накапливаются
+        ti.refresh_skills_active_note(msgs, d)
+        notes = [m for m in msgs if str(m.get("content", "")).startswith("SKILLS_ACTIVE:")]
+        check("note_single", len(notes) == 1)
+
+        # overflow-reset: messages.clear() — после refresh заметка возвращается
+        msgs.clear()
+        msgs.append({"role": "system", "content": "Контекст был очищен…"})
+        ti.refresh_skills_active_note(msgs, d)
+        check("note_after_reset", any("SKILLS_ACTIVE" in str(m.get("content")) for m in msgs))
+
+        # resume-подобное восстановление: чистые messages + файл → заметка есть
+        msgs2 = [{"role": "user", "content": "продолжаем"}]
+        ti.refresh_skills_active_note(msgs2, d)
+        check("note_on_resume", any("SKILLS_ACTIVE" in str(m.get("content")) for m in msgs2))
+
+        # нет файла — заметки нет, старых не остаётся
+        msgs.append({"role": "system", "content": "SKILLS_ACTIVE: устаревшая"})
+        shutil.rmtree(d)
+        ti.refresh_skills_active_note(msgs, d)
+        check("no_file_no_note", not any(str(m.get("content", "")).startswith("SKILLS_ACTIVE:")
+                                         for m in msgs))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_skills_state_backfill():
+    d = tempfile.mkdtemp(prefix="skills_backfill_")
+    try:
+        # сессия со старым кодом: enabled_skills.json нет, но архивы помнят активации
+        with open(os.path.join(d, "tools.log"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"timestamp": "2026-10-11T15:02:43.9", "tool": "skills",
+                                "arguments": {"action": "get", "name": "llm-wiki"},
+                                "status": "completed",
+                                "full_result": "llm-wiki (project) — папка скилла: /x"}) + "\n")
+            f.write(json.dumps({"timestamp": "2026-10-11T15:02:44.0", "tool": "skills",
+                                "arguments": {"action": "get", "name": "broken"},
+                                "status": "completed",
+                                "full_result": "Error: битый скилл"}) + "\n")
+            f.write(json.dumps({"timestamp": "2026-10-11T15:02:45.0", "tool": "file_system",
+                                "arguments": {"action": "read", "path": "/x"},
+                                "status": "completed", "full_result": "…"}) + "\n")
+        with open(os.path.join(d, "context.json"), "w", encoding="utf-8") as f:
+            json.dump({"history": [{"role": "system",
+                                    "content": ti.WIKI_MODE_NOTE}]}, f, ensure_ascii=False)
+
+        msgs = [{"role": "user", "content": "продолжаем после resume"}]
+        ti.refresh_skills_active_note(msgs, d)
+        notes = [m for m in msgs if str(m.get("content", "")).startswith("SKILLS_ACTIVE:")]
+        check("backfill_note", len(notes) == 1 and "llm-wiki" in notes[0]["content"],
+              str(notes)[:150])
+        with open(os.path.join(d, "enabled_skills.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        check("backfill_names", "llm-wiki" in data and "broken" not in data, str(data))
+        check("backfill_wiki_persisted", d in ti._wiki_note_persisted)
+
+        # второй вызов — без повторного скана и без дублей
+        ti.refresh_skills_active_note(msgs, d)
+        notes = [m for m in msgs if str(m.get("content", "")).startswith("SKILLS_ACTIVE:")]
+        check("backfill_single_scan", len(notes) == 1)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main() -> int:
     test_parse_block_ids()
     test_context_blocks()
@@ -222,6 +305,8 @@ def main() -> int:
     test_small_block_skip()
     test_write_context_map()
     test_session_memory_actions()
+    test_skills_active_survives_reset()
+    test_skills_state_backfill()
     print("=" * 70)
     if FAILURES:
         print(f"❌ ПРОВАЛЕНО: {len(FAILURES)} — {FAILURES}")

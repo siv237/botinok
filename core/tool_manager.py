@@ -524,7 +524,10 @@ class ToolManager:
                 "type": "function",
                 "function": {
                     "name": "sign_step",
-                    "description": ("Короткая подпись текущего хода — вызови ОДИН раз перед финальным ответом. "
+                    "description": ("Короткая отметка сделанного. Зови ЧЕКПОИНТАМИ в процессе: после каждого "
+                                    "значимого шага — sign_step(done=…) и продолжай без паузы (страховка от "
+                                    "потери прогресса при сбросе контекста). Финальная подпись — один раз "
+                                    "перед ответом, со status. "
                                     "goal — что делал за ход (≤15 слов), done — что сделано (≤15 слов), "
                                     "status: progress|blocked|decision|answered, "
                                     "entities — только то, что реально встречалось в ходе (пути, URL, имена инструментов; ≤6). "
@@ -532,9 +535,9 @@ class ToolManager:
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "goal": {"type": "string", "description": "Цель хода, ≤15 слов"},
+                            "goal": {"type": "string", "description": "Цель хода, ≤15 слов (можно пустую для чекпоинта)"},
                             "done": {"type": "string", "description": "Что сделано, ≤15 слов"},
-                            "status": {"type": "string", "enum": ["progress", "blocked", "decision", "answered"], "description": "Итог хода"},
+                            "status": {"type": "string", "enum": ["progress", "blocked", "decision", "answered"], "description": "Итог хода (для чекпоинта — progress)"},
                             "entities": {"type": "array", "items": {"type": "string"}, "description": "Сущности, реально встречавшиеся в ходе (≤6)"}
                         },
                         "required": ["goal", "done", "status"]

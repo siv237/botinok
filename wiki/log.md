@@ -1346,3 +1346,88 @@ test_api_resilience::err_unknown и test_web_progress (воспроизведе�
 (compress_manual из _compression_stats.manual); разбивка способов — отдельной
 тёмной строкой «поджал N · очистил N · по запросу агента N» (только ненулевые),
 чтобы основная строка не переносилась и не ломала сетку панели.
+
+## [2026-10-11] fix | Подключённые скиллы переживают сброс контекста и resume
+Инструкции скиллов живут в tool-результатах — overflow-reset (messages.clear())
+и повторный заход их теряли, модель действовала без них или догадывалась.
+- record_skill_activation: успешные skills get/run пишут имя+время в
+  enabled_skills.json сессии (ошибки не пишутся, list игнорируется);
+- refresh_skills_active_note: перед каждым запросом перезаписывает ОДНУ
+  system-реплику SKILLS_ACTIVE (список скиллов + «перечитай skills
+  action=get name=…») — переживает reset и появляется при resume;
+- тесты note_after_reset/note_on_resume/note_single/error_not_recorded в
+  test_context_compact.py.
+
+## [2026-10-11] feat | sign_step: чекпоинты в процессе хода, важность отметки — по заполненности контекста
+Подпись была одна в конце хода — при долгом ответе и сбросе середина хода
+терялась. Теперь:
+- sign_step принимает несколько подписей за ход (чекпоинты done=… после значимых
+  шагов); signatures.json хранит все (seq по окну), one-shot гейт снят; отказ от
+  ошибок (2 левые entity) не блокирует последующие валидные подписи;
+- session_digest: Window.signs (sign=последняя), window_line печатает goal/done
+  последней + «(+N чекпоинтов)»;
+- напоминалка checkpoint_reminder в tool-результате: не по числу раундов, а по
+  заполненности контекста (ratio ≥ SIGN_CHECKPOINT_REMINDER_PCT=0.40 и нет
+  подписи в ходе) — раз за ход; tool_policy и схема sign_step переписаны под
+  чекпоинт-режим.
+Тесты: test_sign_step.py (чекпоинты, seq, +N, post-giveup), digest/compact — зелёные.
+
+## [2026-10-11] feat | калибратор «байты→токены» (фаза 1): тихий сбор контрольных срезов usage
+- Исследование панели: байтовые счётчики не переводятся в токены одним
+  коэффициентом (эмпирика на базе сессий: вывод ≈0.33 ток/символ, модели
+  различаются ~10%, эвристика len//4 недооценивает вдвое; SSE-конверт
+  раздувает транспорт в ~170 раз — токены по байтам транспорта не считают).
+- Методика (мировой инструмент, без констант о моделях): на каждом запросе
+  пишется пара (объём текста ↔ точные токены из usage финального чанка);
+  метки `(деплой, направление, тип вызова)` с каскадным фолбэком к родителю и
+  глобальному prior; медиана+MAD по скользящему окну; детектор дрейфа;
+  статусы calibrated/drift/prior.
+- Реализация фазы 1: core/token_calibrator.py (версионируемый JSON
+  ~/.botinok/token_calib.json, RLock, троттлинг записи); запись срезов в
+  textual_integration после каждого успешного стрима (roles payload ↔
+  prompt_eval_count; ответ/мышление/JSON-инструментов ↔ eval_count) и после
+  нестримингового резюмирования (kind=summary); openai_compat пробрасывает
+  reasoning_tokens (completion_tokens_details) в финальный чанк и chat_once.
+- Панель НЕ менялась (байты как были) — переключение на токены будет фазой 2
+  по ready()-готовности ключа. Тесты: tests/test_token_calibrator.py (13
+  проверок: каскад, медиана/выбросы, дрейф, персист, SSE reasoning).
+  Регресс test_escape_stream/test_api_key_gate/test_net_config зелёные.
+Страница: concepts/token_calibration.md.
+
+## [2026-10-11] feat | калибратор токенов, фаза 2: панель на токенах + серый прогноз контекста
+- Панель: «Размышляет/Написал ответ/Готовит команду/Скорость» считаются в
+  токенах на каждом тике (10/с) из живых буферов × плотность калибратора;
+  байты — бледная подпись в скобках (индикатор движения). Токены с первого
+  же среза: prior до накопления, медиана после.
+- Направление `answer` (completion−reasoning) — отдельная метка плотности
+  чистого ответа; дрейф переведён на сравнение двух непересекающихся окон
+  (старое/свежее) без засеянной базовой медианы (устранён ложный дрейф от
+  первых замеров).
+- Серый прогноз: живой стрим (чанк <2 с) дорисовывает к «Диалог занял» и
+  полосе #ctx_bar серый хвост «+~N ток» (класс ghost в CSS); с фактическим
+  usage прогноза нет — цвет low/mid/high возвращается.
+- Потребители токенов переведены на калибратор: _estimate_message_tokens
+  (бюджет тримма/HARD_CTX, карта контекста, «Память сжималась», forgotten
+  block, session_ctx панели) берёт плотность prompt при calibrated; EMA
+  len//4 — запасной путь. В pipe-пути botinok.py свой оценщик (len//4) —
+  кандидат на унификацию.
+Тесты: test_token_calibrator (+answer-канал, 15 проверок), test_perf_panel,
+test_context_compact, test_escape_stream — зелёные.
+
+## [2026-10-11] fix | живучесть скиллов: бэкфилл + дедуп WIKI_MODE + архив вне file_system
+- Диагноз по сессии 20261011_141653_visual_run: после resume агент «не видел» вики —
+  enabled_skills.json не создавался (llm-wiki подключён в 15:02 под старым кодом, после
+  рестарта skills не звался), SKILLS_ACTIVE не генерировался, а канонический снапшот
+  messages.json не содержит WIKI_MODE (его выел overflow-reset). В context.json — 4 дубля ноты.
+- `core/textual_integration.py`: `_backfill_session_state` (раз на сессию) восстанавливает
+  enabled_skills.json из tools.log (завершённые skills get/run, та же валидация, что у
+  record_skill_activation) и сеет `_wiki_note_persisted` по маркеру «WIKI_MODE:» в context.json;
+  запись WIKI_MODE_NOTE в архив — ровно один раз на сессию; общий разбор активации —
+  `_skill_activation_name`.
+- `prompts/tool_reminder.txt`: пункт «Чтение/Поиск» теперь явно выводит архив сессии
+  (context.json/messages.json/tools.log/artifacts) из-под file_system — по истории работает
+  session_memory (агент грел context.json грепом, игнорируя 💡-подсказку и политику).
+- Тесты приведены к новой панели (токены вместо байтов): test_perf_panel (usage-строки при
+  статусе вне полёта, скорость по строке «Скорость:»), test_silence_timer («12 345»),
+  test_web_progress (Stub: _tok_from_kb/_tool_status_ru), test_api_resilience («Неизвестная
+  ошибка сервера»); новый test_skills_state_backfill в test_context_compact.

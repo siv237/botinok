@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """sign_step — внутренняя подпись хода самой моделью (этап 6 плана
-wiki/concepts/context_memory_research.md).
+wiki/concepts/context_memory_research.md + чекпоинты 2026-10-11).
 
-Харнес подписаний: модель один раз за ход (перед финальным ответом) вызывает
-sign_step с жёстной схемой: goal/done ≤15 слов, status enum, entities — только
-закрытый список того, что харнес реально видел в ходе (пути/URL/аргументы
-инструментов). Валидация подстрокой по observed; левая сущность → одна ретрай-
-попытка с текстом ошибки, затем отказ и механическая строка дайджеста.
-Подпись кладётся в signatures.json и подхватывается core/session_digest
-(поле Window.sign → строка блока FORGOTTEN_INDEX). В чат и в messages не попадает.
+Харнес подписаний: модель отмечает сделанное sign_step'ом — ЧЕКПОИНТАМИ в
+процессе хода (после каждого значимого шага: `sign_step(done=…)`) и финальной
+подписью перед ответом (со status). Схема жёсткая: goal/done ≤15 слов, status
+enum, entities — только закрытый список того, что харнес реально видел в ходе
+(пути/URL/аргументы инструментов). Валидация подстрокой по observed; левая
+сущность → одна ретрай-попытка с текстом ошибки, затем отказ от ошибок
+(дальше подписи принимаем молча). Подписи кладутся в signatures.json (несколько
+на окно) и подхватываются core/session_digest (Window.signs/sign → goal/done в
+строке FORGOTTEN_INDEX). В чат и в messages не попадает.
 """
 
 import json
@@ -53,17 +55,22 @@ def observe(session_path: Optional[str], texts) -> None:
 def reset_turn(session_path: Optional[str]) -> None:
     key = _norm_session(session_path)
     _observed[key] = set()
-    _signatures.pop(key, None)
+    _signatures[key] = []
     _attempts[key] = 0
     _done[key] = False
 
 
 def has_signature(session_path: Optional[str]) -> bool:
-    return _signatures.get(_norm_session(session_path)) is not None
+    return bool(_signatures.get(_norm_session(session_path)))
+
+
+def get_signatures(session_path: Optional[str]) -> List[Dict]:
+    return list(_signatures.get(_norm_session(session_path), []))
 
 
 def pop_signature(session_path: Optional[str]) -> Optional[Dict]:
-    return _signatures.pop(_norm_session(session_path), None)
+    lst = _signatures.pop(_norm_session(session_path), [])
+    return lst[-1] if lst else None
 
 
 def _clamp_words(text: str, limit: int = 15) -> str:
@@ -123,8 +130,10 @@ def _persist(session_path: str, sign: Dict) -> None:
                     records = []
             except (json.JSONDecodeError, OSError):
                 records = []
-        records = [r for r in records if r.get("window_id") != window_id]
+        # чекпоинты: несколько подписей на окно допустимы, seq — порядковый номер
+        sign["seq"] = sum(1 for r in records if r.get("window_id") == window_id)
         records.append(sign)
+        records = records[-200:]
         with open(path, "w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=1)
     except OSError:
@@ -133,17 +142,21 @@ def _persist(session_path: str, sign: Dict) -> None:
 
 def sign_step_tool(goal: str = "", done: str = "", status: str = "progress",
                    entities=None, session_path: Optional[str] = None, **kwargs) -> str:
-    """Подпись хода. Результат всегда «ok» — инструмент не спорит с моделью."""
+    """Подпись/чекпоинт хода. Результат всегда «ok» — инструмент не спорит с моделью.
+
+    Можно (и нужно) звать несколько раз за ход: после каждого значимого шага —
+    короткая отметка done; финальная подпись — со status.
+    """
     key = _norm_session(session_path)
-    if _done.get(key) or has_signature(key):
-        return "ok"
     observed = _observed.get(key, set())
     ents = _norm_entities(entities)
     bad = [e for e in ents if not any(e.lower() in obs for obs in observed)]
     if bad:
+        if _done.get(key):
+            return "ok"  # после отказа не мучаем: молча принимаем, не валидируем
         _attempts[key] = _attempts.get(key, 0) + 1
         if _attempts[key] >= 2:
-            # отказ: механическая строка дайджеста, дальше не мучаем
+            # отказ от ошибок: дальше подписи принимаем молча
             _done[key] = True
             return "ok"
         return ("Ошибка: эти сущности не встречались в ходе: "
@@ -157,7 +170,6 @@ def sign_step_tool(goal: str = "", done: str = "", status: str = "progress",
         "status": _norm_status(status),
         "entities": ents,
     }
-    _signatures[key] = sign
-    _done[key] = True
+    _signatures.setdefault(key, []).append(sign)
     _persist(key, sign)
     return "ok"

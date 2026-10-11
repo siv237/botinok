@@ -7,7 +7,9 @@ from textual.binding import Binding
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (Input, Static, Collapsible, OptionList, Button,
-                             Markdown, ProgressBar, TextArea, Checkbox)
+                             Markdown, ProgressBar, TextArea, Checkbox, Label)
+from textual.widgets._progress_bar import Bar, ETAStatus
+from textual.reactive import reactive
 from textual.widgets.option_list import Option
 from textual.containers import Vertical, Horizontal, VerticalScroll
 # rich.text.Text используется только как renderable для ANSI-вывода (логотип,
@@ -706,6 +708,37 @@ class Composer(TextArea):
             app._composer_history(self, +1)
 
 
+class _LivePercentageStatus(Label):
+    """Процент занятости контекста с десятыми: тикает в реальном времени,
+    когда целое ещё не сдвинулось и полоса стоит."""
+
+    DEFAULT_CSS = """
+    _LivePercentageStatus {
+        width: 6;
+        content-align-horizontal: right;
+    }
+    """
+
+    percentage: reactive[Optional[float]] = reactive(None)
+
+    def render(self):
+        return "--%" if self.percentage is None else f"{self.percentage * 100:.1f}%"
+
+
+class LiveProgressBar(ProgressBar):
+    """Тонкая полоса как прежде, но со живым счётчиком процента."""
+
+    def compose(self):
+        if self.show_bar:
+            yield (Bar(id="bar", clock=self._clock, bar_renderable=self.BAR_RENDERABLE)
+                   .data_bind(ProgressBar.percentage)
+                   .data_bind(ProgressBar.gradient))
+        if self.show_percentage:
+            yield _LivePercentageStatus(id="percentage").data_bind(ProgressBar.percentage)
+        if self.show_eta:
+            yield ETAStatus(id="eta").data_bind(eta=ProgressBar._display_eta)
+
+
 class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     """Textual приложение для Botinok."""
 
@@ -804,7 +837,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     #stats { height: auto; border: round $warn; border-title-color: $warn;
              border-title-style: bold; padding: 0 1; }
     #stats_rows { height: auto; }
-    #ctx_bar { height: 1; }
+    #ctx_bar { height: 1; width: 100%; layout: horizontal; }
+    #ctx_bar #bar { width: 1fr; }
     #ctx_bar.low .bar--bar { color: $ok; }
     #ctx_bar.mid .bar--bar { color: $warn; }
     #ctx_bar.high .bar--bar { color: $err; }
@@ -852,7 +886,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self.chat: Optional[Vertical] = None
         self.stream_static: Optional[Static] = None
         self.stats_rows: Optional[Static] = None
-        self.ctx_bar: Optional[ProgressBar] = None
+        self.ctx_bar: Optional[LiveProgressBar] = None
         self.tools_list: Optional[Vertical] = None
         self.header_display: Optional[Static] = None
         self.header_row: Optional[Horizontal] = None
@@ -1276,7 +1310,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             try:
                 ctx = os.path.join(self.session_path, "context.json")
                 if os.path.isfile(ctx):
-                    meta.append(f"context.json: {max(1, os.path.getsize(ctx) // 1024)} КБ")
+                    meta.append(f"context.json: {self._tok_from_kb(max(1, os.path.getsize(ctx) // 1024))}")
             except Exception:
                 pass
         meta.append(f"Диалог: {lines} строк · {chars} символов")
@@ -1357,7 +1391,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                 with Vertical(id="stats"):
                     self.stats_rows = Static("", id="stats_rows")
                     yield self.stats_rows
-                    self.ctx_bar = ProgressBar(total=100, show_eta=False, id="ctx_bar")
+                    self.ctx_bar = LiveProgressBar(total=100, show_eta=False, id="ctx_bar")
                     yield self.ctx_bar
                 with Vertical(id="tools"):
                     self.tools_list = Vertical(id="tools_list")
@@ -1556,14 +1590,6 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         """Статус инструмента по-русски для показа в карточке."""
         s = (status or "").strip()
         return cls._TOOL_STATUS_RU.get(s, s)
-
-    @staticmethod
-    def _fmt_bytes_raw(n) -> str:
-        """Сырой объём в байтах с разрядами: каждый байт двигает число."""
-        try:
-            return f"{int(n):,}".replace(",", " ") + " Б"
-        except Exception:
-            return "0 Б"
 
     @staticmethod
     def _fmt_secs(secs) -> str:
@@ -2241,31 +2267,73 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             wait_label = "Модель молчит:"
             wait_value = f"[{sil_cs}]{model_silence:.1f} с — {sil_word}[/{sil_cs}]"
 
-        L = 18  # ширина колонки подписей (моноширинный шрифт)
+        L = 23  # ширина колонки подписей: влезает самая длинная («Модель получила всего:»)
         def row(label: str, value: str) -> str:
             return f"[cyan]{label:<{L}}[/cyan]{value}"
 
         status_ru = self._ru_status(s.get("status", ""), printing=printing)
         server_raw = str(s.get("server", "") or "")
+        # Токены с первого же среза: калибратор переводит счётчики по накопленной
+        # медиане, а до накопления — по стартовым плотностям.
+        try:
+            from core import token_calibrator as _tc
+            _dep = _tc.deploy_fingerprint(getattr(self, "model_name", ""), server_raw)
+        except Exception:
+            _tc = None
+            _dep = ""
+
+        def tok(chars: int, direction: str, fallback: str = "") -> int:
+            if _tc is None or chars <= 0:
+                return 0
+            try:
+                n_tok, status, _ = _tc.estimate(_dep, direction, "*", chars)
+                if fallback and status == "prior":
+                    alt, alt_status, _ = _tc.estimate(_dep, fallback, "*", chars)
+                    if alt_status != "prior":
+                        return alt
+                return n_tok
+            except Exception:
+                return 0
+
         if server_raw in ("", "ollama"):
             server_text = "Ollama"
         elif server_raw == "openai":
             server_text = "OpenAI-совместимый сервер"
         else:
             server_text = server_raw  # реальный адрес из конфига (см. _server_label)
+        t_think = tok(thinking_len, "reasoning", "completion")
+        t_answer = tok(response_len, "answer", "completion")
+        t_tool = tok(tool_len, "completion")
         lines = [
             row("Сервер:", normalize_cells(server_text)),
             row("Что сейчас:", f"[bold]{status_ru}[/bold]{activity}"),
             row("Всего прошло:", self._fmt_secs(s.get("elapsed", 0))),
             row("Этап:", self._fmt_secs(now - self._phase_started_at)),
             "",
-            row("Размышляет:", f"[bold yellow]{thinking_len} Б[/bold yellow]"),
-            row("Написал ответ:", f"[bold green]{response_len} Б[/bold green]"),
+            row("Размышляет:",
+                f"[bold yellow]{self._fmt_tok_num(t_think)} ток[/bold yellow]"
+                if thinking_len else "[bold yellow]0 ток[/bold yellow]"),
+            row("Написал ответ:",
+                f"[bold green]{self._fmt_tok_num(t_answer)} ток[/bold green]"
+                if response_len else "[bold green]0 ток[/bold green]"),
         ]
         if full:
-            lines.append(row("Готовит команду:", f"[bold magenta]{tool_len} Б[/bold magenta]"))
+            lines.append(row("Готовит команду:",
+                             f"[bold magenta]{self._fmt_tok_num(t_tool)} ток[/bold magenta]"
+                             if tool_len else "[bold magenta]0 ток[/bold magenta]"))
+        # Плотности калибратора: перевод байтов и символов в токены (живой
+        # пересчёт сырого обмена и скорости).
+        dens_p, dens_c = 0.30, 0.30
+        if _tc is not None:
+            try:
+                dens_p, _ = _tc.density(_dep, "prompt", "*")
+                dens_c, _ = _tc.density(_dep, "completion", "*")
+            except Exception:
+                pass
+        spd_tok = speed_val * dens_c if speed_val > 0 else 0.0
         lines += [
-            row("Скорость:", f"[bold green]{speed_val:.1f} Б/с[/bold green]"),
+            row("Скорость:", f"[bold green]{spd_tok:.1f} ток/с[/bold green]"
+                if spd_tok else "[bold green]0 ток/с[/bold green]"),
             row("Первый ответ:", f"[bold yellow]{first_val}[/bold yellow]"),
             row(wait_label, wait_value),
         ]
@@ -2288,14 +2356,25 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         ctx_used = s.get("session_ctx", 0)
         ctx_pct = (ctx_used / ctx_max * 100) if ctx_max else 0
         cs = "green" if ctx_pct < 70 else "yellow" if ctx_pct < 90 else "red"
+        # Запрос в полёте: отправлен, а usage ещё не пришёл (статусы шлются
+        # вокруг отправки и сразу после done-чанка). Пока он жив, полоса
+        # показывает занятость вместе с допечатываемым ответом (оценка
+        # калибратором по видимому тексту), а объём запроса — оценка
+        # собранного промпта: точные usage придут только в done-чанке.
+        req_inflight = (self._task_active()
+                        and str(s.get("status", "")) in self._RESET_SILENCE_STATUSES)
+        ctx_proj = tok(visible_total, "completion") if req_inflight else 0
         lines.append(row("Диалог занял:", f"[{cs}]{ctx_used}/{ctx_max} ({ctx_pct:.1f}%)[/{cs}]"))
-        lines.append(row("Объём запроса:", f"{s.get('last_req_ctx', 0)} токенов"))
+        if req_inflight:
+            lines.append(row("Объём запроса:", self._fmt_tok(ctx_used)))
+        else:
+            lines.append(row("Объём запроса:", self._fmt_tok(s.get('last_req_ctx', 0))))
         comp_tokens = s.get("compressed_tokens", 0) or 0
         comp_trims = s.get("compress_trims", 0) or 0
         comp_resets = s.get("compress_resets", 0) or 0
         comp_manual = s.get("compress_manual", 0) or 0
         if comp_trims or comp_resets or comp_manual:
-            lines.append(row("Память сжималась:", f"[bold cyan]~{comp_tokens} токенов[/bold cyan]"))
+            lines.append(row("Память сжималась:", f"[bold cyan]{self._fmt_tok_num(comp_tokens)} токенов[/bold cyan]"))
             # Разбивка по способам — отдельной тёмной строкой, только ненулевые:
             # основная строка не должна переноситься и ломать сетку панели.
             ways = []
@@ -2308,13 +2387,30 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             lines.append(f"[dim]  {' · '.join(ways)}[/dim]")
         lines.append("")
 
-        # Сырой обмен с моделью: «АПИ отдано» / «АПИ принято» (за запрос и всего).
+        # Обмен с моделью: точные usage-токены (за запрос и за сессию).
+        # Пока запрос в полёте, число живое: точное из прошлых usage плюс
+        # оценка текущего (промпт уже отправлен — оценка по собранному
+        # запросу; ответ допечатывается — оценка по видимому тексту).
         snap = net_meter.snapshot()
+
+        def tokrow(base, live=0):
+            if live > 0:
+                return f"[bold cyan]{self._fmt_tok_num(base + live)} ток[/bold cyan]"
+            return f"[bold cyan]{self._fmt_tok(base)}[/bold cyan]"
+
+        prompt_live = ctx_used if req_inflight else 0
+        lines.append(row("Модель получила:", tokrow(snap.get('ptok_turn'), prompt_live)))
+        lines.append(row("Модель отдала:", tokrow(snap.get('ctok_turn'), ctx_proj)))
+        lines.append(row("Модель получила всего:", tokrow(snap.get('ptok_total'), prompt_live)))
+        lines.append(row("Модель отдала всего:", tokrow(snap.get('ctok_total'), ctx_proj)))
+        # Сырой обмен с моделью: байты, которые реально летят прямо сейчас —
+        # каждый чанк двигает числа. Скорость приёма оставляем в байтах:
+        # это поток SSE с JSON-конвертами, в токены он честно не переводится.
         rate = net_meter.recv_rate()
-        lines.append(row("АПИ отдано:", self._fmt_bytes_raw(snap['sent_turn'])))
-        lines.append(row("АПИ принято:", self._fmt_bytes_raw(snap['recv_turn'])))
-        lines.append(row("АПИ отдано всего:", self._fmt_bytes_raw(snap['sent_total'])))
-        lines.append(row("АПИ принято всего:", self._fmt_bytes_raw(snap['recv_total'])))
+        lines.append(row("АПИ отдано:", self._fmt_tok(int(snap['sent_turn'] * dens_p))))
+        lines.append(row("АПИ принято:", self._fmt_tok(int(snap['recv_turn'] * dens_c))))
+        lines.append(row("АПИ отдано всего:", self._fmt_tok(int(snap['sent_total'] * dens_p))))
+        lines.append(row("АПИ принято всего:", self._fmt_tok(int(snap['recv_total'] * dens_c))))
         lines.append(row("Скорость приёма:", f"{int(rate)} Б/с"))
         lines.append(row("Обращений:", f"{snap['req_turn']}   (всего {snap['req_total']})"))
         lines.append("")
@@ -2333,7 +2429,11 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self.stats_rows.update(text, layout=need_layout)
         if self.ctx_bar:
             try:
-                self.ctx_bar.progress = float(ctx_pct)
+                # Полоса как прежде: тонкий ProgressBar с цветовыми классами.
+                # Уровень живой: пока запрос в полёте, включает допечатываемый
+                # ответ (оценка калибратором); цвета — по измеренному.
+                pct_live = min(100.0, (ctx_used + ctx_proj) / ctx_max * 100) if ctx_max else 0.0
+                self.ctx_bar.progress = pct_live
                 self.ctx_bar.set_class(ctx_pct < 70, "low")
                 self.ctx_bar.set_class(70 <= ctx_pct < 90, "mid")
                 self.ctx_bar.set_class(ctx_pct >= 90, "high")
@@ -2350,7 +2450,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
 
     def _tool_details(self, t: dict) -> str:
         ss = "yellow" if t["status"] == "running" else "green" if t["status"] == "completed" else "red"
-        sz = f"{t['size_kb']:.2f} KB" if t.get("size_kb", 0) > 0 else "..."
+        sz = self._tok_from_kb(t["size_kb"]) if t.get("size_kb", 0) > 0 else "..."
         started = ""
         try:
             started = datetime.fromtimestamp(float(t.get("start_time", 0))).strftime("%H:%M:%S")
@@ -3479,19 +3579,32 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             return f"{int(d // 60)}м{int(d % 60):02d}с"
         return f"{int(d // 3600)}ч{int((d % 3600) // 60):02d}м"
 
-    @staticmethod
-    def _fmt_kb(kb: float) -> str:
+    def _fmt_tok(self, n) -> str:
+        """Токены — точным числом с разрядами (kток — только на скоростях)."""
         try:
-            kb = float(kb)
+            n = int(n or 0)
         except Exception:
-            return ""
-        if kb <= 0:
-            return ""
-        if kb < 1024:
-            return f"{kb:.2f} KB"
-        if kb < 1024 * 1024:
-            return f"{kb / 1024:.2f} MB"
-        return f"{kb / (1024 * 1024):.2f} GB"
+            return "0 ток"
+        return f"{n:,}".replace(",", " ") + " ток"
+
+    def _fmt_tok_num(self, n) -> str:
+        """Только точное число с разрядами: '736', '36 511'."""
+        try:
+            n = int(n or 0)
+        except Exception:
+            return "0"
+        return f"{n:,}".replace(",", " ")
+
+    def _tok_from_kb(self, kb: float) -> str:
+        """Размер результата инструмента — в токенах (плотность промпта)."""
+        try:
+            from core import token_calibrator as _tc
+            _d = _tc.deploy_fingerprint(getattr(self, "model_name", ""),
+                                        str(self.stats_data.get("server", "") or ""))
+            dens, _ = _tc.density(_d, "prompt", "*")
+            return self._fmt_tok(int(max(1.0, kb) * 1024 * dens))
+        except Exception:
+            return f"{kb:.1f} КБ"
 
     def _tool_state(self, t: dict) -> str:
         """Короткое «состояние» инструмента для правого края свёрнутой карточки.
@@ -3500,7 +3613,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         состояние видно всегда, а у завершённых виден и размер.
         """
         detail = normalize_cells(str(t.get("detail", ""))).strip()
-        size = self._fmt_kb(t.get("size_kb") or 0)
+        _kb = t.get("size_kb") or 0
+        size = self._tok_from_kb(_kb) if _kb > 0 else ""
         try:
             st = float(t.get("start_time") or 0)
         except Exception:

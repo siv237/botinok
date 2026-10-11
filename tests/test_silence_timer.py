@@ -166,7 +166,7 @@ async def main_async() -> int:
         await asyncio.sleep(0.2)
         txt = _panel(app)
         check("stalled_shows_hang", "зависло" in txt and "70.1 с" in txt.replace("70.0", "70.1") or "долго молчит" in txt, txt[-400:])
-        check("compressed_row", "Память сжималась" in txt and "12345" in txt and "поджал 4" in txt, txt[-400:])
+        check("compressed_row", "Память сжималась" in txt and "12 345" in txt and "поджал 4" in txt, txt[-400:])
 
         # счётчик снова растёт (циферки бегут) — молчание обнуляется,
         # несмотря на старый _last_chunk_time
