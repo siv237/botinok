@@ -1,6 +1,10 @@
 import requests
 import os
 
+from core.openai_compat import (probe_reasoning, load_reasoning_cache,
+                                save_reasoning_cache, reasoning_cache_key,
+                                load_cache_entry, save_cache_entry,
+                                classify_chat_models)
 from core.session_manager import SessionManager
 from core.cli_io import out
 from core.textual_prompts import textual_confirm, textual_prompt, textual_select
@@ -184,6 +188,12 @@ class ConfigWizard:
                         if not mid:
                             continue
                         models.append({'id': mid, 'context': self._model_context(m)})
+                    # Классификация по фактическому типу: настоящим чат-запросом
+                    # (mode у прокси врёт), не-LLM в выбор не попадают.
+                    models = [e for e in
+                              classify_chat_models(BACKEND_OPENAI, url, api_key,
+                                                   models, verify=verify)
+                              if e.get('chat', True)]
                     if models:
                         server_ctx = self._server_context(url, headers, verify=verify)
                         if server_ctx:
@@ -194,6 +204,68 @@ class ConfigWizard:
             except Exception as e:
                 cert_error = cert_error or self._cert_error(e)
         return False, [], cert_error
+
+    def _configure_reasoning(self, backend, chosen_model):
+        """Шаг визарда: режим рассуждения. Быстрый путь — «по умолчанию
+        (auto)»: никаких сетевых проверок. Только при явном выборе запускается
+        зонд (медленный, но с дисковым кэшем — повторные запуски мгновенны).
+        Список уровней диктует сам API, захардкожен лишь auto."""
+        out("\nРассуждение (reasoning)")
+        current = (self.config.get('Ollama', 'ReasoningEffort', fallback='auto') or 'auto').strip().lower()
+
+        quick = [("auto — по умолчанию, как сейчас (без проверки сервера)", 'auto')]
+        if current and current != 'auto':
+            quick.append((f"{current} — уже выбрано ранее", current))
+        quick.append(("Выбрать уровень… (проверить, что поддерживает сервер)", "__pick__"))
+        ans = textual_select("Режим рассуждения", quick, 'auto' if current == 'auto' else current)
+        if ans is None:
+            return None
+        if ans != '__pick__':
+            if ans == 'auto':
+                if self.config.has_option('Ollama', 'ReasoningEffort'):
+                    self.config.remove_option('Ollama', 'ReasoningEffort')
+            else:
+                self.config.set('Ollama', 'ReasoningEffort', ans)
+            return ans
+
+        url = self.config.get('Ollama', 'BaseUrl', fallback='http://localhost:11434')
+        api_key = self.config.get('Ollama', 'ApiKey', fallback='')
+        verify = self.config.getboolean('Ollama', 'VerifySSL', fallback=True)
+        cached = load_reasoning_cache(self.sm, reasoning_cache_key(backend, url, chosen_model))
+        if cached is not None:
+            out("  Уровни взяты из кэша предыдущей проверки (без обращения к серверу).")
+            info = cached
+        else:
+            out("  Проверяю поддержку рассуждения у сервера — это займёт несколько секунд…")
+            info = probe_reasoning(backend, url, api_key, chosen_model, verify=verify)
+            if info is not None:
+                save_reasoning_cache(self.sm, reasoning_cache_key(backend, url, chosen_model), info)
+
+        options = [("auto — параметр не отправлять (поведение по умолчанию)", 'auto')]
+        if info and info['levels']:
+            out(f"  Сервер поддерживает: {', '.join(info['levels'])}")
+            for lvl in info['levels']:
+                mark = " — дефолт сервера" if info.get('default') == lvl else ""
+                options.append((f"{lvl}{mark}", lvl))
+        else:
+            out("  Сервер не сообщил список поддерживаемых значений.")
+            custom = textual_prompt("Значение рассуждения (пусто — auto)", default="")
+            if custom is None:
+                return None
+            custom = custom.strip().lower()
+            if custom:
+                options.append((f"{custom} (вручную)", custom))
+
+        chosen = textual_select("Режим рассуждения", options,
+                                current if any(v == current for _, v in options) else 'auto')
+        if chosen is None:
+            return None
+        if chosen == 'auto':
+            if self.config.has_option('Ollama', 'ReasoningEffort'):
+                self.config.remove_option('Ollama', 'ReasoningEffort')
+        else:
+            self.config.set('Ollama', 'ReasoningEffort', chosen)
+        return chosen
 
     def _configure_ollama(self):
         """Настройка подключения к Ollama. Возвращает список имён моделей или None."""
@@ -238,7 +310,11 @@ class ConfigWizard:
             url = new_url.strip()
 
         self.config.set('Ollama', 'BaseUrl', url)
-        return [{'id': m['name'], 'context': self._model_context(m)} for m in models]
+        entries = [{'id': m['name'], 'context': self._model_context(m),
+                    'capabilities': m.get('capabilities') or []} for m in models]
+        # Ollama сам сообщает тип модели (capabilities) — эмбеддинги отсекаются.
+        return [e for e in classify_chat_models(BACKEND_OLLAMA, url, '', entries)
+                if e.get('chat', True)]
 
     def _configure_openai(self):
         """Настройка подключения к OpenAI-совместимому API.
@@ -375,6 +451,18 @@ class ConfigWizard:
             out("Настройка прервана.")
             return
 
+        # Автоопределённый список моделей (с контекстом) — в общий кэш:
+        # горячие меню шапки TUI после мастера открываются мгновенно.
+        if models:
+            try:
+                _url = self.config.get('Ollama', 'BaseUrl', fallback='')
+                save_cache_entry(self.sm, f"models|{backend}|{_url.rstrip('/')}",
+                                 {'models': [{'id': m['id'], 'context': m.get('context'),
+                                              'chat': m.get('chat', True)}
+                                             for m in models], 'cls': 1})
+            except Exception:
+                pass
+
         # 2. Выбор модели по умолчанию
         out("\n2. Выбор модели по умолчанию")
         if not models:
@@ -415,13 +503,30 @@ class ConfigWizard:
 
         self.config.set('Ollama', 'DefaultModel', chosen_model)
 
-        # Контекст выбранной модели (если провайдер его сообщил)
+        # 2.5 Режим рассуждения (дефолт auto = текущее поведение)
+        if self._configure_reasoning(backend, chosen_model) is None:
+            out("Настройка прервана.")
+            return
+
+        # Контекст выбранной модели: автоопределение провайдера, при его
+        # отсутствии — общий кэш (список моделей уже мог его содержать).
         model_ctx = None
-        if backend == BACKEND_OPENAI and models:
+        if models:
             for m in models:
                 if m.get('id') == chosen_model and m.get('context'):
                     model_ctx = int(m['context'])
                     break
+        if not model_ctx:
+            try:
+                _url = self.config.get('Ollama', 'BaseUrl', fallback='')
+                _ent = load_cache_entry(self.sm, f"models|{backend}|{_url.rstrip('/')}",
+                                        ttl=24 * 3600)
+                for m in (_ent or {}).get('models') or []:
+                    if m.get('id') == chosen_model and m.get('context'):
+                        model_ctx = int(m['context'])
+                        break
+            except Exception:
+                pass
 
         # 3. Контекст по умолчанию
         out("\n3. Размер контекста по умолчанию")
