@@ -30,7 +30,14 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 from textual.widgets import RichLog
 
-from rich.markup import escape as _markup_escape
+def _markup_escape(text) -> str:
+    """Экран для markup-парсера Textual: любой «[» — начало тега.
+
+    rich.markup.escape экранирует только последовательности, похожие на теги
+    ([a-z#/@]…), а Textual падает на любом непоэкранированном «[» (MarkupError
+    ронял TUI на команде с ['id="days"',…] в заголовке терминала).
+    """
+    return str(text).replace("[", r"\[")
 from rich.text import Text
 
 from core.file_kinds import syntax_renderable
