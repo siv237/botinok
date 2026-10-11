@@ -119,6 +119,18 @@ async def main_async() -> int:
         txt2 = _panel(app)
         check("growing_counters_not_hung", "зависло" not in txt2, txt2[-400:])
         check("growing_shows_norm", "норма" in txt2, txt2[-400:])
+
+        # новый запрос к модели (например, после работы инструмента) сбрасывает
+        # молчание: ожидание первого токена — не «подозрение на модель»
+        app._last_chunk_time = time.time() - 70.0
+        app._visible_at = time.time() - 70.0
+        app.update_stats_display()
+        await asyncio.sleep(0.2)
+        check("stale_again_hangs_before_request", "долго молчит" in _panel(app))
+        app.update_stats(status="Resuming generation...")
+        await asyncio.sleep(0.2)
+        txt3 = _panel(app)
+        check("new_request_resets_silence", "норма" in txt3 and "зависло" not in txt3, txt3[-400:])
     return 0
 
 

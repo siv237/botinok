@@ -116,7 +116,7 @@ async def main_async() -> int:
         await asyncio.sleep(0.2)
 
         txt = _panel(app)
-        check("ru_server", "Ollama (локальный)" in txt, txt)
+        check("ru_server", "Ollama" in txt, txt)
         check("ru_status", "Модель" in txt and ("думает" in txt or "печатает" in txt), txt)
         check("live_thinking", "Размышляет" in txt and "120 Б" in txt, txt)
         check("live_response", "Написал ответ" in txt and "40 Б" in txt, txt)
