@@ -11,7 +11,9 @@ import io
 from contextlib import redirect_stdout
 
 PERSONAL_DIR = Path.home() / ".botinok" / "skills"
-PROJECT_DIR = Path("skills")
+# Абсолютный путь папки запуска: относительный «skills» модель резолвила
+# как умела и попадала не туда (регресс 2026-10-11).
+PROJECT_DIR = Path("skills").resolve()
 # Вкомпонованные скилы рядом с самим ботинком (поставляются в репозитории):
 # доступны в любом проекте сразу после установки/обновления.
 BUNDLED_DIR = Path(__file__).resolve().parent.parent / "skills"
