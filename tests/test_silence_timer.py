@@ -116,11 +116,27 @@ def test_skill_path_reported():
     check("get_prints_folder", out2 and "папка скилла:" in out2, str(out2)[:120])
 
 
+def test_wiki_mode_note():
+    check("activation_get", ti._wiki_mode_activation({"action": "get", "name": "llm-wiki"}, ""))
+    check("activation_run", ti._wiki_mode_activation({"action": "run", "name": "llm-wiki", "task": "х"}, ""))
+    check("activation_via_result", ti._wiki_mode_activation({"action": "get"}, "llm-wiki (project) — папка скилла: /x"))
+    check("no_activation_on_list", not ti._wiki_mode_activation({"action": "list"}, "excel…"))
+    check("no_activation_other_skill", not ti._wiki_mode_activation({"action": "run", "name": "excel"}, ""))
+    msgs = []
+    check("first_note_added", ti._append_system_once(msgs, ti.WIKI_MODE_NOTE))
+    for _ in range(10):
+        ti._append_system_once(msgs, ti.WIKI_MODE_NOTE)
+    notes = [m for m in msgs if str(m.get("content", "")).startswith("WIKI_MODE")]
+    check("note_deduped", len(notes) == 1, str(len(notes)))
+
+
 async def main_async() -> int:
     with net_meter._lock:
         net_meter._recv_samples.clear()
     print("== счётчик «Выжато» ==")
     test_compression_counter()
+    print("== режим вики ==")
+    test_wiki_mode_note()
     print("== путь к скиллу ==")
     test_skill_path_reported()
     print("== пульс tool_calls в SSE ==")
