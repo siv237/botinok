@@ -155,8 +155,37 @@ def main() -> int:
     # и должен выполняться всегда, даже если app.run_test() зависнет на выходе
     # (известный баг Textual test-harness в не-tty окружении).
     test_close_logic_without_app()
+    test_terminal_title_markup_safe()
     rc = asyncio.run(main_async())
     return rc
+
+
+def test_terminal_title_markup_safe() -> None:
+    """Регресс (2026-10-11): команда с ['id="days"',…] роняла TUI — Textual
+    видит «[» как начало тега, а rich.markup.escape такие места не экранирует."""
+    from core.shell_screen import _terminal_title
+    from textual.markup import to_content
+
+    class _S:
+        name = ('cd /home/user/.botinok/sessions/x && python3 -c '
+                '"ids=[\'id=\\"days\\"\',\'id=\\"tbl\\"\',\'id=\\"sunarc\\"\']"')
+        cwd = "/home/user/[скобки]/project"
+        elapsed = 12
+        returncode = None
+
+        @staticmethod
+        def is_running():
+            return True
+
+    title = _terminal_title(_S(), 3)
+    try:
+        to_content(title)
+        ok = True
+    except Exception as e:
+        ok = False
+        title = f"{type(e).__name__}: {e}"
+    check("title_markup_parses", ok, str(title)[:160])
+    check("title_keeps_tags", "[/b]" in _terminal_title(_S(), 0))
 
 
 def test_close_logic_without_app() -> None:
