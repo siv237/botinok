@@ -83,7 +83,7 @@ ul,ol{margin:6px 0;padding-left:22px}
 <script>
 "use strict";
 var out=document.getElementById('out'),dot=document.getElementById('dot'),sub=document.getElementById('sub');
-var cur=null,stick=true;
+var cur=null,stick=true,replaying=false;
 var TOK=(new URLSearchParams(location.search)).get('tok')||'';
 var logo=document.getElementById('logo');
 logo.src='/logo?tok='+encodeURIComponent(TOK);
@@ -142,8 +142,7 @@ function dateSep(ts){var d=new Date(ts*1000).toDateString();
 function turn(){if(!cur){cur={box:el('div','turnblk'),det:null,think:null,ans:null,raw:'',last:0,tools:{}};}return cur}
 function render(ev){
   if(ev.t==='hello'){sub.textContent=(ev.model?('модель: '+ev.model+' \\u00b7 '):'')+'сессия: '+(ev.session||'');
-    if(ev.version)document.getElementById('ver').textContent='Ботинок — версия '+ev.version;}
-  else if(ev.t==='user'||ev.t==='thought'){cur=null;if(ev.ts)dateSep(ev.ts);
+    if(ev.version)document.getElementById('ver').textContent='Ботинок — версия '+ev.version;}  else if(ev.t==='user'||ev.t==='thought'){cur=null;if(ev.ts)dateSep(ev.ts);
     var u=el('div','blk '+(ev.t==='user'?'user':'thought'));
     u.innerHTML='<span class="h">'+(ev.t==='user'?'\\ud83d\\udc64 User':'\\ud83d\\udcad мысль')+'</span>'+
       (ev.ts?' <span class="tm">'+fmtT(ev.ts)+'</span>':'')+'\\n'+rich(ev.text);}
@@ -160,7 +159,7 @@ function render(ev){
     if(c5.ans&&c5.raw){c5.ans.innerHTML=rich(c5.raw);c5.raw+='\\n\\n';}
     if(c5.det)c5.det.remove();
     if(!c5.ans&&!Object.keys(c5.tools).length&&!(c5.det&&c5.det.parentNode)){c5.box.remove();cur=null;}}
-  if(stick)scrollTo(0,document.body.scrollHeight);
+  if(!replaying&&stick)scrollTo(0,document.body.scrollHeight);
 }
 function connect(){
   var es=new EventSource('events'+(TOK?'?tok='+encodeURIComponent(TOK):''));
@@ -168,6 +167,7 @@ function connect(){
   var seen={};
   es.onmessage=function(e){try{var ev=JSON.parse(e.data);
     if(ev.id!=null){if(seen[ev.id])return;seen[ev.id]=1;}
+    stick=(innerHeight+scrollY)>=document.body.offsetHeight-140;
     render(ev);}catch(_){}};
   es.onerror=function(){dot.classList.remove('ok')};
 }
@@ -177,6 +177,16 @@ function connect(){
 // ходов переворачивается между страницами.
 var anchor=document.getElementById('histAnchor');
 var histCursor=-1,histLoading=false,histTop=null,HIST_PAGE=300;
+function anchorImg(im){
+  // Картинки в истории приезжают без размеров и догружаются ПОЗЖЕ. Если
+  // картинка оказалась ВЫШЕ вьюпорта, её рост сдвигает экран вниз — до
+  // конца ленты. Компенсируем рост, пока картинка над видимой областью.
+  im._h=im.height||0;
+  im.addEventListener('load',function(){
+    var r=im.getBoundingClientRect();
+    if(r.bottom<0){var h=im.height||0,g=h-im._h;im._h=h;if(g)scrollBy(0,g);}
+  });
+}
 function loadOlder(){
   if(histLoading||histCursor===0)return;
   histLoading=true;
@@ -184,13 +194,17 @@ function loadOlder(){
    .then(function(r){return r.json()})
    .then(function(d){
      histLoading=false;histCursor=d.cursor;
-     var frag=document.createElement('div'),pv=out;out=frag;cur=null;
+     var frag=document.createElement('div'),pv=out;out=frag;cur=null;replaying=true;
      d.events.forEach(function(e){try{render(e)}catch(_){}});
-     cur=null;out=pv;
-      var top0=document.documentElement.scrollHeight;
-      out.insertBefore(frag,histTop||anchor);histTop=frag;
-     var dh=document.documentElement.scrollHeight-top0;
-     scrollBy(0,dh);
+     cur=null;out=pv;replaying=false;
+     // Компенсация по ЯКОРЮ (первый уже вставленный блок/anchor), а не по
+     // высоте документа: высота в момент вставки не учитывает картинки,
+     // которые дорастут позже и утаскивают вьюпорт к концу ленты.
+     var ref=histTop||anchor,refTop=ref.getBoundingClientRect().top;
+     out.insertBefore(frag,histTop||anchor);histTop=frag;
+     var dh=ref.getBoundingClientRect().top-refTop;
+     if(dh)scrollBy(0,dh);
+     Array.prototype.forEach.call(frag.querySelectorAll('img'),anchorImg);
      if(d.cursor>0&&dh<1000)loadOlder();
    })
    .catch(function(){histLoading=false});
