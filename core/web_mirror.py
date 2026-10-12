@@ -165,13 +165,18 @@ function render(ev){
 function connect(){
   var es=new EventSource('events'+(TOK?'?tok='+encodeURIComponent(TOK):''));
   es.onopen=function(){dot.classList.add('ok')};
-  es.onmessage=function(e){try{render(JSON.parse(e.data))}catch(_){}};
+  var seen={};
+  es.onmessage=function(e){try{var ev=JSON.parse(e.data);
+    if(ev.id!=null){if(seen[ev.id])return;seen[ev.id]=1;}
+    render(ev);}catch(_){}};
   es.onerror=function(){dot.classList.remove('ok')};
 }
 // Ленивая история: страницы до histAnchor, живые события — после него.
 // Кнопки нет: подход к верху сам догружает следующую порцию.
+// Старые страницы вставляются ВЫШЕ уже вставленных (histTop), иначе порядок
+// ходов переворачивается между страницами.
 var anchor=document.getElementById('histAnchor');
-var histCursor=-1,histLoading=false,HIST_PAGE=300;
+var histCursor=-1,histLoading=false,histTop=null,HIST_PAGE=300;
 function loadOlder(){
   if(histLoading||histCursor===0)return;
   histLoading=true;
@@ -182,8 +187,8 @@ function loadOlder(){
      var frag=document.createElement('div'),pv=out;out=frag;cur=null;
      d.events.forEach(function(e){try{render(e)}catch(_){}});
      cur=null;out=pv;
-     var top0=document.documentElement.scrollHeight;
-     out.insertBefore(frag,anchor);
+      var top0=document.documentElement.scrollHeight;
+      out.insertBefore(frag,histTop||anchor);histTop=frag;
      var dh=document.documentElement.scrollHeight-top0;
      scrollBy(0,dh);
      if(d.cursor>0&&dh<1000)loadOlder();
@@ -332,9 +337,16 @@ class WebMirror:
         method = parts[0] if parts else ""
         path = parts[1] if len(parts) > 1 else "/"
         cookie = ""
+        last_event_id = 0
         for ln in lines[1:]:
-            if ln.lower().startswith("cookie:"):
+            low = ln.lower()
+            if low.startswith("cookie:"):
                 cookie = ln.split(":", 1)[1].strip()
+            elif low.startswith("last-event-id:"):
+                try:
+                    last_event_id = int(ln.split(":", 1)[1].strip())
+                except ValueError:
+                    last_event_id = 0
         if method != "GET":
             await self._send(writer, "405 Method Not Allowed",
                              "text/plain; charset=utf-8", "только GET".encode())
@@ -352,7 +364,7 @@ class WebMirror:
                                    f"HttpOnly; SameSite=Lax\r\nCache-Control: no-store\r\n")
             return
         if route == "/events":
-            await self._sse(reader, writer)
+            await self._sse(reader, writer, last_event_id)
             return
         if route == "/history":
             await self._history(writer, urlsplit(path).query)
@@ -412,7 +424,21 @@ class WebMirror:
         await self._send(writer, "200 OK", mime, data,
                          extra="Cache-Control: private, max-age=86400\r\n")
 
-    async def _sse(self, reader, writer) -> None:
+    @staticmethod
+    def _event_id(s: str) -> int:
+        try:
+            return int(json.loads(s).get("id") or 0)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _frame(eid: int, s: str) -> bytes:
+        # Строка id нужна, чтобы браузер при переподключении прислал
+        # Last-Event-ID — сервер досылает только новые события, без дублей.
+        head = f"id: {eid}\n".encode() if eid else b""
+        return head + b"data: " + s.encode() + b"\n\n"
+
+    async def _sse(self, reader, writer, last_id: int = 0) -> None:
         q = asyncio.Queue(maxsize=2000)
         self._queues.add(q)
         self._writers.add(writer)
@@ -428,7 +454,10 @@ class WebMirror:
                          b"X-Accel-Buffering: no\r\n\r\n")
             await writer.drain()
             for s in list(self._buffer):
-                writer.write(b"data: " + s.encode() + b"\n\n")
+                eid = self._event_id(s)
+                if eid <= last_id:
+                    continue
+                writer.write(self._frame(eid, s))
             await writer.drain()
             while True:
                 get_task = asyncio.ensure_future(q.get())
@@ -442,7 +471,7 @@ class WebMirror:
                     get_task = None
                     if s is None:
                         break
-                    writer.write(b"data: " + s.encode() + b"\n\n")
+                    writer.write(self._frame(self._event_id(s), s))
                     await writer.drain()
                 else:
                     writer.write(b": ping\n\n")

@@ -50,6 +50,8 @@ _NIGHT_VARS = {
     "cmd-border": "#5f87af",
     "pager-fg": "#6b8f9a",
     "accent-fg": "black",
+    # Цвет активной ссылки веб-зеркала в шапке: светлый, читается на hdr-bg.
+    "web-on": "#4dff9e",
 }
 
 _DAY_VARS = {
@@ -69,6 +71,7 @@ _DAY_VARS = {
     "cmd-border": "#7fa6c9",
     "pager-fg": "#5a7a8a",
     "accent-fg": "#ffffff",
+    "web-on": "#c9ffd9",
 }
 
 _EVENING_VARS = {
@@ -88,6 +91,7 @@ _EVENING_VARS = {
     "cmd-border": "#4a90c4",
     "pager-fg": "#6fa8cc",
     "accent-fg": "#062033",
+    "web-on": "#5fd68f",
 }
 
 

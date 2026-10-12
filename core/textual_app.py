@@ -1010,12 +1010,13 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     .theme_btn { width: auto; height: 1; padding: 0 1; margin: 0; border: none;
                  background: transparent; color: $hdr-fg; }
     .theme_btn:hover { text-style: bold underline; }
-    /* Тумблер веб-зеркала в шапке: серый текст — выключено, яркий со ссылкой —
-       работает. Emoji-глиф терминал не красит, поэтому состояние — текстом. */
+    /* Тумблер веб-зеркала в шапке: приглушённый текст — выключено, яркий
+       со ссылкой — работает. Цвет ссылки — светлый $web-on на цветной шапке
+       (в дневной теме зелёный $ok на синем фоне был нечитаем). */
     #web_btn { width: auto; height: 1; padding: 0 1; margin: 0; border: none;
-               background: transparent; color: $text-muted; }
+               background: transparent; color: $hdr-fg; text-style: dim; }
     #web_btn:hover { text-style: bold underline; }
-    #web_btn.on { color: $ok; text-style: bold; }
+    #web_btn.on { color: $web-on; text-style: bold; }
     /* Кнопка «открыть текст чата в терминале» — без фона, лёгкий акцент. */
     #chat_pager_btn { width: auto; height: 1; min-height: 1; max-height: 1; min-width: 0;
                      padding: 0 1; margin: 0 0 0 0; border: none;

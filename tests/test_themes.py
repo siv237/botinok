@@ -116,6 +116,21 @@ async def test_app() -> None:
             await pilot.click("#theme_btn")
             await pilot.pause()
             check("click_wraps_night", app.theme == "night", f"theme={app.theme}")
+
+            # Активная ссылка зеркала в шапке: светлый цвет, читается на hdr-bg
+            # любой темы (в day зелёный $ok на синем шапке был невидим).
+            expect = {"day": (0xC9, 0xFF, 0xD9), "evening": (0x5F, 0xD6, 0x8F),
+                      "night": (0x4D, 0xFF, 0x9E)}
+            for th in ("day", "evening", "night"):
+                app.apply_theme(th)
+                await pilot.pause()
+                app.web_btn.add_class("on")
+                await pilot.pause()
+                c = app.web_btn.styles.color
+                got = (c.r, c.g, c.b) if c is not None else None
+                check(f"web_link_readable_{th}", got == expect[th], str(got))
+                app.web_btn.remove_class("on")
+                await pilot.pause()
         txt = open(cfg, encoding="utf-8").read()
         check("click_persists", "theme = night" in txt, txt.strip())
 

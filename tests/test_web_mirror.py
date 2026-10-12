@@ -251,6 +251,71 @@ async def main() -> int:
     check("history без токена — 403", "403" in st, st)
     m8.close_sync()
 
+    #paging по всем страницам: последовательно и без повторов
+    many = [[{"t": "user", "text": f"x{i}"}] for i in range(1, 8)]
+
+    def prov9(before, limit):
+        total = len(many)
+        end = total if before < 0 else max(0, min(before, total))
+        start = max(0, end - limit)
+        return [ev for g in many[start:end] for ev in g], start
+
+    m9 = WebMirror(history_provider=prov9)
+    await m9.start()
+    host9, port9 = m9.host, m9._server.sockets[0].getsockname()[1]
+
+    async def get9(path):
+        r, w = await asyncio.open_connection(host9, port9)
+        w.write(f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+        st, _, bd = await http_get(r, w)
+        w.close()
+        return json.loads(bd.decode())
+
+    pages, cursor, guard = [], -1, 0
+    while guard < 20:
+        guard += 1
+        d = await get9(f"/history?before={cursor}&limit=3&tok={m9.token}")
+        pages.append([e["text"] for e in d["events"]])
+        cursor = d["cursor"]
+        if cursor == 0:
+            break
+    flat = [t for pg in pages for t in pg]
+    check("страницы истории покрывают всё без пропусков",
+          sorted(flat) == sorted(f"x{i}" for i in range(1, 8)), str(pages))
+    check("страницы истории без повторов", len(flat) == len(set(flat)), str(flat))
+    check("каждая страница истории внутри возрастающая",
+          all(pg == sorted(pg, key=lambda t: int(t[1:])) for pg in pages), str(pages))
+    check("страницы идут от новых к старым", pages[0][-1] == "x7" and pages[-1][0] == "x1",
+          str(pages))
+    m9.close_sync()
+
+    # SSE: кадры с id и досылка по Last-Event-ID (без дублей при реконнекте)
+    m10 = WebMirror()
+    await m10.start()
+    host10, port10 = m10.host, m10._server.sockets[0].getsockname()[1]
+    for i in range(5):
+        m10.publish({"t": "log", "text": f"e{i}"})
+    r, w = await asyncio.open_connection(host10, port10)
+    w.write(f"GET /events?tok={m10.token} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+    head = b""
+    while b"\r\n\r\n" not in head:
+        head += await r.read(4096)
+    raw = head.split(b"\r\n\r\n", 1)[1]
+    evs, raw = await read_sse_events(r, 5, raw)
+    check("SSE-кадры содержат строку id", b"id: " in head + raw)
+    w.close()
+    r, w = await asyncio.open_connection(host10, port10)
+    w.write(f"GET /events?tok={m10.token} HTTP/1.1\r\nHost: x\r\n"
+            f"Last-Event-ID: 3\r\n\r\n".encode())
+    head = b""
+    while b"\r\n\r\n" not in head:
+        head += await r.read(4096)
+    rest, _ = await read_sse_events(r, 2, head.split(b"\r\n\r\n", 1)[1])
+    w.close()
+    check("Last-Event-ID: досылка только новых событий без дублей",
+          [e["id"] for e in rest] == [4, 5], str([e.get("id") for e in rest]))
+    m10.close_sync()
+
     print(f"\n{'ВСЕ ТЕСТЫ ПРОЙДЕНЫ' if not FAILURES else 'ПРОВАЛЫ: ' + ', '.join(FAILURES)}")
     return 1 if FAILURES else 0
 
