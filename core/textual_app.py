@@ -4466,7 +4466,13 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                 if isinstance(c, list):
                     c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
                 if isinstance(c, str) and c.strip():
-                    if c.lstrip().startswith("Перед завершением хода вызови инструмент sign_step"):
+                    if c.lstrip().startswith(("Перед завершением хода вызови инструмент sign_step",
+                                              # служебные пинки авто-продолжения после
+                                              # очистки контекста (prompts/auto_continue*)
+                                              "Продолжай выполнение последнего запроса пользователя после авто-очистки",
+                                              "Сформулируй финальный ответ на последний запрос пользователя",
+                                              # уведомление фоновых web-задач (tools/web_jobs)
+                                              "🌐 WEB-ЗАДАЧИ (фон):")):
                         continue  # служебный пинк харнеса — не реплика человека
                     if c.lstrip().startswith("(во время работы)"):
                         g.append({"t": "thought",
