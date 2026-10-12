@@ -3897,6 +3897,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         if name not in botinok_themes.THEME_ORDER:
             return
         super().apply_theme(name)
+        self._mirror_emit(t="theme", name=name)
         try:
             self.append_log(f"[dim]Тема: {botinok_themes.THEME_LABELS[name]}[/dim]")
         except Exception:
@@ -4363,7 +4364,9 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         m = WebMirror(on_change=self._on_mirror_clients,
                       resolve_image=self._mirror_resolve_image,
                       logo_path=os.path.join(os.path.dirname(__file__), "..",
-                                             "assets", "logo.png"))
+                                             "assets", "logo.png"),
+                      theme=self.theme,
+                      history_provider=self._mirror_history_provider())
         self.mirror = m
         asyncio.create_task(self._start_web_mirror(m))
 
@@ -4381,10 +4384,6 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             except Exception:
                 pass
             return
-        try:
-            m.seed(self._mirror_history())
-        except Exception:
-            pass
         if self.web_btn is not None:
             self.web_btn.add_class("on")
             try:
@@ -4394,7 +4393,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self._render_web_btn(m.clients, m.url)
         m.publish({"t": "hello",
                    "session": os.path.basename(self.session_path.rstrip("/\\")) if self.session_path else "",
-                   "model": self.model_name})
+                   "model": self.model_name,
+                   "version": (self.version or "").split("|")[0].strip()})
         self.append_log(f"[green]Веб-зеркало:[/green] {m.url}")
 
     async def _stop_web_mirror(self) -> None:
@@ -4414,38 +4414,70 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self._render_web_btn(0)
         self.append_log("[dim]Веб-зеркало остановлено.[/dim]")
 
-    def _mirror_history(self) -> list:
-        """Диалог сессии (messages.json) для буфера зеркала: кто открыл ссылку
-        позже — видит всю историю, а не только события с момента включения."""
-        ev = []
+    def _mirror_history_groups(self) -> list:
+        """История сессии, разложенная по ходам (список списков событий).
+        Тот же источник, что у TUI (context.json → .bak → messages.json)."""
+        groups = []
         try:
-            with open(os.path.join(self.session_path, "messages.json"),
-                      encoding="utf-8") as f:
-                msgs = json.load(f).get("messages", [])
+            from core.session_manager import SessionManager
+            msgs = SessionManager().load_history_entries(self.session_path) or []
         except Exception:
-            return ev
+            return groups
         for msg in msgs:
             role = msg.get("role")
+            g = []
+            ts = None
+            raw_ts = msg.get("timestamp")
+            if raw_ts:
+                try:
+                    ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    ts = None
             if role == "user":
                 c = msg.get("content")
                 if isinstance(c, list):
                     c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
                 if isinstance(c, str) and c.strip():
-                    ev.append({"t": "user", "text": c})
+                    if c.lstrip().startswith("Перед завершением хода вызови инструмент sign_step"):
+                        continue  # служебный пинк харнеса — не реплика человека
+                    if c.lstrip().startswith("(во время работы)"):
+                        g.append({"t": "thought",
+                                  "text": c.replace("(во время работы)", "", 1).strip()})
+                    else:
+                        g.append({"t": "user", "text": c})
             elif role == "assistant":
                 th = msg.get("thinking") or ""
                 ct = msg.get("content") or ""
                 if th:
-                    ev.append({"t": "thinking", "text": th})
+                    g.append({"t": "thinking", "text": th})
                 if ct:
-                    ev.append({"t": "content", "text": ct})
+                    g.append({"t": "content", "text": ct})
                 names = []
                 for tc in (msg.get("tool_calls") or []):
                     if isinstance(tc, dict):
                         names.append((tc.get("function") or {}).get("name") or tc.get("name") or "")
                 if th or ct or names:
-                    ev.append({"t": "turn_end", "tools": [n for n in names if n]})
-        return ev
+                    g.append({"t": "turn_end", "tools": [n for n in names if n]})
+            if g:
+                if ts:
+                    for e in g:
+                        e.setdefault("ts", ts)
+                groups.append(g)
+        return groups
+
+    def _mirror_history_provider(self):
+        """Ленивые страницы истории для зеркала: снимок на момент включения,
+        дальше живые события дублируют историю без перекрытий."""
+        groups = self._mirror_history_groups()
+        total = len(groups)
+
+        def provider(before: int, limit: int):
+            end = total if before < 0 else max(0, min(before, total))
+            start = max(0, end - limit)
+            events = [ev for grp in groups[start:end] for ev in grp]
+            return events, start
+
+        return provider
 
     def on_unmount(self) -> None:
         try:

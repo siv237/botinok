@@ -15,8 +15,8 @@ import time
 from collections import deque
 from urllib.parse import urlsplit, parse_qs, unquote
 
-MAX_EVENTS = 5000
-MAX_BYTES = 4_000_000
+MAX_EVENTS = 20_000
+MAX_BYTES = 16_000_000
 HEARTBEAT_S = 20.0
 _COOKIE_NAME = "btok"
 _IMG_ID_RE = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
@@ -25,42 +25,61 @@ _PAGE = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Ботинок — зеркало</title>
 <style>
-:root{color-scheme:dark}
-body{margin:0;background:#101418;color:#d8dee4;
+body{--bg:#0e1116;--panel:#161b22;--text:#d8dee4;--muted:#8b949e;--accent:#2f81f7;
+     --ok:#3fb950;--warn:#d29922;--err:#e5534b;--border:#30363d;--code:#0d1117;
+     --user:#132133;--think:#14181d;color-scheme:dark;
+     margin:0;background:var(--bg);color:var(--text);
      font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+body.day{--bg:#ffffff;--panel:#f6f8fa;--text:#1f2328;--muted:#59636e;--accent:#0969da;
+     --ok:#177a3d;--warn:#a06800;--err:#c02d2d;--border:#d0d7de;--code:#eff1f3;
+     --user:#ddf4ff;--think:#f6f8fa;color-scheme:light}
+body.evening{--bg:#0a2236;--panel:#0d2b45;--text:#d6ecff;--muted:#7fa8c4;--accent:#7ec8ff;
+     --ok:#5fd68f;--warn:#ffd75f;--err:#ff7b7b;--border:#1d4e75;--code:#08192a;
+     --user:#0d3355;--think:#0c2a44;color-scheme:dark}
 #top{position:sticky;top:0;display:flex;gap:10px;align-items:center;
-     padding:8px 14px;background:#161b22;border-bottom:1px solid #2d333b;z-index:5}
-#dot{width:9px;height:9px;border-radius:50%;background:#e5534b;flex:none}
-#dot.ok{background:#3fb950}
+     padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--border);z-index:5}
+#dot{width:9px;height:9px;border-radius:50%;background:var(--err);flex:none}
+#dot.ok{background:var(--ok)}
 #who{font-weight:bold}
-#sub{color:#8b949e;font-size:12px}
+#sub{color:var(--muted);font-size:12px}
 #out{padding:10px 14px 40vh;max-width:1100px}
-#logo{max-width:420px;width:100%;display:block;margin:12px 0;border-radius:8px}
-.blk{margin:10px 0;padding:8px 10px;border-radius:6px;background:#161b22;
-     border-left:3px solid #30363d;white-space:pre-wrap;word-break:break-word}
-.user{border-left-color:#58a6ff;background:#132133}
-.user .h{color:#58a6ff;font-weight:bold}
-.thought{border-left-color:#bc8cff}
+#logo{max-width:420px;width:100%;display:block;margin:12px 0 2px;border-radius:8px}
+#ver{color:var(--muted);font-size:12px;margin:0 0 12px}
+.blk{margin:10px 0;padding:8px 10px;border-radius:6px;background:var(--panel);
+     border-left:3px solid var(--border);word-break:break-word}
+.blk p{white-space:pre-wrap;margin:6px 0}
+.blk h1,.blk h2,.blk h3,.blk h4{margin:8px 0 4px;color:var(--accent)}
+.blk h1{font-size:1.3em}.blk h2{font-size:1.2em}.blk h3{font-size:1.1em}.blk h4{font-size:1em}
+.user{border-left-color:var(--accent);background:var(--user);white-space:pre-wrap}
+.user .h{color:var(--accent);font-weight:bold}
+.thought{border-left-color:#bc8cff;white-space:pre-wrap}
 .thought .h{color:#bc8cff}
-.log{color:#8b949e;font-size:12px;border:none;background:none;padding:2px 10px;margin:0}
+.log{color:var(--muted);font-size:12px;border:none;background:none;padding:2px 10px;margin:0}
+.tm{float:right;color:var(--muted);font-size:11px;font-weight:normal}
+.datesep{color:var(--muted);font-size:12px;margin:14px 0 4px;text-align:center}
 .turnblk{margin:10px 0}
-details.think{background:#14181d;border-left:3px solid #484f58;border-radius:6px;
+details.think{background:var(--think);border-left:3px solid var(--border);border-radius:6px;
               padding:4px 10px;margin:6px 0}
-details.think summary{color:#8b949e;cursor:pointer}
-details.think pre{white-space:pre-wrap;word-break:break-word;color:#9aa4af;margin:6px 0;font:inherit}
-.ans{border-left-color:#3fb950}
-.ans pre{margin:0;white-space:pre-wrap;word-break:break-word;font:inherit}
-.ans img{max-width:100%;height:auto;border-radius:6px;margin:6px 0;display:block;background:#0d1117}
-.tool{font-size:12px;color:#d29922;white-space:pre-wrap;word-break:break-word}
-.tool.done{color:#3fb950}
-.tool .q{color:#8b949e}
-pre.code{background:#0d1117;border:1px solid #30363d;border-radius:6px;
+details.think summary{color:var(--muted);cursor:pointer}
+details.think pre{white-space:pre-wrap;word-break:break-word;color:var(--muted);margin:6px 0;font:inherit}
+.ans{border-left-color:var(--ok)}
+.ans img{max-width:100%;height:auto;border-radius:6px;margin:6px 0;display:block;background:var(--code)}
+.tool{font-size:12px;color:var(--warn);white-space:pre-wrap;word-break:break-word}
+.tool.done{color:var(--ok)}
+.tool .q{color:var(--muted)}
+pre.code{background:var(--code);border:1px solid var(--border);border-radius:6px;
          padding:8px;overflow-x:auto;white-space:pre}
-code.inl{background:#22272e;border-radius:3px;padding:0 3px}
-a{color:#58a6ff}
-</style></head><body>
+code.inl{background:var(--code);border:1px solid var(--border);border-radius:3px;padding:0 3px}
+a{color:var(--accent)}
+table{border-collapse:collapse;margin:6px 0}
+th,td{border:1px solid var(--border);padding:3px 8px;text-align:left}
+th{background:var(--code)}
+blockquote{margin:6px 0;padding:2px 10px;border-left:3px solid var(--muted);color:var(--muted)}
+hr{border:none;border-top:1px solid var(--border);margin:10px 0}
+ul,ol{margin:6px 0;padding-left:22px}
+</style></head><body class="__THEME__">
 <div id="top"><div id="dot"></div><span id="who">&#129302; Ботинок — зеркало</span><span id="sub"></span></div>
-<div id="out"><img id="logo" alt=""></div>
+<div id="out"><img id="logo" alt=""><div id="ver"></div><div id="histAnchor"></div></div>
 <script>
 "use strict";
 var out=document.getElementById('out'),dot=document.getElementById('dot'),sub=document.getElementById('sub');
@@ -72,45 +91,107 @@ logo.onerror=function(){logo.remove()};
 var TOK_RE=/\\[\\[image:([^\\|\\]]+)(?:\\|([^\\]]*))?\\]\\]/g;
 addEventListener('scroll',function(){stick=(innerHeight+scrollY)>=document.body.offsetHeight-140});
 function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
+function inline(s){
+  return s.replace(/`([^`\\n]+)`/g,function(m,c){return '<code class="inl">'+c+'</code>'})
+    .replace(/\\*\\*([^*\\n]+)\\*\\*/g,'<b>$1</b>')
+    .replace(/(^|[^*\\w])\\*([^*\\n]+)\\*/g,'$1<i>$2</i>')
+    .replace(/\\[([^\\]]+)\\]\\((https?:[^)\\s]+)\\)/g,'<a href="$2">$1</a>')
+    .replace(/(^|[^"'>=(])(https?:\\/\\/[^\\s<)]+)/g,'$1<a href="$2">$2</a>');
+}
+function isSep(cells){return cells.length>0&&cells.every(function(c){return /^:?-{2,}:?$/.test(c)})}
+function blocks(b){
+  var lines=b.split('\\n'),out2=[],para=[],list=null,table=null;
+  function flushP(){if(para.length){out2.push('<p>'+inline(para.join('\\n'))+'</p>');para=[]}}
+  function flushL(){if(list){out2.push('<'+list.t+'>'+list.items.map(function(x){return '<li>'+inline(x)+'</li>'}).join('')+'</'+list.t+'>');list=null}}
+  function flushT(){if(table){
+    if(table.length>1&&isSep(table[1])){
+      out2.push('<table><tr>'+table[0].map(function(c){return '<th>'+inline(c)+'</th>'}).join('')+'</tr>'+
+        table.slice(2).map(function(r){return '<tr>'+r.map(function(c){return '<td>'+inline(c)+'</td>'}).join('')+'</tr>'}).join('')+'</table>');
+    }else{table.forEach(function(r){para.push(r.join(' | '))});flushP();}
+    table=null;}}
+  function flushAll(){flushP();flushL();flushT()}
+  for(var i=0;i<lines.length;i++){
+    var ln=lines[i],m;
+    if(m=ln.match(/^(#{1,6}) +(.*)$/)){flushAll();var lv=Math.min(4,m[1].length);out2.push('<h'+lv+'>'+inline(m[2])+'</h'+lv+'>');}
+    else if(/^\\s*(-{3,}|\\*{3,})\\s*$/.test(ln)){flushAll();out2.push('<hr>')}
+    else if((m=ln.match(/^\\s*\\|(.+)\\|\\s*$/))&&(table!==null||/\\|\\s*:?-/.test(lines[i+1]||''))){flushP();flushL();if(!table)table=[];table.push(m[1].split('|').map(function(c){return c.trim()}));}
+    else if(m=ln.match(/^\\s*[-*\\u2022] +(.*)$/)){flushP();flushT();if(!list||list.t!=='ul'){flushL();list={t:'ul',items:[]}}list.items.push(m[1]);}
+    else if(m=ln.match(/^\\s*\\d+[.)] +(.*)$/)){flushP();flushT();if(!list||list.t!=='ol'){flushL();list={t:'ol',items:[]}}list.items.push(m[1]);}
+    else if(m=ln.match(/^&gt; ?(.*)$/)){flushAll();out2.push('<blockquote>'+inline(m[1])+'</blockquote>')}
+    else if(!ln.trim()){flushAll()}
+    else{flushL();flushT();para.push(ln)}
+  }
+  flushAll();
+  return out2.join('');
+}
 function md(s){
   var parts=esc(s).split('```'),h='';
   parts.forEach(function(b,i){
     if(i%2===1){h+='<pre class="code">'+b.replace(/^\\w*\\n/,'')+'</pre>';}
-    else{h+=b.replace(/`([^`\\n]+)`/g,function(m,c){return '<code class="inl">'+c+'</code>'})
-           .replace(/\\*\\*([^*\\n]+)\\*\\*/g,'<b>$1</b>')
-           .replace(/^#{1,6} +(.*)$/gm,'<b style="color:#58a6ff">$1</b>')
-           .replace(/(https?:\\/\\/[^\\s<]+)/g,'<a href="$1">$1</a>');}
+    else{h+=blocks(b);}
   });
   return h;
 }
 function rich(s){return md(s).replace(TOK_RE,function(m,id,alt){
-  return '\\n<img src="/img/'+encodeURIComponent(id)+'?tok='+encodeURIComponent(TOK)+'" alt="'+esc(alt||'image')+'" loading="lazy">\\n';});}
+  return '<img src="/img/'+encodeURIComponent(id)+'?tok='+encodeURIComponent(TOK)+'" alt="'+esc(alt||'image')+'" loading="lazy">';});}
 function el(tag,cls,parent){var e=document.createElement(tag);if(cls)e.className=cls;(parent||out).appendChild(e);return e}
-function turn(){if(!cur){cur={box:el('div','turnblk'),det:null,think:null,ans:null,pre:null,tools:{}};}return cur}
+function fmtT(ts){var d=new Date(ts*1000);return d.toLocaleDateString('ru-RU')+' '+d.toTimeString().slice(0,5)}
+var lastDate=null;
+function dateSep(ts){var d=new Date(ts*1000).toDateString();
+  if(d!==lastDate){lastDate=d;var s=el('div','datesep');s.textContent=new Date(ts*1000).toLocaleDateString('ru-RU',{day:'numeric',month:'long',year:'numeric'})}}
+function turn(){if(!cur){cur={box:el('div','turnblk'),det:null,think:null,ans:null,raw:'',last:0,tools:{}};}return cur}
 function render(ev){
-  if(ev.t==='hello'){sub.textContent=(ev.model?('модель: '+ev.model+' \\u00b7 '):'')+'сессия: '+(ev.session||'');}
-  else if(ev.t==='user'){cur=null;var u=el('div','blk user');u.innerHTML='<span class="h">\\ud83d\\udc64 User<\\/span>\\n'+rich(ev.text);}
-  else if(ev.t==='thought'){cur=null;var t=el('div','blk thought');t.innerHTML='<span class="h">\\ud83d\\udcad мысль</span>\\n'+rich(ev.text);}
+  if(ev.t==='hello'){sub.textContent=(ev.model?('модель: '+ev.model+' \\u00b7 '):'')+'сессия: '+(ev.session||'');
+    if(ev.version)document.getElementById('ver').textContent='Ботинок — версия '+ev.version;}
+  else if(ev.t==='user'||ev.t==='thought'){cur=null;if(ev.ts)dateSep(ev.ts);
+    var u=el('div','blk '+(ev.t==='user'?'user':'thought'));
+    u.innerHTML='<span class="h">'+(ev.t==='user'?'\\ud83d\\udc64 User':'\\ud83d\\udcad мысль')+'</span>'+
+      (ev.ts?' <span class="tm">'+fmtT(ev.ts)+'</span>':'')+'\\n'+rich(ev.text);}
   else if(ev.t==='thinking'){var c=turn();if(!c.det){c.det=el('details','think',c.box);c.det.open=true;var sm=document.createElement('summary');sm.textContent='\\ud83d\\udcad Размышление\\u2026';c.det.appendChild(sm);c.think=el('pre','',c.det);}c.think.textContent+=ev.text;}
-  else if(ev.t==='content'){var c2=turn();if(!c2.ans){c2.ans=el('div','blk ans',c2.box);c2.pre=el('pre','',c2.ans);c2.raw='';c2.last=0;}
+  else if(ev.t==='content'){var c2=turn();if(!c2.ans){c2.ans=el('div','blk ans',c2.box);}
     c2.raw+=ev.text;var now=Date.now();
-    if(now-c2.last>100){c2.last=now;c2.pre.innerHTML=rich(c2.raw);if(stick)scrollTo(0,document.body.scrollHeight);}}
+    if(now-c2.last>100){c2.last=now;c2.ans.innerHTML=rich(c2.raw);if(stick)scrollTo(0,document.body.scrollHeight);}}
   else if(ev.t==='tool'){var c3=turn();var l=c3.tools[ev.name];if(!l){l=el('div','tool',c3.box);c3.tools[ev.name]=l;}
     l.innerHTML='\\ud83d\\udd27 '+esc(ev.name)+(ev.status&&ev.status!=='running'?' \\u2713':'')+(ev.query?' <span class="q">'+esc(String(ev.query).slice(0,140)).replace(/\\n/g,' ')+'</span>':'');
     if(ev.status&&ev.status!=='running')l.classList.add('done');}
   else if(ev.t==='log'){var lg=el('div','log');lg.textContent=ev.text;}
-  else if(ev.t==='turn_end'){var c5=turn();if(c5.pre&&c5.raw)c5.pre.innerHTML=rich(c5.raw);
+  else if(ev.t==='theme'){document.body.className=ev.name||'night';}
+  else if(ev.t==='turn_end'){var c5=turn();
+    if(c5.ans&&c5.raw){c5.ans.innerHTML=rich(c5.raw);c5.raw+='\\n\\n';}
     if(c5.det)c5.det.remove();
-    if(!c5.ans&&!Object.keys(c5.tools).length&&!(c5.det&&c5.det.parentNode))c5.box.remove();cur=null;}
+    if(!c5.ans&&!Object.keys(c5.tools).length&&!(c5.det&&c5.det.parentNode)){c5.box.remove();cur=null;}}
   if(stick)scrollTo(0,document.body.scrollHeight);
 }
 function connect(){
-  var tok=(new URLSearchParams(location.search)).get('tok')||'';
-  var es=new EventSource('events'+(tok?'?tok='+encodeURIComponent(tok):''));
+  var es=new EventSource('events'+(TOK?'?tok='+encodeURIComponent(TOK):''));
   es.onopen=function(){dot.classList.add('ok')};
   es.onmessage=function(e){try{render(JSON.parse(e.data))}catch(_){}};
   es.onerror=function(){dot.classList.remove('ok')};
 }
+// Ленивая история: страницы до histAnchor, живые события — после него.
+// Кнопки нет: подход к верху сам догружает следующую порцию.
+var anchor=document.getElementById('histAnchor');
+var histCursor=-1,histLoading=false,HIST_PAGE=300;
+function loadOlder(){
+  if(histLoading||histCursor===0)return;
+  histLoading=true;
+  fetch('/history?before='+histCursor+'&limit='+HIST_PAGE+'&tok='+encodeURIComponent(TOK))
+   .then(function(r){return r.json()})
+   .then(function(d){
+     histLoading=false;histCursor=d.cursor;
+     var frag=document.createElement('div'),pv=out;out=frag;cur=null;
+     d.events.forEach(function(e){try{render(e)}catch(_){}});
+     cur=null;out=pv;
+     var top0=document.documentElement.scrollHeight;
+     out.insertBefore(frag,anchor);
+     var dh=document.documentElement.scrollHeight-top0;
+     scrollBy(0,dh);
+     if(d.cursor>0&&dh<1000)loadOlder();
+   })
+   .catch(function(){histLoading=false});
+}
+addEventListener('scroll',function(){if(scrollY<800)loadOlder()});
+loadOlder();
 connect();
 </script></body></html>
 """
@@ -120,11 +201,15 @@ class WebMirror:
     """HTTP+SSE сервер зеркала. Запуск/остановка — из event loop приложения."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 0, on_change=None,
-                 resolve_image=None, logo_path: str = ""):
+                 resolve_image=None, logo_path: str = "", theme: str = "night",
+                 history_provider=None):
         self.host = host
         self.port = port
         self.token = secrets.token_urlsafe(6)
         self.url = ""
+        # Тема страницы — та же, что выбрана в TUI (night/day/evening);
+        # смена темы в TUI доходит до клиентов событием {t:"theme"}.
+        self.theme = theme if theme in ("night", "day", "evening") else "night"
         # Вызывается из event loop при подключении/отключении браузера:
         # on_change(len(self._queues)) — для индикатора клиентов в шапке.
         self._on_change = on_change
@@ -133,6 +218,9 @@ class WebMirror:
         self._resolve_image = resolve_image
         # Приветственный логотип на странице (assets/logo.png).
         self._logo_path = logo_path
+        # history_provider(before, limit) -> (events, cursor) — ленивые
+        # страницы истории сессии; cursor 0 означает «старше ничего нет».
+        self._history_provider = history_provider
         self._server = None
         self._writers = set()
         self._queues = set()
@@ -259,12 +347,15 @@ class WebMirror:
         route = urlsplit(path).path
         if route in ("/", "/index.html"):
             await self._send(writer, "200 OK", "text/html; charset=utf-8",
-                             _PAGE.encode(),
+                             _PAGE.replace("__THEME__", self.theme).encode(),
                              extra=f"Set-Cookie: {_COOKIE_NAME}={self.token}; Path=/; "
                                    f"HttpOnly; SameSite=Lax\r\nCache-Control: no-store\r\n")
             return
         if route == "/events":
             await self._sse(reader, writer)
+            return
+        if route == "/history":
+            await self._history(writer, urlsplit(path).query)
             return
         if route.startswith("/img/"):
             await self._image(writer, unquote(route[len("/img/"):]))
@@ -284,6 +375,27 @@ class WebMirror:
                 await self._send(writer, "404 Not Found", "text/plain; charset=utf-8", b"")
             return
         await self._send(writer, "404 Not Found", "text/plain; charset=utf-8", b"")
+
+    async def _history(self, writer, query: str) -> None:
+        if self._history_provider is None:
+            await self._send(writer, "200 OK", "application/json; charset=utf-8",
+                             b'{"events": [], "cursor": 0}',
+                             extra="Cache-Control: no-store\r\n")
+            return
+        qs = parse_qs(query)
+        try:
+            before = int((qs.get("before") or ["-1"])[0])
+            limit = min(max(int((qs.get("limit") or ["30"])[0]), 1), 300)
+        except ValueError:
+            before, limit = -1, 30
+        try:
+            events, cursor = self._history_provider(before, limit)
+        except Exception:
+            events, cursor = [], 0
+        body = json.dumps({"events": list(events), "cursor": cursor},
+                          ensure_ascii=False).encode()
+        await self._send(writer, "200 OK", "application/json; charset=utf-8", body,
+                         extra="Cache-Control: no-store\r\n")
 
     async def _image(self, writer, image_id: str) -> None:
         if not _IMG_ID_RE.fullmatch(image_id) or self._resolve_image is None:

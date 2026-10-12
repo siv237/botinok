@@ -193,6 +193,64 @@ async def main() -> int:
     m5.close_sync()
     os.unlink(lp)
 
+    # тема страницы и версия
+    m6 = WebMirror(theme="day")
+    await m6.start()
+    r, w = await asyncio.open_connection(m6.host, m6._server.sockets[0].getsockname()[1])
+    w.write(f"GET /?tok={m6.token} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+    _, _, body = await http_get(r, w)
+    w.close()
+    check('страница в теме day', b'<body class="day">' in body)
+    check("__THEME__ подставлен", b"__THEME__" not in body)
+    m7 = WebMirror(theme="зловред")
+    check("неизвестная тема → night", m7.theme == "night")
+    m7.publish({"t": "hello", "version": "0.5"})
+    m6.publish({"t": "hello", "version": "0.5"})
+    r, w = await asyncio.open_connection(m6.host, m6._server.sockets[0].getsockname()[1])
+    w.write(f"GET /events?tok={m6.token} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+    head = b""
+    while b"\r\n\r\n" not in head:
+        head += await r.read(4096)
+    evs, _ = await read_sse_events(r, 1, head.split(b"\r\n\r\n", 1)[1])
+    w.close()
+    check("hello с версией", evs and evs[0].get("version") == "0.5")
+    m6.close_sync()
+
+    # ленивая история: страницы и курсор
+    groups = [[{"t": "user", "text": "m1"}, {"t": "turn_end", "tools": []}],
+              [{"t": "user", "text": "m2"}],
+              [{"t": "user", "text": "m3"}]]
+
+    def prov(before, limit):
+        total = len(groups)
+        end = total if before < 0 else max(0, min(before, total))
+        start = max(0, end - limit)
+        return [ev for g in groups[start:end] for ev in g], start
+
+    m8 = WebMirror(history_provider=prov)
+    await m8.start()
+    host8, port8 = m8.host, m8._server.sockets[0].getsockname()[1]
+
+    async def get8(path):
+        r, w = await asyncio.open_connection(host8, port8)
+        w.write(f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+        st, _, bd = await http_get(r, w)
+        w.close()
+        return st, json.loads(bd.decode())
+
+    st, d = await get8(f"/history?limit=1&tok={m8.token}")
+    check("последняя страница истории", "200" in st and d["cursor"] == 2
+          and [e.get("text") for e in d["events"]] == ["m3"], str(d))
+    st, d = await get8(f"/history?before=2&limit=2&tok={m8.token}")
+    check("страница старше, курсор 0", d["cursor"] == 0
+          and [e.get("text") for e in d["events"] if e["t"] == "user"] == ["m1", "m2"], str(d))
+    r, w = await asyncio.open_connection(host8, port8)
+    w.write(b"GET /history HTTP/1.1\r\nHost: x\r\n\r\n")
+    st, _, _ = await http_get(r, w)
+    w.close()
+    check("history без токена — 403", "403" in st, st)
+    m8.close_sync()
+
     print(f"\n{'ВСЕ ТЕСТЫ ПРОЙДЕНЫ' if not FAILURES else 'ПРОВАЛЫ: ' + ', '.join(FAILURES)}")
     return 1 if FAILURES else 0
 
