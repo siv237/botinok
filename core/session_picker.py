@@ -205,7 +205,7 @@ def _relative_time(timestamp) -> str:
         if diff < 86400:
             return f"{int(diff / 3600)} час назад"
         if diff < 604800:
-            return f"{int(diff / 604800)} дн назад"
+            return f"{int(diff / 86400)} дн назад"
         return f"{int(diff / 604800)} нед назад"
     except Exception:
         return "нет данных"
