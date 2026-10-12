@@ -39,16 +39,16 @@ _NIGHT_VARS = {
     "flag-bg": "#cc8800",
     "flag-fg": "black",
     "hl": "#00ffff",
-    "ok": "green",
-    "warn": "yellow",
-    "err": "red",
+    "ok": "#3fb950",
+    "warn": "#e3b341",
+    "err": "#ff6b6b",
     "danger-bg": "red",
     "warn-bg": "yellow",
     "shell-bg": "#0c0c0c",
     "cmd-bg": "#0f0f0f",
     "cmd-fg": "#d0d0d0",
     "cmd-border": "#5f87af",
-    "pager-fg": "#6b8f9a",
+    "pager-fg": "#a0d6e6",
     "accent-fg": "black",
     # Цвет активной ссылки веб-зеркала в шапке: светлый, читается на hdr-bg.
     "web-on": "#4dff9e",
@@ -59,17 +59,17 @@ _DAY_VARS = {
     "hdr-fg": "#ffffff",
     "flag-bg": "#ffb300",
     "flag-fg": "#000000",
-    "hl": "#0677c9",
-    "ok": "#177a3d",
-    "warn": "#a06800",
-    "err": "#c02d2d",
+    "hl": "#0565aa",
+    "ok": "#167239",
+    "warn": "#895900",
+    "err": "#bb2c2c",
     "danger-bg": "#c02d2d",
     "warn-bg": "#ffd75f",
     "shell-bg": "#fafafa",
     "cmd-bg": "#f0f0f0",
     "cmd-fg": "#1a1a1a",
     "cmd-border": "#7fa6c9",
-    "pager-fg": "#5a7a8a",
+    "pager-fg": "#dceefb",
     "accent-fg": "#ffffff",
     "web-on": "#c9ffd9",
 }
@@ -77,7 +77,7 @@ _DAY_VARS = {
 _EVENING_VARS = {
     "hdr-bg": "#08406f",
     "hdr-fg": "#eaf6ff",
-    "flag-bg": "#2b7bb8",
+    "flag-bg": "#2872ab",
     "flag-fg": "#eaf6ff",
     "hl": "#7ec8ff",
     "ok": "#5fd68f",
@@ -89,7 +89,7 @@ _EVENING_VARS = {
     "cmd-bg": "#0d2b45",
     "cmd-fg": "#d6ecff",
     "cmd-border": "#4a90c4",
-    "pager-fg": "#6fa8cc",
+    "pager-fg": "#76b3d9",
     "accent-fg": "#062033",
     "web-on": "#5fd68f",
 }
@@ -111,9 +111,9 @@ def build_themes() -> dict:
         surface="#f2f2f2",
         panel="#e2e2e2",
         foreground="#111111",
-        success="#177a3d",
-        warning="#a06800",
-        error="#c02d2d",
+        success="#167239",
+        warning="#895900",
+        error="#bb2c2c",
         variables=dict(_DAY_VARS),
     )
 
@@ -214,6 +214,73 @@ THEME_BTN_CSS = """
 """
 
 
+# Активная тема процесса — для адаптации rich-разметки (имена цветов в
+# разметке не знают про темы: cyan на белой теме нечитаем).
+ACTIVE_THEME = DEFAULT_THEME
+
+# Имена цветов rich → читаемые на фоне темы (для каждой своя таблица:
+# стандартные ANSI cyan/yellow/red/green на тёмном фоне слишком тёмные,
+# на белом — слишком светлые). Порог контраста WCAG AA 4.5:1 проверяется
+# тестом tests/test_theme_contrast.py.
+_MARKUP_COLORS = {
+    "night": {
+        "cyan": "#00ffff", "bright_cyan": "#00ffff",
+        "blue": "#4aa8e8", "bright_blue": "#7ec8ff",
+        "magenta": "#d2a8ff", "bright_magenta": "#d2a8ff",
+        "yellow": "#ffd75f", "bright_yellow": "#ffd75f",
+        "green": "#3fb950", "bright_green": "#5fd68f",
+        "red": "#ff6b6b", "bright_red": "#ff6b6b",
+    },
+    "day": {
+        "cyan": "#0565aa", "bright_cyan": "#0565aa",
+        "bright_blue": "#1a62bc",
+        "magenta": "#8b2bb8", "bright_magenta": "#8b2bb8",
+        "yellow": "#895900", "bright_yellow": "#895900",
+        "green": "#167239", "bright_green": "#167239",
+        "bright_red": "#bb2c2c",
+    },
+    "evening": {
+        "cyan": "#7ec8ff", "bright_cyan": "#7ec8ff",
+        "blue": "#4aa8e8", "bright_blue": "#7ec8ff",
+        "magenta": "#d2a8ff", "bright_magenta": "#d2a8ff",
+        "yellow": "#ffd75f", "bright_yellow": "#ffd75f",
+        "green": "#5fd68f", "bright_green": "#5fd68f",
+        "red": "#ff7b7b", "bright_red": "#ff7b7b",
+    },
+}
+
+_TAG_RE = re.compile(r"\[(/?)([a-zA-Z0-9_# ]+)\]")
+
+
+def set_active_theme(name: str) -> None:
+    global ACTIVE_THEME
+    if name in THEME_ORDER:
+        ACTIVE_THEME = name
+
+
+def markup_colors(theme: str = "") -> dict:
+    return _MARKUP_COLORS.get(theme or ACTIVE_THEME, {})
+
+
+def adapt_markup(text: str) -> str:
+    """Заменить имена цветов rich на читаемые для активной темы.
+
+    Стилевые слова (bold, dim…) целы; неперечисленные имена не трогаются.
+    """
+    cmap = markup_colors()
+    if not text or not cmap:
+        return text
+
+    def _sub(m):
+        slash, body = m.group(1), m.group(2)
+        words = body.split()
+        if not any(w in cmap for w in words):
+            return m.group(0)
+        return "[" + slash + " ".join(cmap.get(w, w) for w in words) + "]"
+
+    return _TAG_RE.sub(_sub, text)
+
+
 class ThemedAppMixin:
     """Подключает темы к любому Textual App: регистрация, глобальный выбор,
     иконка-цикл в левом верхнем углу (make_theme_btn в compose), персист."""
@@ -260,6 +327,7 @@ class ThemedAppMixin:
                 pass
 
     def watch_theme(self, old_theme: str, new_theme: str) -> None:
+        set_active_theme(new_theme)
         try:
             nxt = next_theme(new_theme)
             targets = []

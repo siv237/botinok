@@ -100,7 +100,7 @@ class _SessionActions(ModalScreen):
 
     CSS = """
     _SessionActions { align: center middle; }
-    #pk_actions { width: 70%; height: auto; border: solid cyan; padding: 1 2;
+    #pk_actions { width: 70%; height: auto; border: solid $hl; padding: 1 2;
                   background: $surface; }
     #pk_stats_title { height: auto; padding: 0 0 1 0; }
     #pk_stats { height: auto; padding: 0 0 1 0; }
@@ -238,8 +238,9 @@ class _MenuScreen(Screen):
         yield self.app.make_theme_btn()
         with Vertical(id="pk_menu_box"):
             yield Static(
-                "[bold cyan]Старт BOTINOK: выбрать сессию[/bold cyan]\n"
-                "[dim]↑↓ — выбор · Enter — открыть · Esc — отмена[/dim]",
+                botinok_themes.adapt_markup(
+                    "[bold cyan]Старт BOTINOK: выбрать сессию[/bold cyan]\n"
+                    "[dim]↑↓ — выбор · Enter — открыть · Esc — отмена[/dim]"),
                 id="pk_menu_title",
             )
             yield OptionList(id="pk_menu")
@@ -272,7 +273,7 @@ class _NamePrompt(ModalScreen):
 
     CSS = """
     _NamePrompt { align: center middle; }
-    #pk_name_box { width: 60%; height: auto; border: solid cyan; padding: 1 2;
+    #pk_name_box { width: 60%; height: auto; border: solid $hl; padding: 1 2;
                    background: $surface; }
     #pk_name_buttons { height: auto; align-horizontal: right; }
     #pk_name_buttons Button { margin-left: 2; }
@@ -378,9 +379,10 @@ class _ListScreen(Screen):
         yield self.app.make_theme_btn()
         with Vertical(id="pk_list_box"):
             yield Static(
-                "[bold cyan]Выбор сессии[/bold cyan]\n"
-                "[dim]↑↓ — выбор · Enter — открыть · ввод — фильтр · "
-                "ⓘ — действия · 0 — новая · Esc — назад[/dim]",
+                botinok_themes.adapt_markup(
+                    "[bold cyan]Выбор сессии[/bold cyan]\n"
+                    "[dim]↑↓ — выбор · Enter — открыть · ввод — фильтр · "
+                    "ⓘ — действия · 0 — новая · Esc — назад[/dim]"),
                 id="pk_list_title",
             )
             with Horizontal(id="pk_filter_row"):

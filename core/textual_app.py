@@ -6,7 +6,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import (Input, Static, Collapsible, OptionList, Button,
+from textual.widgets import (Input, Static as _TextualStatic, Collapsible, OptionList, Button,
                              Markdown, ProgressBar, TextArea, Checkbox, Label)
 from textual.widgets._progress_bar import Bar, ETAStatus
 from textual.reactive import reactive
@@ -42,6 +42,25 @@ import time
 import threading
 from datetime import datetime
 _SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+class Static(_TextualStatic):
+    """Textual Static, адаптирующий rich-разметку под активную тему.
+
+    Теним оригинал на уровне модуля: ANY Static(...) / .update(...) в этом
+    файле получает WCAG-цвета темы автоматически — новые места не смогут
+    «проскочить» (жёлтая версия на белом фоне в баннере именно так и
+    проскакивала)."""
+
+    def __init__(self, content="", **kwargs):
+        if isinstance(content, str) and kwargs.get("markup", True):
+            content = botinok_themes.adapt_markup(content)
+        super().__init__(content, **kwargs)
+
+    def update(self, content="", **kwargs):
+        if isinstance(content, str) and kwargs.get("markup", True):
+            content = botinok_themes.adapt_markup(content)
+        return super().update(content, **kwargs)
 
 
 def filter_mouse_motion(data):
@@ -186,7 +205,7 @@ class ReasoningScreen(ModalScreen):
         return opts
 
     def compose(self) -> ComposeResult:
-        head = "[bold cyan]🧠 Рассуждение (reasoning)[/bold cyan]\n"
+        head = botinok_themes.adapt_markup("[bold cyan]🧠 Рассуждение (reasoning)[/bold cyan]\n")
         if self.probing:
             head += "[dim]Определяю поддержку у API…[/dim]\n"
         head += "[dim]↑↓ — выбор · Enter — применить · esc — отменить[/dim]"
@@ -255,7 +274,7 @@ class ModelScreen(ModalScreen):
         return opts
 
     def compose(self) -> ComposeResult:
-        head = "[bold cyan]📦 Модель этого сервера[/bold cyan]\n"
+        head = botinok_themes.adapt_markup("[bold cyan]📦 Модель этого сервера[/bold cyan]\n")
         if self.loading:
             head += "[dim]Загружаю список с сервера…[/dim]\n"
         head += "[dim]↑↓ — выбор · Enter — применить · esc — отменить[/dim]"
@@ -337,7 +356,7 @@ class CtxScreen(ModalScreen):
         return opts
 
     def compose(self) -> ComposeResult:
-        head = "[bold cyan]📐 Размер контекста[/bold cyan]\n"
+        head = botinok_themes.adapt_markup("[bold cyan]📐 Размер контекста[/bold cyan]\n")
         head += ("[dim]↑↓ — выбор · Enter — применить · esc — отменить[/dim]")
         yield Static(head, id="ctx_head")
         self._options = OptionList(*self._build_options(), id="ctx_options")
@@ -483,7 +502,8 @@ class ConfirmationScreen(ModalScreen):
             if self._body is not None:
                 self._body.update(
                     getattr(self._body, "content", "")
-                    + "\n[bold cyan]Причина отказа (Enter — отправить, esc — просто отменить):[/bold cyan]")
+                    + botinok_themes.adapt_markup(
+                        "\n[bold cyan]Причина отказа (Enter — отправить, esc — просто отменить):[/bold cyan]"))
             reason_input = Input(placeholder="причина отказа...", id="reason_input")
             self.mount(reason_input)
             reason_input.focus()
@@ -566,7 +586,7 @@ class StopInterruptScreen(ModalScreen):
                     f"[dim]{self._dur(started)}[/dim]")
             if detail:
                 line += f" [dim]{self._esc(detail[:70])}[/dim]"
-            lines.append(line)
+            lines.append(botinok_themes.adapt_markup(line))
         tools_text = "\n".join(lines) if lines else "[dim]инструменты уже завершились[/dim]"
         with Vertical(id="stop_box"):
             yield Static("[bold red]⏹ Работают инструменты[/bold red]")
@@ -789,7 +809,8 @@ class ConfirmInline(Vertical):
             if self._body is not None:
                 self._body.update(
                     getattr(self._body, "content", "")
-                    + "\n[bold cyan]Причина отказа (Enter — отправить, esc — просто отменить):[/bold cyan]")
+                    + botinok_themes.adapt_markup(
+                        "\n[bold cyan]Причина отказа (Enter — отправить, esc — просто отменить):[/bold cyan]"))
             reason_input = Input(placeholder="причина отказа...", id="inline_confirm_reason")
             self.mount(reason_input)
             reason_input.focus()
@@ -1340,6 +1361,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         # вариационные селекторы/ZWJ/табы не сдвигали границы панелей.
         if isinstance(content, str):
             content = normalize_cells(content)
+            if markup:
+                content = botinok_themes.adapt_markup(content)
         s = Static(content, markup=markup)
         dst = target if target is not None else (self._render_target or self.chat)
         dst.mount(s)
@@ -2056,7 +2079,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
 
         if self._shells_title_widget is None:
             self._shells_title_widget = Static(
-                "[bold cyan]Терминалы[/bold cyan]", id="shells_title")
+                botinok_themes.adapt_markup("[bold cyan]Терминалы[/bold cyan]"), id="shells_title")
             try:
                 self.shells_display.mount(self._shells_title_widget)
             except Exception:
@@ -2390,8 +2413,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         is_thought = entry.get("kind") == "thought"
         label = "💭 Мысль: " if is_thought else "📝 Запрос: "
         color = "magenta" if is_thought else "cyan"
-        prefix = f"[dim]{head} · {rel}  [/dim][{color}]{label}[/{color}]"
-        body = f"[{color}]{self._rich_escape(text)}[/{color}]"
+        prefix = self._mk(f"[dim]{head} · {rel}  [/dim][{color}]{label}[/{color}]")
+        body = self._mk(f"[{color}]{self._rich_escape(text)}[/{color}]")
         return prefix, body
 
     def _update_diag(self) -> None:
@@ -2413,9 +2436,9 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                 latest_text = self._rich_escape(
                     cell_truncate(str(latest['text']).replace("\n", " "), budget))
                 if is_thought:
-                    self.diag.title = f"[bold magenta]💭 Мысль:[/bold magenta] [dim]{latest_text}[/dim]"
+                    self.diag.title = self._mk(f"[bold magenta]💭 Мысль:[/bold magenta] [dim]{latest_text}[/dim]")
                 else:
-                    self.diag.title = f"[bold cyan]📝 Запрос:[/bold cyan] [dim]{latest_text}[/dim]"
+                    self.diag.title = self._mk(f"[bold cyan]📝 Запрос:[/bold cyan] [dim]{latest_text}[/dim]")
             except Exception:
                 pass
         else:
@@ -2707,7 +2730,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         text = "\n".join(lines)
         need_layout = (len(lines) != getattr(self, "_stats_lines", -1))
         self._stats_lines = len(lines)
-        self.stats_rows.update(text, layout=need_layout)
+        self.stats_rows.update(self._mk(text), layout=need_layout)
         if self.ctx_bar:
             try:
                 # Полоса как прежде: тонкий ProgressBar с цветовыми классами.
@@ -2750,7 +2773,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         result = self._rich_escape(t.get("result", ""))
         if result:
             lines += ["", "[bold cyan]Результат:[/bold cyan]", result]
-        return "\n".join(lines)
+        return botinok_themes.adapt_markup("\n".join(lines))
 
     def _tools_panel_width(self) -> int:
         """Внутренняя ширина панели инструментов (для прижатия к правому краю)."""
@@ -4218,12 +4241,12 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             title = f"[dim]{started}[/dim]{sep}[cyan]{self._rich_escape(name)}[/cyan]{sep}[{ss}]{status}[/{ss}]"
             if state:
                 title += f"{sep}[dim]{self._rich_escape(self._truncate(state, 40))}[/dim]"
-            return title
+            return self._mk(title)
 
         # Сколько места осталось под имя + «состояние».
         budget = W - len(left_base) - len(right_base)
         if budget < 4:
-            return f"[dim]{started}[/dim]{sep}[cyan]{self._rich_escape(self._truncate(name, max(3, W - len(left_base) - len(right_base))))}[/cyan]{sep}[{ss}]{status}[/{ss}]"
+            return self._mk(f"[dim]{started}[/dim]{sep}[cyan]{self._rich_escape(self._truncate(name, max(3, W - len(left_base) - len(right_base))))}[/cyan]{sep}[{ss}]{status}[/{ss}]")
 
         gap = 2
         # Сначала ужимаем «состояние» (минимум ~6 символов), потом имя —
@@ -4248,7 +4271,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         else:
             title = (f"[dim]{started}[/dim]{sep}[cyan]{self._rich_escape(name)}[/cyan]"
                      f"{sep}[{ss}]{status}[/{ss}]")
-        return title
+        return self._mk(title)
 
     def flush_tool_buffer(self) -> None:
         stopped = self._stop_requested
@@ -4306,6 +4329,10 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             self.chat.remove_children()
 
     # ── Веб-зеркало: тумблер в шапке, read-only поток событий в браузер ────
+
+    def _mk(self, text: str) -> str:
+        """Rich-разметка, адаптированная под активную тему (WCAG-цвета)."""
+        return botinok_themes.adapt_markup(text)
 
     def _mirror_emit(self, **ev) -> None:
         m = self.mirror

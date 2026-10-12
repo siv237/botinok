@@ -25,13 +25,13 @@ _PAGE = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Ботинок — зеркало</title>
 <style>
-body{--bg:#0e1116;--panel:#161b22;--text:#d8dee4;--muted:#8b949e;--accent:#2f81f7;
+body{--bg:#0e1116;--panel:#161b22;--text:#d8dee4;--muted:#8b949e;--accent:#58a6ff;
      --ok:#3fb950;--warn:#d29922;--err:#e5534b;--border:#30363d;--code:#0d1117;
      --user:#132133;--think:#14181d;color-scheme:dark;
      margin:0;background:var(--bg);color:var(--text);
      font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 body.day{--bg:#ffffff;--panel:#f6f8fa;--text:#1f2328;--muted:#59636e;--accent:#0969da;
-     --ok:#177a3d;--warn:#a06800;--err:#c02d2d;--border:#d0d7de;--code:#eff1f3;
+     --ok:#177a3d;--warn:#936000;--err:#c02d2d;--border:#d0d7de;--code:#eff1f3;
      --user:#ddf4ff;--think:#f6f8fa;color-scheme:light}
 body.evening{--bg:#0a2236;--panel:#0d2b45;--text:#d6ecff;--muted:#7fa8c4;--accent:#7ec8ff;
      --ok:#5fd68f;--warn:#ffd75f;--err:#ff7b7b;--border:#1d4e75;--code:#08192a;

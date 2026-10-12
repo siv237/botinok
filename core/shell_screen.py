@@ -27,8 +27,25 @@ from typing import Optional, Callable
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input
+from textual.widgets import Static as _TextualStatic
 from textual.widgets import RichLog
+
+from core import themes as botinok_themes
+
+
+class Static(_TextualStatic):
+    """Static с адаптацией rich-разметки под активную тему (WCAG-цвета)."""
+
+    def __init__(self, content="", **kwargs):
+        if isinstance(content, str) and kwargs.get("markup", True):
+            content = botinok_themes.adapt_markup(content)
+        super().__init__(content, **kwargs)
+
+    def update(self, content="", **kwargs):
+        if isinstance(content, str) and kwargs.get("markup", True):
+            content = botinok_themes.adapt_markup(content)
+        return super().update(content, **kwargs)
 
 def _markup_escape(text) -> str:
     """Экран для markup-парсера Textual: любой «[» — начало тега.
