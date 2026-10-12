@@ -30,6 +30,7 @@ from core.openai_compat import (get_reasoning_effort, probe_reasoning_cached,
                                 reasoning_cache_key, load_cache_entry,
                                 save_cache_entry, classify_chat_models)
 from typing import Optional, Callable, List
+import asyncio
 import io
 import json
 import os
@@ -1009,6 +1010,12 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     .theme_btn { width: auto; height: 1; padding: 0 1; margin: 0; border: none;
                  background: transparent; color: $hdr-fg; }
     .theme_btn:hover { text-style: bold underline; }
+    /* Тумблер веб-зеркала в шапке: серый текст — выключено, яркий со ссылкой —
+       работает. Emoji-глиф терминал не красит, поэтому состояние — текстом. */
+    #web_btn { width: auto; height: 1; padding: 0 1; margin: 0; border: none;
+               background: transparent; color: $text-muted; }
+    #web_btn:hover { text-style: bold underline; }
+    #web_btn.on { color: $ok; text-style: bold; }
     /* Кнопка «открыть текст чата в терминале» — без фона, лёгкий акцент. */
     #chat_pager_btn { width: auto; height: 1; min-height: 1; max-height: 1; min-width: 0;
                      padding: 0 1; margin: 0 0 0 0; border: none;
@@ -1142,6 +1149,9 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self.header_display: Optional[Static] = None
         self.header_row: Optional[Horizontal] = None
         self.auto_flag: Optional[Static] = None
+        # Веб-зеркало (core/web_mirror): тумблер в шапке, сервер только чтение.
+        self.web_btn: Optional[Static] = None
+        self.mirror = None
         # SessionManager для чтения/записи ReasoningEffort (ставит интеграция).
         self.sm = None
         self.diag: Optional[Collapsible] = None
@@ -1615,6 +1625,13 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         # Одна иконка в левом верхнем углу: показывает СЛЕДУЮЩУЮ тему цикла,
         # клик — применить её.
         self.theme_btn = self.make_theme_btn()
+        # Состояние показывается текстом (emoji терминал не красит):
+        # выкл — серое «🌐 веб», вкл — зелёное «🌐 веб: <ссылка> · N».
+        self.web_btn = Static("🌐 веб", id="web_btn")
+        try:
+            self.web_btn.tooltip = "Веб-зеркало: клик — включить/выключить сервер только чтение на localhost"
+        except Exception:
+            pass
         self.chat_pager_btn = Button(">_", id="chat_pager_btn")
         try:
             self.chat_pager_btn.tooltip = "Открыть чат в терминале (F6)"
@@ -1622,6 +1639,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             pass
         with self.header_row:
             yield self.theme_btn
+            yield self.web_btn
             yield self.header_display
             yield self.auto_flag
         with Horizontal(id="main"):
@@ -3278,6 +3296,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
 
     def append_user_message(self, content: str) -> None:
         self._record_diag(str(content))
+        self._mirror_emit(t="user", text=str(content))
         ts = datetime.now().strftime("%H:%M:%S")
         self._add_static(f"[dim]━━━ {ts} ━━━[/dim]")
         self._add_static(f"[bold blue]User:[/bold blue] {self._rich_escape(str(content))}")
@@ -3291,6 +3310,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         if not text:
             return
         self._record_diag(text, kind="thought")
+        self._mirror_emit(t="thought", text=text)
         ts = datetime.now().strftime("%H:%M:%S")
         self._add_static(f"[dim]━━━ {ts} ━━━[/dim]")
         self._add_static(
@@ -3614,7 +3634,15 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         # Иконка темы обрабатывается в ThemedAppMixin.on_click (MRO).
         # Клик по флагу автосогласия в шапке — выключить его.
         try:
-            if getattr(event, "widget", None) is self.auto_flag and self.dangerous_auto_confirm:
+            if getattr(event, "widget", None) is self.web_btn:
+                # Переключает только клик по «🌐 веб»; клик по ссылке в шапке —
+                # ничего (там люди выделяют/открывают ссылку).
+                if self._web_btn_toggle_zone(getattr(event, "screen_x", None)
+                                             if getattr(event, "screen_x", None) is not None
+                                             else getattr(event, "x", None)):
+                    self._toggle_web_mirror()
+                event.stop()
+            elif getattr(event, "widget", None) is self.auto_flag and self.dangerous_auto_confirm:
                 self.dangerous_auto_confirm = False
                 self.append_log("[yellow]Автосогласие отключено.[/yellow]")
                 self._update_header()
@@ -3884,8 +3912,10 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             self._first_token_at = time.time()
         if thinking:
             self._stream_thinking += thinking
+            self._mirror_emit(t="thinking", text=thinking)
         if content:
             self._stream_content += content
+            self._mirror_emit(t="content", text=content)
         if tool_stream_json:
             self._last_tool_content = tool_stream_json
         # Троттлинг: не пересобираем ВЕСЬ накопленный текст на каждом чанке
@@ -3952,6 +3982,11 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             self.stream_static = None
 
         self._last_tool_content = ""
+        names = []
+        for tc in (tool_calls or []):
+            if isinstance(tc, dict):
+                names.append((tc.get("function") or {}).get("name") or tc.get("name") or "")
+        self._mirror_emit(t="turn_end", tools=[n for n in names if n])
 
     def append_tool_result(self, tool_name: str, result: str) -> None:
         # Сохраняем превью результата в карточку инструмента (раскрывается по клику).
@@ -3991,6 +4026,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     def add_tool_activity(self, name: str, query: str, status: str = "running", size_kb: float = 0) -> None:
         self.active_tools.append({"name": name, "query": query, "status": status, "size_kb": size_kb,
                                   "detail": "", "start_time": time.time(), "end_time": None})
+        self._mirror_emit(t="tool", name=name, query=query, status=status)
         self._tools_dirty = True
         self.update_stats_display()
 
@@ -4009,6 +4045,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                 if status != "running" and not t.get("end_time"):
                     t["end_time"] = time.time()
                 break
+        self._mirror_emit(t="tool", name=name, query=query, status=status)
         self._tools_dirty = True
         self.update_stats_display()
 
@@ -4254,6 +4291,10 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         # Текст лога приходит с rich-разметкой ([yellow]…[/yellow]) — не
         # экранируем скобки, иначе теги видны как обычный текст. Динамические
         # значения в этих строках экранируют вызывающие при необходимости.
+        try:
+            self._mirror_emit(t="log", text=Text.from_markup(str(text)).plain)
+        except Exception:
+            self._mirror_emit(t="log", text=str(text))
         if self.chat:
             self._add_static(text)
             self.chat.scroll_end(animate=False)
@@ -4261,6 +4302,158 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     def clear_log(self) -> None:
         if self.chat:
             self.chat.remove_children()
+
+    # ── Веб-зеркало: тумблер в шапке, read-only поток событий в браузер ────
+
+    def _mirror_emit(self, **ev) -> None:
+        m = self.mirror
+        if m is not None:
+            try:
+                m.publish(ev)
+            except Exception:
+                pass
+
+    def _web_btn_toggle_zone(self, screen_x) -> bool:
+        """Клик по кнопке зеркала: зона переключения — глиф и слово «веб»
+        (плюс паддинг), дальше идёт ссылка — её трогать не надо."""
+        try:
+            from rich.cells import cell_len
+            prefix = cell_len("🌐 веб") + 1  # паддинг слева
+            if screen_x is None or self.web_btn is None:
+                return True
+            x = screen_x - self.web_btn.region.x
+            return x <= prefix + 1
+        except Exception:
+            return True
+
+    def _render_web_btn(self, clients: int = 0, url: str = "") -> None:
+        """Текстовый тумблер: «🌐 веб» — выкл; «🌐 веб: <url> · N» — работает,
+        N подключённых браузеров."""
+        if self.web_btn is None:
+            return
+        label = "🌐 веб" + (f": {url}" if url else "") + (f" · {clients}" if clients > 0 else "")
+        try:
+            self.web_btn.update(label)
+        except Exception:
+            pass
+
+    def _on_mirror_clients(self, n: int) -> None:
+        if self.mirror is not None:
+            self._render_web_btn(n, self.mirror.url)
+
+    def _mirror_resolve_image(self, image_id: str):
+        """Файл картинки сессии по id маркера [[image:<id>]] — для /img/<id>."""
+        try:
+            from core import image_refs
+            path = image_refs.resolve(image_id, self.session_path)
+            if not path:
+                return None
+            import mimetypes
+            with open(path, "rb") as f:
+                data = f.read()
+            return data, (mimetypes.guess_type(path)[0] or "image/png")
+        except Exception:
+            return None
+
+    def _toggle_web_mirror(self) -> None:
+        if self.mirror is not None:
+            asyncio.create_task(self._stop_web_mirror())
+            return
+        from core.web_mirror import WebMirror
+        m = WebMirror(on_change=self._on_mirror_clients,
+                      resolve_image=self._mirror_resolve_image,
+                      logo_path=os.path.join(os.path.dirname(__file__), "..",
+                                             "assets", "logo.png"))
+        self.mirror = m
+        asyncio.create_task(self._start_web_mirror(m))
+
+    async def _start_web_mirror(self, m) -> None:
+        try:
+            await m.start()
+        except Exception as e:
+            if self.mirror is m:
+                self.mirror = None
+            self.append_log(f"[red]Веб-зеркало не запустилось: {e}[/red]")
+            return
+        if self.mirror is not m:  # остановили, пока стартовало
+            try:
+                await m.stop()
+            except Exception:
+                pass
+            return
+        try:
+            m.seed(self._mirror_history())
+        except Exception:
+            pass
+        if self.web_btn is not None:
+            self.web_btn.add_class("on")
+            try:
+                self.web_btn.tooltip = "Веб-зеркало работает: " + m.url + "\nклик — остановить"
+            except Exception:
+                pass
+        self._render_web_btn(m.clients, m.url)
+        m.publish({"t": "hello",
+                   "session": os.path.basename(self.session_path.rstrip("/\\")) if self.session_path else "",
+                   "model": self.model_name})
+        self.append_log(f"[green]Веб-зеркало:[/green] {m.url}")
+
+    async def _stop_web_mirror(self) -> None:
+        m = self.mirror
+        self.mirror = None
+        if m is not None:
+            try:
+                await m.stop()
+            except Exception:
+                pass
+        if self.web_btn is not None:
+            self.web_btn.remove_class("on")
+            try:
+                self.web_btn.tooltip = "Веб-зеркало: клик — включить/выключить сервер только чтение на localhost"
+            except Exception:
+                pass
+        self._render_web_btn(0)
+        self.append_log("[dim]Веб-зеркало остановлено.[/dim]")
+
+    def _mirror_history(self) -> list:
+        """Диалог сессии (messages.json) для буфера зеркала: кто открыл ссылку
+        позже — видит всю историю, а не только события с момента включения."""
+        ev = []
+        try:
+            with open(os.path.join(self.session_path, "messages.json"),
+                      encoding="utf-8") as f:
+                msgs = json.load(f).get("messages", [])
+        except Exception:
+            return ev
+        for msg in msgs:
+            role = msg.get("role")
+            if role == "user":
+                c = msg.get("content")
+                if isinstance(c, list):
+                    c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+                if isinstance(c, str) and c.strip():
+                    ev.append({"t": "user", "text": c})
+            elif role == "assistant":
+                th = msg.get("thinking") or ""
+                ct = msg.get("content") or ""
+                if th:
+                    ev.append({"t": "thinking", "text": th})
+                if ct:
+                    ev.append({"t": "content", "text": ct})
+                names = []
+                for tc in (msg.get("tool_calls") or []):
+                    if isinstance(tc, dict):
+                        names.append((tc.get("function") or {}).get("name") or tc.get("name") or "")
+                if th or ct or names:
+                    ev.append({"t": "turn_end", "tools": [n for n in names if n]})
+        return ev
+
+    def on_unmount(self) -> None:
+        try:
+            if self.mirror is not None:
+                self.mirror.close_sync()
+                self.mirror = None
+        except Exception:
+            pass
 
     def show_confirmation_prompt(self, tool_name: str, args_display: str, warn_text: str = "",
                                  kind: str = "confirm") -> None:

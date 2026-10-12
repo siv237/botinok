@@ -114,7 +114,7 @@ def _write_version_file(script_dir: str) -> None:
         return
     try:
         with open(os.path.join(script_dir, ".version"), "w", encoding="utf-8") as f:
-            f.write(f"0.4 | {info[0]} | {info[1]}\n")
+            f.write(f"0.5 | {info[0]} | {info[1]}\n")
     except Exception:
         pass
 
@@ -421,7 +421,7 @@ def _perform_update():
 
 # Получаем версию при запуске
 _COMMIT_DATE, _COMMIT_HASH = _get_version_info()
-_BOTINOK_VERSION = f"0.4 | {_COMMIT_DATE} | {_COMMIT_HASH}"
+_BOTINOK_VERSION = f"0.5 | {_COMMIT_DATE} | {_COMMIT_HASH}"
 
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
 OLLAMA_PS_URL = "http://localhost:11434/api/ps"
