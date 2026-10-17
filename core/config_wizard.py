@@ -301,22 +301,37 @@ class ConfigWizard:
                         entry['context'] = server_ctx
         return models
 
+    @staticmethod
+    def _net_error(exc):
+        """Короткое описание сетевой ошибки (таймаут/нет соединения/…) или
+        None, если ошибка не сетевая (например, TLS — у неё свой обработчик)."""
+        if isinstance(exc, requests.exceptions.SSLError):
+            return None
+        name = type(exc).__name__
+        if 'Timeout' in name:
+            return "таймаут"
+        if 'Connection' in name or 'Connect' in name:
+            return "нет соединения"
+        return "ошибка сети"
+
     def _probe_paths(self, paths, api_key, verify):
         """Перебирает адреса списка моделей. Возвращает
-        (models, api_base, cert_error) или (None, None, cert_error)."""
+        (models, api_base, cert_error, net_error)."""
         cert_error = None
+        net_error = None
         for path in paths:
             try:
                 got = self._get_models_json(path, api_key, verify)
             except Exception as e:
                 cert_error = cert_error or self._cert_error(e)
+                net_error = net_error or self._net_error(e)
                 continue
             if got is None:
                 continue
             models, api_base, headers = got
             return (self._classify(models, api_base, api_key, verify, headers),
-                    api_base, None)
-        return None, None, cert_error
+                    api_base, None, None)
+        return None, None, cert_error, net_error
 
     def check_openai(self, url, api_key="", verify=True):
         """Проверка КАНОНИЧЕСКОГО адреса, введённого пользователем.
@@ -327,17 +342,19 @@ class ConfigWizard:
         типовым паттернам (discover_model_endpoints), а затем — к выбору
         провайдера из базы (provider_registry).
 
-        Возвращает (success, list[dict], cert_error, api_base) — список моделей
-        вида {'id': str, 'context': int|None}. api_base — корень API (его и
-        нужно сохранять в BaseUrl: рантайм сам дописывает /v1). cert_error —
-        текст ошибки TLS-сертификата (иначе None).
+        Возвращает (success, list[dict], cert_error, api_base, net_error) —
+        список моделей вида {'id': str, 'context': int|None}. api_base — корень
+        API (его и нужно сохранять в BaseUrl: рантайм сам дописывает /v1).
+        cert_error — текст ошибки TLS-сертификата (иначе None). net_error —
+        «таймаут»/«нет соединения», если сервер вовсе не ответил (это не
+        «путь неверный» — стоит предложить повтор).
         """
         url, _ = self._normalize_url(url)
-        models, api_base, cert_error = self._probe_paths(
+        models, api_base, cert_error, net_error = self._probe_paths(
             self._canonical_model_urls(url), api_key, verify)
         if models is not None:
-            return True, models, None, api_base
-        return False, [], cert_error, None
+            return True, models, None, api_base, None
+        return False, [], cert_error, None, net_error
 
     def discover_model_endpoints(self, url, api_key="", verify=True):
         """Автопоиск: перебирает типовые точки входа (в т.ч. провайдерские
@@ -624,7 +641,7 @@ class ConfigWizard:
             return 'use' if ans else 'retry'
 
         while True:
-            success, models, cert_error, api_base = self.check_openai(
+            success, models, cert_error, api_base, net_error = self.check_openai(
                 url, api_key, verify=verify)
             if success:
                 if api_base and api_base.rstrip('/') != url.rstrip('/'):
@@ -645,6 +662,15 @@ class ConfigWizard:
                     verify = False
                     continue
             else:
+                if net_error:
+                    # Сервер вовсе не ответил (таймаут/нет соединения) — это
+                    # не «путь неверный»: предлагаем повторить, а не гадать.
+                    out(f"✗ Сервер не ответил по адресу {url} ({net_error}).")
+                    again = textual_confirm("Повторить проверку?", default=True)
+                    if again is None:
+                        return None
+                    if again:
+                        continue
                 out(f"✗ По адресу {url} список моделей не найден.")
                 out("  Авто-корректор: подбираю точку входа по типовым "
                     "паттернам (/v1/models, /models, /inference/v1/models …)")

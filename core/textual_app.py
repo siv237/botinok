@@ -906,6 +906,17 @@ class Composer(TextArea):
             event.prevent_default()
             self.insert("\n")
             return
+        if key == "ctrl+r":
+            # Ускорение повтора при сбое связи (пока Composer держит фокус).
+            event.stop()
+            event.prevent_default()
+            app = self.app
+            if getattr(app, "turn_in_progress", lambda: False)():
+                try:
+                    app.request_retry()
+                except Exception:
+                    pass
+            return
         if key == "escape":
             event.stop()
             event.prevent_default()
@@ -1114,6 +1125,7 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     #shells Static.stamp { width: auto; height: 1; padding: 0 1; color: $text-muted; }
     #shells Button.kill { width: 3; min-width: 3; text-align: center;
                           content-align: center middle; }
+    #retry_btn { display: none; color: $warn; text-style: bold; padding: 0 1; }
     #stats { height: auto; border: round $warn; border-title-color: $warn;
              border-title-style: bold; padding: 0 1; }
     #stats_rows { height: auto; }
@@ -1235,6 +1247,12 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self._stop_requested = False
         self._stop_logged = False
         self._stop_dialog_open = False
+        # Ожидание повтора после сбоя связи: агент сам переждёт (анти-флуд),
+        # но человек может ускорить повтор кликом по кнопке или Ctrl+R.
+        self._force_retry = False
+        self._retry_pending = False
+        self._retry_deadline = 0.0
+        self._retry_shown_sec = None
         self._user_scrolled_away = False
         self._last_scroll_y: Optional[float] = None
         self._queued_inputs: List[str] = []
@@ -1661,10 +1679,17 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             self.chat_pager_btn.tooltip = "Открыть чат в терминале (F6)"
         except Exception:
             pass
+        # Кнопка ускорения повтора — видна только во время ожидания сервера.
+        self.retry_btn = Static("", id="retry_btn")
+        try:
+            self.retry_btn.tooltip = "Связь нестабильна: клик — повторить сейчас"
+        except Exception:
+            pass
         with self.header_row:
             yield self.theme_btn
             yield self.web_btn
             yield self.header_display
+            yield self.retry_btn
             yield self.auto_flag
         with Horizontal(id="main"):
             self.content_container = Vertical(id="content")
@@ -1901,6 +1926,20 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
 
     def _tick_stats(self) -> None:
         now = time.time()
+        # Кнопка ускорения повтора: показываем обратный отсчёт, пока ждём сервер.
+        try:
+            if self._retry_pending:
+                left = max(0, int(self._retry_deadline - now + 0.999))
+                if left != self._retry_shown_sec:
+                    self._retry_shown_sec = left
+                    self.retry_btn.update(
+                        f"⏳ повтор через {left} с — клик, чтобы сейчас")
+                    self.retry_btn.styles.display = "block"
+            elif self._retry_shown_sec is not None:
+                self._retry_shown_sec = None
+                self.retry_btn.styles.display = "none"
+        except Exception:
+            pass
         # Диалог остановки больше не нужен, если ход уже завершился сам.
         if self._stop_dialog_open and not self.turn_in_progress():
             self._dismiss_stop_dialog()
@@ -3517,6 +3556,17 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         if _pc is not None:
             _pc.signal_stop()
 
+    def request_retry(self) -> None:
+        """Ускорить повтор вручную (клик по кнопке ожидания или Ctrl+R).
+
+        Автоповтор с адаптивной паузой — для работы без присмотра; человек
+        может прервать ожидание и повторить запрос немедленно."""
+        self._force_retry = True
+        try:
+            self.append_log("[dim]⏭ Повтор по запросу пользователя…[/dim]")
+        except Exception:
+            pass
+
     def turn_in_progress(self) -> bool:
         """Идёт ли ход: стрим модели ИЛИ работающий инструмент.
 
@@ -3595,6 +3645,9 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         if event.key == "escape" and self.turn_in_progress():
             self.handle_escape()
             event.stop()
+        elif event.key == "ctrl+r" and self.turn_in_progress():
+            self.request_retry()
+            event.stop()
 
     def on_mouse_down(self, event) -> None:
         # Средняя кнопка = вставка primary selection. При включённом mouse-tracking
@@ -3665,6 +3718,10 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                                              if getattr(event, "screen_x", None) is not None
                                              else getattr(event, "x", None)):
                     self._toggle_web_mirror()
+                event.stop()
+            elif getattr(event, "widget", None) is getattr(self, "retry_btn", None):
+                # Клик по кнопке ожидания — повторить запрос немедленно.
+                self.request_retry()
                 event.stop()
             elif getattr(event, "widget", None) is self.auto_flag and self.dangerous_auto_confirm:
                 self.dangerous_auto_confirm = False

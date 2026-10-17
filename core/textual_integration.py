@@ -736,6 +736,19 @@ def _extract_api_error(data) -> str:
     return "Неизвестная ошибка сервера"
 
 
+def _format_api_error(status, error_msg, error_text="", server_label="") -> str:
+    """Разборчивый блок ошибки API для чата и истории (без спама)."""
+    head = f"⚠ Ошибка API: HTTP {status}"
+    if server_label:
+        head += f" ({server_label})"
+    lines = [head, str(error_msg or "Неизвестная ошибка сервера")]
+    body = (error_text or "").strip()
+    if body and body != str(error_msg).strip():
+        lines.append("")
+        lines.append(body[:2000])
+    return "\n".join(lines)
+
+
 # HTTP-коды, при которых имеет смысл держать сессию и ждать сервер
 # (перегрузка, загрузка модели, временная недоступность), а не сдаваться.
 TRANSIENT_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
@@ -743,6 +756,21 @@ TRANSIENT_HTTP_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 def _is_transient_http(code: int) -> bool:
     return int(code) in TRANSIENT_HTTP_CODES
+
+
+# Коды, которые тоже пережидаем: проблемы ключа/лимита (401/403) и прочая
+# нестабильность — ход не прерываем, а держим сессию с паузой: ключи и
+# лимиты пополняются, агент должен дождаться и продолжить.
+RETRYABLE_EXTRA_HTTP_CODES = frozenset({401, 403})
+
+
+def _is_retryable_http(code: int) -> bool:
+    """Коды, которые лечатся ожиданием и повтором."""
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return False
+    return code in TRANSIENT_HTTP_CODES or code in RETRYABLE_EXTRA_HTTP_CODES
 
 
 def _call_ui_result(app, fn, *args, **kwargs):
@@ -1635,17 +1663,30 @@ def ask_ollama_textual(
             if not error_logged:
                 _write_log(f"[red]{reason}[/red]")
                 error_logged = True
-            delay = min(max_backoff, 2 ** min(http_retries, 6))
-            _update_stats(retries=http_retries, retry_wait=retry_waited,
-                          status="Connecting...")
-            end = time.time() + delay
-            while time.time() < end:
-                if getattr(app, "_stop_requested", False):
-                    return False
-                time.sleep(0.2)
-                retry_waited += 0.2
-                _update_stats(retry_wait=retry_waited)
-            return True
+            # Адаптивная пауза: первая попытка — сразу, дальше 2, 4, 8 … с
+            # потолком max_backoff (не спамим сервер, но и не ждём зря).
+            delay = 0 if http_retries <= 1 else \
+                min(max_backoff, 2 ** min(http_retries - 1, 6))
+            # Сообщаем UI, что ждём повтор: человек может ускорить (клик/Ctrl+R).
+            app._force_retry = False
+            app._retry_pending = True
+            app._retry_deadline = time.time() + delay
+            try:
+                _update_stats(retries=http_retries, retry_wait=retry_waited,
+                              status="Connecting...")
+                end = time.time() + delay
+                while time.time() < end:
+                    if getattr(app, "_stop_requested", False):
+                        return False
+                    if getattr(app, "_force_retry", False):
+                        app._force_retry = False
+                        return True
+                    time.sleep(0.2)
+                    retry_waited += 0.2
+                    _update_stats(retry_wait=retry_waited)
+                return True
+            finally:
+                app._retry_pending = False
 
         changed_project_files = []
         start_time = time.time()
@@ -1797,10 +1838,15 @@ def ask_ollama_textual(
                 # отдал заголовки, Esc возвращает управление сразу.
                 response, _req_status = _post_stream_interruptible(app, _do_request)
             except Exception as e:
-                if _try_hold(f"Ошибка связи с {server_label}: {e}"):
+                reason = (f"⚠ Ошибка связи с {server_label}: "
+                          f"{type(e).__name__}: {e}")
+                if _try_hold(reason):
                     continue
-                _persist_connection_failure(
-                    f"Не удалось подключиться к {server_label} ({e}).", user_text)
+                try:
+                    _call_from_thread(app.append_log, f"[red]{reason}[/red]")
+                except Exception:
+                    pass
+                _persist_connection_failure(reason, user_text)
                 break
 
             if _req_status == "stopped":
@@ -1837,14 +1883,6 @@ def ask_ollama_textual(
                     _update_stats(status="Chat-only mode (no tools)")
                     continue
 
-                if _is_transient_http(response.status_code) and _try_hold(
-                        f"{server_label} вернул {response.status_code}: {error_msg}"):
-                    continue
-
-                if not error_logged:
-                    _write_log(f"[red]{server_label} вернул {response.status_code}: {error_msg}[/red]")
-                    error_logged = True
-
                 # Проблема с API-ключом: показываем окошко ввода (со ссылкой на
                 # выдачу ключа), сохраняем в персональный конфиг и повторяем ход.
                 if is_auth_error(response.status_code, f"{error_msg} {error_text}") \
@@ -1870,6 +1908,24 @@ def ask_ollama_textual(
                                 app.append_log,
                                 f"[red]Не удалось сохранить API-ключ: {e}[/red]")
 
+                # Нестабильная связь не должна прерывать работу: пережидаемые
+                # коды держим с растущей паузой в пределах бюджета времени.
+                if _is_retryable_http(response.status_code) and _try_hold(
+                        f"{server_label} вернул {response.status_code}: {error_msg}"):
+                    continue
+
+                formatted = _format_api_error(
+                    response.status_code, error_msg, error_text, server_label)
+                if not error_logged:
+                    _write_log(f"[red]{formatted}[/red]")
+                    error_logged = True
+                # Ошибка всегда уходит в чат (форматированно) и в историю —
+                # чтобы разбирать сбои по контексту, а не только в артефакте.
+                try:
+                    _call_from_thread(app.append_log, f"[red]{formatted}[/red]")
+                except Exception:
+                    pass
+
                 ts = int(time.time())
                 try:
                     sm.save_artifact(
@@ -1880,8 +1936,7 @@ def ask_ollama_textual(
                 except Exception:
                     pass
 
-                _persist_connection_failure(
-                    f"{server_label} вернул ошибку {response.status_code}: {error_msg}", user_text)
+                _persist_connection_failure(formatted, user_text)
                 break
 
             full_response = ""

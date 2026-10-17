@@ -36,6 +36,22 @@ def main() -> int:
     for code in (400, 401, 403, 404, 422):
         check(f"permanent_{code}", not ti._is_transient_http(code))
 
+    # Пережидаемые (лечатся повтором): транзиентные + проблемы ключа/лимита
+    # (401/403), но не клиентские вроде 400/404/422.
+    for code in (408, 429, 500, 502, 503, 504, 401, 403):
+        check(f"retryable_{code}", ti._is_retryable_http(code))
+    for code in (400, 404, 422):
+        check(f"not_retryable_{code}", not ti._is_retryable_http(code))
+
+    # Форматированный блок ошибки для чата и истории.
+    block = ti._format_api_error(403, "Недоступно", '{"error":"x"}', "api.example.ai")
+    check("fmt_status", "HTTP 403" in block and "api.example.ai" in block, block)
+    check("fmt_message", "Недоступно" in block, block)
+    check("fmt_body", '{"error":"x"}' in block, block)
+    check("fmt_no_dupe_body",
+          ti._format_api_error(500, "boom", "boom") ==
+          "⚠ Ошибка API: HTTP 500\nboom")
+
     # Разбор текста ошибки в разных форматах.
     check("err_flat", ti._extract_api_error({"error": "model not found"}) == "model not found")
     check("err_nested", ti._extract_api_error(

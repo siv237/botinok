@@ -72,7 +72,7 @@ def test_check_openai(monkey=getattr(cw, "requests", requests)):
     cw.requests = R
     w = object.__new__(ConfigWizard)
     try:
-        ok, models, cert, base = w.check_openai("https://gw.test", "sk-1")
+        ok, models, cert, base, _ = w.check_openai("https://gw.test", "sk-1")
         check("успех с ключом", ok and cert is None)
         check("корень API — адрес как есть", base == "https://gw.test", str(base))
         ids = [m['id'] for m in models]
@@ -83,8 +83,28 @@ def test_check_openai(monkey=getattr(cw, "requests", requests)):
         check("без контекста — None", ctx["other-model"] is None)
         check("Bearer передан", served['headers'].get("Authorization") == "Bearer sk-1")
 
-        ok2, models2, _, _ = w.check_openai("https://gw.test", "")
+        ok2, models2, _, _, _ = w.check_openai("https://gw.test", "")
         check("без ключа — неуспех (401)", not ok2 and models2 == [])
+    finally:
+        cw.requests = real
+
+
+def test_check_openai_net_error():
+    """Сетевой сбой отличается от «путь неверный»: возвращается net_error."""
+    class R:
+        exceptions = requests.exceptions
+
+        @staticmethod
+        def get(url, timeout=None, verify=True, headers=None):
+            raise requests.exceptions.ConnectTimeout("boom")
+
+    real = cw.requests
+    cw.requests = R
+    w = object.__new__(ConfigWizard)
+    try:
+        ok, models, cert, base, err = w.check_openai("https://slow.test", "k")
+        check("нет ответа — неуспех", not ok and not models)
+        check("распознан таймаут", err == "таймаут", str(err))
     finally:
         cw.requests = real
 
@@ -146,6 +166,7 @@ def main() -> int:
     print("=" * 60)
     test_model_context()
     test_check_openai()
+    test_check_openai_net_error()
     test_url_smarts()
     test_discover_endpoints()
     print("-" * 60)

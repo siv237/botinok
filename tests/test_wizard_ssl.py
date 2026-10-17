@@ -104,9 +104,9 @@ def case_check_functions():
 
     seen.clear()
     install_ssl_stub(seen)
-    ok, models, cert_error, _ = w.check_openai("https://self-signed.local:11434", "k", verify=True)
+    ok, models, cert_error, _, _ = w.check_openai("https://self-signed.local:11434", "k", verify=True)
     check("check_openai: провал с cert_error", not ok and bool(cert_error))
-    ok, models, cert_error, _ = w.check_openai("https://self-signed.local:11434", "k", verify=False)
+    ok, models, cert_error, _, _ = w.check_openai("https://self-signed.local:11434", "k", verify=False)
     check("check_openai: успех без проверки", ok and models and cert_error is None)
     check("_is_https", w._is_https("HTTPS://x") and not w._is_https("http://x"))
     check("_cert_error: не SSL", w._cert_error(Exception("Connection refused")) is None)

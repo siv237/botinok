@@ -105,7 +105,7 @@ def test_question_mark_branch_no_registry_network():
     w, calls = make_wizard(ENTRIES, None)
     w._pick_provider = lambda: ENTRIES[0]['api']
     w.check_openai = lambda url, key="", verify=True: (
-        True, [{'id': 'm', 'context': None}], None, url)
+        True, [{'id': 'm', 'context': None}], None, url, None)
     # prompt: "?" -> затем адрес (пусто, берём подставленный из базы) -> ключ
     seen = []
     scripted([True], ["?", "", "k"], [], seen=seen)
