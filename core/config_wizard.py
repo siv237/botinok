@@ -1,3 +1,4 @@
+import re
 import requests
 import os
 
@@ -7,12 +8,23 @@ from core.openai_compat import (probe_reasoning, load_reasoning_cache,
                                 classify_chat_models)
 from core.session_manager import SessionManager
 from core import server_history
+from core import provider_registry
 from core.cli_io import out
 from core.textual_prompts import (textual_confirm, textual_prompt, textual_select,
                                   textual_select_grouped)
 
 BACKEND_OLLAMA = "ollama"
 BACKEND_OPENAI = "openai"
+
+# Типовые префиксы API перед /models. Провайдеры прячут инференс за
+# собственным путём (например Fireworks — /inference/v1). Порядок — от
+# самого частого к редкому.
+_MODEL_PREFIXES = ('/v1', '', '/inference/v1', '/inference',
+                   '/api/v1', '/openai/v1', '/compatible-mode/v1')
+# Хосты, для которых схема по умолчанию — http (локальная сеть).
+_LOCAL_HOST_RE = re.compile(r'^(localhost|127\.0\.0\.1|0\.0\.0\.0|::1)$')
+_PRIVATE_HOST_RE = re.compile(r'^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)')
+_SCHEME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://')
 
 
 class ConfigWizard:
@@ -70,22 +82,112 @@ class ConfigWizard:
         return False, [], cert_error
 
     @staticmethod
-    def _candidate_model_urls(url):
-        """Строит кандидатов на эндпоинт /v1/models, допуская как голый домен,
-        так и прямой путь с уже указанным /v1."""
-        base = url.rstrip('/')
-        candidates = []
-        if base.endswith('/v1'):
-            candidates.append(f"{base}/models")
-        candidates.append(f"{base}/v1/models")
-        candidates.append(f"{base}/models")
-        seen = set()
-        uniq = []
-        for c in candidates:
+    def _normalize_url(raw):
+        """Приводит введённый адрес к рабочему виду, не требуя от пользователя
+        идеальной записи: дописывает недостающую схему (https для публичных
+        хостов, http для локальных) и убирает хвостовые слэши.
+
+        Возвращает (url, была_ли_дописана_схема)."""
+        u = (raw or '').strip()
+        if not u:
+            return u, False
+        if _SCHEME_RE.match(u):
+            return u.rstrip('/'), False
+        host = u.split('/', 1)[0].rsplit('@', 1)[-1]
+        host = host.split(':', 1)[0].strip('[]').lower()
+        local = bool(_LOCAL_HOST_RE.match(host) or _PRIVATE_HOST_RE.match(host)
+                     or host.endswith('.local') or host.endswith('.localhost'))
+        scheme = 'http' if local else 'https'
+        return f"{scheme}://{u}".rstrip('/'), True
+
+    @staticmethod
+    def _split_pasted_url(raw):
+        """Разбирает вставленный адрес, который может быть не API-базой, а
+        страницей модели (https://host/models/<id>). Возвращает
+        (base_url, подсказка_имени_модели|None)."""
+        u, _ = ConfigWizard._normalize_url(raw)
+        m = re.match(r'^(https?://[^/]+)(/.*)?$', u)
+        if not m:
+            return u, None
+        host, path = m.group(1), (m.group(2) or '').rstrip('/')
+        mm = re.match(r'^/models/(.+)$', path)
+        if mm:
+            return host, mm.group(1)
+        return u, None
+
+    @staticmethod
+    def _canonical_model_urls(url):
+        """Самые вероятные точки входа для адреса КАК ЕГО ВВЁЛ пользователь:
+        {@base}/v1/models и {@base}/models, с учётом уже указанного /v1 или
+        полного пути до моделей/чата. Сначала — канонический вариант."""
+        base = (url or '').strip().rstrip('/')
+        for suffix in ('/chat/completions', '/completions'):
+            if base.endswith(suffix):
+                base = base[:-len(suffix)].rstrip('/')
+        out = []
+        if base.endswith('/models'):
+            out.append(base)
+        else:
+            if base.endswith('/v1'):
+                out.append(f"{base}/models")
+            out.append(f"{base}/v1/models")
+            out.append(f"{base}/models")
+        seen, uniq = set(), []
+        for c in out:
             if c not in seen:
                 uniq.append(c)
                 seen.add(c)
         return uniq
+
+    @staticmethod
+    def _candidate_model_urls(url):
+        """Строит кандидатов на эндпоинт /models по примерному адресу:
+        дописывает недостающие типовые префиксы API и убирает лишнее
+        (полный путь до моделей/чата, дублирующийся /v1)."""
+        base = (url or '').strip().rstrip('/')
+        for suffix in ('/chat/completions', '/completions'):
+            if base.endswith(suffix):
+                base = base[:-len(suffix)].rstrip('/')
+        roots = []
+        for r in ([base[:-len('/models')]] if base.endswith('/models') else []) + [base]:
+            r = r.rstrip('/')
+            if r and r not in roots:
+                roots.append(r)
+        if base.endswith('/v1'):
+            r = base[:-len('/v1')].rstrip('/')
+            if r and r not in roots:
+                roots.append(r)
+        out = []
+        for r in roots:
+            if r.endswith('/models'):
+                out.append(r)
+                continue
+            for pfx in _MODEL_PREFIXES:
+                # Не дублируем уже указанный префикс (…/v1/v1/models).
+                if pfx and r.endswith(pfx):
+                    continue
+                out.append(f"{r}{pfx}/models")
+        seen = set()
+        uniq = []
+        for c in out:
+            if c not in seen:
+                uniq.append(c)
+                seen.add(c)
+        return uniq
+
+    @staticmethod
+    def _api_base_from_models_url(models_url):
+        """Восстанавливает корень API из рабочего адреса списка моделей:
+        именно его сохраняем как BaseUrl, т.к. рантайм сам дописывает /v1.
+        Лишний /v1 и провайдерский префикс (например /inference) сохраняются."""
+        u = (models_url or '').rstrip('/')
+        for suffix in ('/v1/models', '/models'):
+            if u.endswith(suffix):
+                root = u[:-len(suffix)].rstrip('/')
+                if suffix == '/models' and root.endswith('/v1'):
+                    root = root[:-len('/v1')].rstrip('/')
+                return root or None
+        return None
 
     @staticmethod
     def _model_context(m):
@@ -162,50 +264,101 @@ class ConfigWizard:
                 continue
         return None
 
-    def check_openai(self, url, api_key="", verify=True):
-        """Проверка доступности OpenAI-совместимого API по указанному URL.
-
-        Пробует GET списка моделей (стандартный эндпоинт) по нескольким
-        возможным путям: {@base}/v1/models, {@base}/models, и с учётом
-        уже указанного пути /v1. Опционально передаёт Bearer-токен.
-
-        Возвращает (success, list[dict], cert_error) — список моделей вида
-        {'id': str, 'context': int|None}, где context — максимальный
-        контекст, сообщаемый провайдером (или None, если провайдер его
-        не отдаёт). Если ни у одной модели контекста нет, но сервер
-        отдаёт его через /props — подставляем серверное значение.
-        cert_error — текст ошибки TLS-сертификата, если соединение не
-        удалось именно из-за проверки сертификата (иначе None).
-        """
+    def _get_models_json(self, path, api_key, verify):
+        """GET одного адреса списка моделей. При рабочем эндпоинте
+        (200 + список data) возвращает (models, api_base, headers), иначе None.
+        Исключения (сеть, TLS) не глотает — их обрабатывает вызывающий."""
         headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
+        # (connect, read): битый хост отваливается быстро, а медленный, но
+        # живой провайдер успевает отдать список моделей.
+        response = requests.get(path, timeout=(5, 20), verify=verify, headers=headers)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        raw = data.get('data') if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            return None
+        api_base = self._api_base_from_models_url(path) or path
+        models = []
+        for m in raw:
+            mid = m.get('id') if isinstance(m, dict) else None
+            if mid:
+                models.append({'id': mid, 'context': self._model_context(m)})
+        return models, api_base, headers
+
+    def _classify(self, models, api_base, api_key, verify, headers):
+        """Отсеивает не-чат модели настоящим чат-запросом и подставляет
+        серверный контекст, если провайдер его не отдал."""
+        models = [e for e in
+                  classify_chat_models(BACKEND_OPENAI, api_base, api_key,
+                                       models, verify=verify)
+                  if e.get('chat', True)]
+        if models:
+            server_ctx = self._server_context(api_base, headers, verify=verify)
+            if server_ctx:
+                for entry in models:
+                    if not entry.get('context'):
+                        entry['context'] = server_ctx
+        return models
+
+    def _probe_paths(self, paths, api_key, verify):
+        """Перебирает адреса списка моделей. Возвращает
+        (models, api_base, cert_error) или (None, None, cert_error)."""
         cert_error = None
-        for path in self._candidate_model_urls(url):
+        for path in paths:
             try:
-                response = requests.get(path, timeout=5, verify=verify, headers=headers)
-                if response.status_code == 200:
-                    data = response.json()
-                    models = []
-                    for m in data.get('data', []):
-                        mid = m.get('id')
-                        if not mid:
-                            continue
-                        models.append({'id': mid, 'context': self._model_context(m)})
-                    # Классификация по фактическому типу: настоящим чат-запросом
-                    # (mode у прокси врёт), не-LLM в выбор не попадают.
-                    models = [e for e in
-                              classify_chat_models(BACKEND_OPENAI, url, api_key,
-                                                   models, verify=verify)
-                              if e.get('chat', True)]
-                    if models:
-                        server_ctx = self._server_context(url, headers, verify=verify)
-                        if server_ctx:
-                            for entry in models:
-                                if not entry.get('context'):
-                                    entry['context'] = server_ctx
-                    return True, models, None
+                got = self._get_models_json(path, api_key, verify)
             except Exception as e:
                 cert_error = cert_error or self._cert_error(e)
-        return False, [], cert_error
+                continue
+            if got is None:
+                continue
+            models, api_base, headers = got
+            return (self._classify(models, api_base, api_key, verify, headers),
+                    api_base, None)
+        return None, None, cert_error
+
+    def check_openai(self, url, api_key="", verify=True):
+        """Проверка КАНОНИЧЕСКОГО адреса, введённого пользователем.
+
+        Проверяются наиболее вероятные точки входа для адреса как он введён:
+        {@base}/v1/models и {@base}/models (с учётом уже указанного /v1).
+        Если ни одна не ответила — визард переходит к авто-корректору по
+        типовым паттернам (discover_model_endpoints), а затем — к выбору
+        провайдера из базы (provider_registry).
+
+        Возвращает (success, list[dict], cert_error, api_base) — список моделей
+        вида {'id': str, 'context': int|None}. api_base — корень API (его и
+        нужно сохранять в BaseUrl: рантайм сам дописывает /v1). cert_error —
+        текст ошибки TLS-сертификата (иначе None).
+        """
+        url, _ = self._normalize_url(url)
+        models, api_base, cert_error = self._probe_paths(
+            self._canonical_model_urls(url), api_key, verify)
+        if models is not None:
+            return True, models, None, api_base
+        return False, [], cert_error, None
+
+    def discover_model_endpoints(self, url, api_key="", verify=True):
+        """Автопоиск: перебирает типовые точки входа (в т.ч. провайдерские
+        префиксы /inference/v1, /api/v1 …) и возвращает ВСЕ рабочие:
+        list[(api_base, models)]. Нужен, когда канонический адрес не ответил —
+        визард покажет найденное пользователю."""
+        url, _ = self._normalize_url(url)
+        found, seen = [], set()
+        for path in self._candidate_model_urls(url):
+            try:
+                got = self._get_models_json(path, api_key, verify)
+            except Exception:
+                continue
+            if got is None:
+                continue
+            models, api_base, _ = got
+            if api_base in seen:
+                continue
+            seen.add(api_base)
+            found.append((api_base, models))
+        return found
 
     def _configure_reasoning(self, backend, chosen_model):
         """Шаг визарда: режим рассуждения. Быстрый путь — «по умолчанию
@@ -277,7 +430,7 @@ class ConfigWizard:
         out("\n1. Проверка Ollama API")
 
         base_verify = self.config.getboolean('Ollama', 'VerifySSL', fallback=True)
-        url = (preset or {}).get('url') or current_url
+        url, _ = self._normalize_url((preset or {}).get('url') or current_url)
         verify = base_verify
         models = []
         while True:
@@ -309,9 +462,10 @@ class ConfigWizard:
                 "Введите URL Ollama (например, http://localhost:11434)", default=url)
             if new_url is None:
                 return None
-            if new_url.strip() != url:
+            new_url, _ = self._normalize_url(new_url)
+            if new_url != url:
                 verify = base_verify
-            url = new_url.strip()
+            url = new_url or url
 
         self.config.set('Ollama', 'BaseUrl', url)
         server_history.record(self.sm, BACKEND_OLLAMA, url)
@@ -320,6 +474,58 @@ class ConfigWizard:
         # Ollama сам сообщает тип модели (capabilities) — эмбеддинги отсекаются.
         return [e for e in classify_chat_models(BACKEND_OLLAMA, url, '', entries)
                 if e.get('chat', True)]
+
+    def _pick_provider(self):
+        """Ветка визарда: выбрать провайдера из базы models.dev.
+
+        Даёт обновить список, показывает, когда база обновлена, и быстрый
+        поиск по имени/домену. Возвращает строку базового URL провайдера для
+        подстановки в ручной ввод (или None)."""
+        src = provider_registry.REGISTRY_URL
+        refresh_val = "__refresh__"
+        # В сеть — только по явному согласию: пока списка нет, показываем
+        # кнопку загрузки; иначе — список с полем-фильтром.
+        providers = provider_registry.load(self.sm)
+        if not providers:
+            out("  Локальная база провайдеров пуста.")
+            start = textual_select(
+                "База провайдеров не загружена",
+                [(f"⟳ Загрузить список из {src}", refresh_val)],
+                refresh_val)
+            if start != refresh_val:
+                return None
+            out(f"  Скачиваю список из {src}…")
+            providers = provider_registry.refresh(self.sm) or []
+            if not providers:
+                out("  Не удалось скачать — введите адрес вручную.")
+                return None
+        # Один экран: список провайдеров, а поле сверху — просто фильтр.
+        # Первым пунктом — обновление из источника.
+        while True:
+            age = provider_registry.age_text(self.sm)
+            out(f"  Источник: {src} — {len(providers)} провайдеров, "
+                f"обновлено {provider_registry.updated_date(self.sm)} ({age})")
+            options = [(f"⟳ Обновить список из {src}  (обновлён {age})",
+                        refresh_val)]
+            options += [(f"{e['name']}  —  {e['api']}", e['api'])
+                        for e in providers]
+            default = options[1][1] if len(options) > 1 else refresh_val
+            picked = textual_select(
+                f"Выберите провайдера — база обновлена {age} "
+                f"(поле сверху — фильтр по имени или домену)",
+                options, default, filterable=True)
+            if picked is None:
+                return None
+            if picked == refresh_val:
+                out(f"  Обновляю список из {src}…")
+                fresh = provider_registry.refresh(self.sm)
+                if fresh:
+                    providers = fresh
+                    out(f"  Готово: {len(providers)} провайдеров.")
+                else:
+                    out("  Не удалось обновить (нет сети?) — оставляю текущий список.")
+                continue
+            return picked
 
     def _configure_openai(self, preset=None):
         """Настройка подключения к OpenAI-совместимому API.
@@ -337,14 +543,36 @@ class ConfigWizard:
         current_key = ((preset or {}).get('api_key') or '').strip() or \
             self.config.get('Ollama', 'ApiKey', fallback='')
 
-        # 1. Сначала адрес (предзаполнен, можно изменить).
-        url = textual_prompt("Введите BaseUrl (например, http://localhost:8080)",
-                             default=current_url)
+        # 1. Сначала адрес (предзаполнен, можно изменить). От пользователя
+        # достаточно примерного адреса — схему и точку входа уточняем сами.
+        # Под полем — кнопка поиска по базе провайдеров (models.dev): на неё
+        # спускаются стрелкой «вниз», выбор подставляет адрес обратно в ввод.
+        def _prompt_url(message, default):
+            val = textual_prompt(
+                message, default=default,
+                buttons=[("🔎 Поиск по базе провайдеров (models.dev)", "?")])
+            if val is None:
+                return None
+            if val.strip() in ('?', '/find', 'find'):
+                picked = self._pick_provider()
+                return picked if picked else ''
+            return val
+
+        url = _prompt_url(
+            "Введите BaseUrl или ссылку на модель "
+            "(например, http://localhost:8080, api.fireworks.ai)",
+            current_url)
         if url is None:
             return None
-        url = url.strip().rstrip('/')
+        url, added_scheme = self._normalize_url(url)
         if not url:
             url = current_url
+        if added_scheme:
+            out(f"  Схема не указана — использую {url}")
+        url, model_hint = self._split_pasted_url(url)
+        if model_hint:
+            out(f"  Это похоже на страницу модели «{model_hint}» — "
+                f"проверю API хоста {url}")
 
         # 2. Потом API-ключ (пустая строка = пропустить).
         if current_key:
@@ -366,24 +594,47 @@ class ConfigWizard:
         elif self.config.has_option('Ollama', 'ApiKey'):
             self.config.remove_option('Ollama', 'ApiKey')
 
-        # 3. И только потом обязательная проверка списка моделей.
+        # 3. Проверка: сначала канонический адрес, при неудаче — авто-корректор
+        # по типовым паттернам (предлагает правильную строку), затем — выбор
+        # провайдера из базы models.dev.
         hint = " (без ключа)" if not api_key else ""
         base_verify = self.config.getboolean('Ollama', 'VerifySSL', fallback=True)
         verify = base_verify
+
+        def _with_hint(models):
+            """Добавляет имя модели из вставленной ссылки, если его нет."""
+            if not model_hint:
+                return models
+            ids = [m['id'] for m in models]
+            if any(model_hint == i or model_hint in i for i in ids):
+                return models
+            return [{'id': model_hint, 'context': None}] + list(models)
+
+        def _accept(models):
+            """Печатает результат и спрашивает подтверждение адреса.
+            Возвращает 'use' | 'retry' | None (отмена)."""
+            out(f"✓ Подключение установлено{hint}: {url}")
+            out(f"  Найдено моделей: {len(models)}")
+            if self._is_https(url):
+                out("🔒 Проверка SSL-сертификата включена" if verify
+                    else "⚠ SSL верификация отключена (небезопасно для продакшена)")
+            ans = textual_confirm("Использовать этот адрес сервера?", default=True)
+            if ans is None:
+                return None
+            return 'use' if ans else 'retry'
+
         while True:
-            success, models, cert_error = self.check_openai(url, api_key, verify=verify)
+            success, models, cert_error, api_base = self.check_openai(
+                url, api_key, verify=verify)
             if success:
-                out(f"✓ Подключение установлено{hint}: {url}")
-                out(f"  Найдено моделей: {len(models)}")
-                if self._is_https(url):
-                    if verify:
-                        out("🔒 Проверка SSL-сертификата включена")
-                    else:
-                        out("⚠ SSL верификация отключена (небезопасно для продакшена)")
-                use = textual_confirm("Использовать этот адрес сервера?", default=True)
-                if use is None:
+                if api_base and api_base.rstrip('/') != url.rstrip('/'):
+                    out(f"  Точка входа уточнена: {api_base}")
+                    url = api_base
+                models = _with_hint(models)
+                decision = _accept(models)
+                if decision is None:
                     return None
-                if use:
+                if decision == 'use':
                     self.config.set('Ollama', 'VerifySSL', 'true' if verify else 'false')
                     break
             elif cert_error:
@@ -394,29 +645,64 @@ class ConfigWizard:
                     verify = False
                     continue
             else:
-                out(f"✗ Не удалось получить список моделей{hint}: {url}")
-                # Типичная причина — гейтвей требует ключ, а он не введён.
-                if not api_key:
-                    add_key = textual_confirm(
-                        "Попробовать ввести API-ключ (гейтвей может требовать его)?",
-                        default=True)
-                    if add_key is None:
+                out(f"✗ По адресу {url} список моделей не найден.")
+                out("  Авто-корректор: подбираю точку входа по типовым "
+                    "паттернам (/v1/models, /models, /inference/v1/models …)")
+                found = self.discover_model_endpoints(url, api_key, verify=verify)
+                chosen = None
+                if len(found) == 1:
+                    chosen = found[0]
+                    out(f"  Подошёл адрес: {chosen[0]}")
+                elif len(found) > 1:
+                    options = [(f"{b}  —  {len(m)} моделей", b) for b, m in found]
+                    pick = textual_select("Найдено несколько точек входа — выберите",
+                                          options, found[0][0])
+                    if pick is None:
                         return None
-                    if add_key:
-                        k = textual_prompt("API-ключ (Bearer токен)", default="")
-                        if k is None:
+                    chosen = next((f for f in found if f[0] == pick), None)
+                if chosen:
+                    url = chosen[0]
+                    headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
+                    models = _with_hint(
+                        self._classify(chosen[1], url, api_key, verify, headers))
+                    decision = _accept(models)
+                    if decision is None:
+                        return None
+                    if decision == 'use':
+                        self.config.set('Ollama', 'VerifySSL',
+                                        'true' if verify else 'false')
+                        break
+                else:
+                    # Второй вариант — выбрать провайдера из базы (models.dev).
+                    if textual_confirm("Подобрать провайдера из базы (models.dev)?",
+                                       default=False):
+                        picked = self._pick_provider()
+                        if picked:
+                            url = picked
+                            out(f"  Адрес из базы: {url}")
+                            continue
+                    # Типичная причина — гейтвей требует ключ, а он не введён.
+                    if not api_key:
+                        add_key = textual_confirm(
+                            "Попробовать ввести API-ключ (гейтвей может требовать его)?",
+                            default=True)
+                        if add_key is None:
                             return None
-                        api_key = (k or "").strip()
-                        if api_key:
-                            self.config.set('Ollama', 'ApiKey', api_key)
-                            hint = ""
-                        continue
+                        if add_key:
+                            k = textual_prompt("API-ключ (Bearer токен)", default="")
+                            if k is None:
+                                return None
+                            api_key = (k or "").strip()
+                            if api_key:
+                                self.config.set('Ollama', 'ApiKey', api_key)
+                                hint = ""
+                            continue
 
-            new_url = textual_prompt("Введите BaseUrl (например, http://localhost:8080)",
-                                     default=url)
+            new_url = _prompt_url(
+                "Введите BaseUrl (например, http://localhost:8080)", url)
             if new_url is None:
                 return None
-            new_url = new_url.strip().rstrip('/')
+            new_url, _ = self._normalize_url(new_url)
             if not new_url:
                 new_url = current_url
             if new_url != url:
@@ -522,7 +808,8 @@ class ConfigWizard:
 
             model_choices = [(_model_label(m), m['id']) for m in models]
             chosen_model = textual_select("Выберите модель по умолчанию",
-                                          model_choices, default_model)
+                                          model_choices, default_model,
+                                          filterable=True)
             if chosen_model is None:
                 out("Настройка прервана.")
                 return

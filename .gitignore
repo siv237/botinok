@@ -43,6 +43,11 @@ logs/
 config.cfg
 .version
 
+# Local caches (user machine only)
+provider_registry.json
+server_history.json
+reasoning_cache.json
+
 # IDE
 .vscode/
 .idea/
