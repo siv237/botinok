@@ -269,9 +269,9 @@ class ConfigWizard:
         (200 + список data) возвращает (models, api_base, headers), иначе None.
         Исключения (сеть, TLS) не глотает — их обрабатывает вызывающий."""
         headers = {'Authorization': f'Bearer {api_key}'} if api_key else {}
-        # (connect, read): битый хост отваливается быстро, а медленный, но
-        # живой провайдер успевает отдать список моделей.
-        response = requests.get(path, timeout=(5, 20), verify=verify, headers=headers)
+        # 30 c: нестабильные/медленные провайдеры успевают отдать список моделей,
+        # а не падают в таймаут на ровном месте.
+        response = requests.get(path, timeout=30, verify=verify, headers=headers)
         if response.status_code != 200:
             return None
         data = response.json()
