@@ -64,6 +64,10 @@ DEDUP_TOOLS = ("file_system", "journal")
 SIGN_CHECKPOINT_REMINDER_PCT = 0.40
 MAX_TOOL_ROUNDS_PER_TURN = 80
 MAX_AUTO_RECOVERIES_PER_TURN = 2
+# Сколько раз за ход просить модель не повторяться, прежде чем завершить ход.
+# Память при этом НЕ стирается: полная очистка осталась только для реального
+# исчерпания контекста (HARD_CTX_PCT).
+MAX_REPETITION_RECOVERIES_PER_TURN = 2
 # Сколько раз подряд молча переспрашивать модель, если она вернула полностью
 # пустое завершение (нет content, thinking и tool_calls). Модели глючат и рвутся
 # — это штатная ситуация, из которой нужно выходить, а не молча гасить сессию.
@@ -1120,6 +1124,24 @@ def _compact_tool_message(tool_name, tool_args, result, artifact_path):
     return msg
 
 
+def _max_tool_rounds(sm) -> int:
+    """Предел раундов с инструментами в одном ходе ([Ollama] MaxToolRounds).
+
+    ``0`` — без предела. Достижение предела НЕ стирает память: ход просто
+    завершается (см. цикл хода), история остаётся целой. Полная очистка
+    осталась только для реального исчерпания контекста.
+    """
+    try:
+        value = sm.config.getint('Ollama', 'MaxToolRounds',
+                                 fallback=MAX_TOOL_ROUNDS_PER_TURN)
+    except Exception:
+        return MAX_TOOL_ROUNDS_PER_TURN
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return MAX_TOOL_ROUNDS_PER_TURN
+
+
 def _ollama_summarize_and_reset_context(
     sm, model, session_path, messages, num_ctx,
     reason, reserve_tokens=1600,
@@ -1622,6 +1644,8 @@ def ask_ollama_textual(
 
         tool_rounds = 0
         auto_recoveries = 0
+        repetition_hits = 0
+        max_rounds = _max_tool_rounds(sm)
         empty_retries = 0
         proof_rounds = 0
         sign_nudges = 0
@@ -1730,33 +1754,25 @@ def ask_ollama_textual(
             # текст раунда это лишь «эхо подписи», а не новый ответ.
             round_silent = sign_hidden or post_sign_silent
             post_sign_silent = False
-            if tool_rounds > MAX_TOOL_ROUNDS_PER_TURN:
-                if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
-                    summary, _ = _ollama_summarize_and_reset_context(
-                        sm, current_model, session_path, messages, current_ctx,
-                        reason=f"max_tool_rounds_exceeded({MAX_TOOL_ROUNDS_PER_TURN})_recoveries_exhausted({MAX_AUTO_RECOVERIES_PER_TURN})",
-                    )
-                    sm.update_context(session_path, "assistant", summary)
-                    messages.append({"role": "assistant", "content": summary})
-                    break
-
-                summary, artifact_path = _ollama_summarize_and_reset_context(
-                    sm, current_model, session_path, messages, current_ctx,
-                    reason=f"max_tool_rounds_exceeded({MAX_TOOL_ROUNDS_PER_TURN})",
-                )
-                auto_recoveries += 1
-                tool_rounds = 0
-                cont_user_content = sm.load_prompt(
-                    session_path, "auto_continue",
-                    LAST_USER_PROMPT=turn_prompt,
-                    SESSION_PATH=session_path,
-                    ARTIFACT_PATH=artifact_path,
-                )
-                cont_user = {"role": "user", "content": cont_user_content or f"Continue task: {turn_prompt[:100]}"}
-                messages.append(cont_user)
-                sm.update_context(session_path, "assistant", summary)
-                sm.update_context(session_path, "user", cont_user["content"])
-                continue
+            if max_rounds and tool_rounds > max_rounds:
+                # Предохранитель от зацикливания. Память НЕ стирается: при
+                # плавающем контексте (сотни тысяч токенов) 80 вызовов
+                # инструментов — норма длинной задачи, а не исчерпание
+                # контекста. Регрессия: на 80-м вызове сессия обнулялась
+                # целиком (messages.clear() + SESSION_PROTOCOL). Теперь ход
+                # просто завершается, история остаётся; предел настраивается
+                # ([Ollama] MaxToolRounds, 0 — без предела).
+                limit_note = sm.load_prompt(
+                    session_path, "tool_rounds_limit",
+                    LIMIT=str(max_rounds),
+                ) or (f"Достигнут предел раундов с инструментами ({max_rounds}) в одном ходе. "
+                      "Инструменты больше не вызывай: подведи итог сделанного и дай финальный ответ.")
+                messages.append({"role": "system", "content": limit_note})
+                sm.update_context(session_path, "system", limit_note)
+                _write_log(f"[yellow]🛑 Предел раундов инструментов ({max_rounds}) — ход завершён, "
+                           "память сохранена (лимит: config.cfg [Ollama] MaxToolRounds).[/yellow]")
+                _finalize_turn(full_response, full_thinking)
+                break
 
             if current_model and current_model not in _token_k_state["by_model"]:
                 restore_token_calibration(os.path.join(session_path, "performance.log"), current_model)
@@ -2305,33 +2321,21 @@ def ask_ollama_textual(
                 empty_retries = 0
 
             if _detect_repetition(full_response):
-                sm.update_context(session_path, "system", "Repetition detected, auto-continuing")
-                if auto_recoveries >= MAX_AUTO_RECOVERIES_PER_TURN:
-                    summary, _ = _ollama_summarize_and_reset_context(
-                        sm, current_model, session_path, messages, current_ctx,
-                        reason=f"repetition_detected_recoveries_exhausted({MAX_AUTO_RECOVERIES_PER_TURN})",
-                    )
-                    sm.update_context(session_path, "assistant", summary)
-                    messages.append({"role": "assistant", "content": summary})
-                    break
-
-                summary, artifact_path = _ollama_summarize_and_reset_context(
-                    sm, current_model, session_path, messages, current_ctx,
-                    reason="repetition_detected",
-                )
-                auto_recoveries += 1
-                tool_rounds = 0
-                cont_user_content = sm.load_prompt(
-                    session_path, "auto_continue",
-                    LAST_USER_PROMPT=turn_prompt,
-                    SESSION_PATH=session_path,
-                    ARTIFACT_PATH=artifact_path,
-                )
-                cont_user = {"role": "user", "content": cont_user_content or f"Continue task: {turn_prompt[:100]}"}
-                messages.append(cont_user)
-                sm.update_context(session_path, "assistant", summary)
-                sm.update_context(session_path, "user", cont_user["content"])
+                # Повтор в ответе — не повод стирать память (регрессия: сессия
+                # обнулялась). Просим не повторяться и завершить ход; если
+                # повторяется снова — ход заканчиваем, история цела.
+                repetition_hits += 1
+                rep_note = sm.load_prompt(session_path, "repetition_notice") or (
+                    "Ты повторяешь уже сказанное. Не повторяйся: продолжи с нового "
+                    "места или дай финальный ответ по существу.")
+                messages.append({"role": "system", "content": rep_note})
+                sm.update_context(session_path, "system", rep_note)
+                _write_log(f"[yellow]⚠ Повтор в ответе модели ({repetition_hits}) — "
+                           "прошу завершить ход без повторов, память сохранена.[/yellow]")
                 _finalize_turn(full_response, full_thinking)
+                if repetition_hits >= MAX_REPETITION_RECOVERIES_PER_TURN:
+                    break
+                auto_recoveries += 1
                 continue
 
             _flush_thinking_buf()

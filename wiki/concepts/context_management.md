@@ -30,7 +30,12 @@ status: stable
 2. один LLM-вызов (`num_predict=450`, промпты `context_overflow_summary/user.txt`) → проза `SESSION_PROTOCOL`;
 3. история = system + один протокол (`context_overflow_protocol.txt`); старые протоколы вытесняются (`OVERFLOW_PROTOCOL_MARKERS`, TI:313) — иначе копились сотни (регресс 2026-10-10).
 
-Триггеры (все — на стороне харнеса): `hard_ctx_threshold` = `prompt_eval_count+eval_count ≥ 0.90·num_ctx` (TI:1839); `repetition_detected` (`_detect_repetition`, TI:1805); `max_tool_rounds_exceeded` (80, TI:1292). Бюджет мягких продолжений: `MAX_AUTO_RECOVERIES_PER_TURN=2`, дальше `auto_continue.txt` вешается поверх.
+**Триггер ровно один** (2026-10-18): `hard_ctx_threshold` — `prompt_eval_count+eval_count ≥ 0.90·num_ctx`, то есть реальное исчерпание контекста. Бюджет мягких продолжений: `MAX_AUTO_RECOVERIES_PER_TURN=2`, дальше `auto_continue.txt` вешается поверх.
+
+Раньше big-bang вызывался ещё двумя поводами, **не связанными с объёмом контекста**, и стирал память на 80-м вызове инструментов в ходе (`max_tool_rounds_exceeded`) или на повторе в ответе (`repetition_detected`) — при плавающем контексте это чистый ущерб (регрессия: сессия обнулялась при заполнении на проценты). Теперь:
+* **предел раундов** (`MAX_TOOL_ROUNDS_PER_TURN=80`, настраивается `[Ollama] MaxToolRounds`, `0` — без предела) — ход завершается, история цела; в контекст добавляется system-пометка `prompts/tool_rounds_limit.txt`, модель просят подвести итог;
+* **повтор ответа** (`_detect_repetition`, `REPEAT_LINE_WINDOW=40`/`REPEAT_LINE_MIN_OCCURRENCES=6`) — просим не повторяться (`prompts/repetition_notice.txt`) до `MAX_REPETITION_RECOVERIES_PER_TURN=2`, затем ход завершается; память не стирается.
+`messages.clear()` остался ровно один — внутри `_ollama_summarize_and_reset_context`. Страж: `tests/test_turn_limits.py`.
 
 ## Pressure-инжект (модель видит надвигающееся)
 После каждого ответа: `set_context_pressure((prompt_eval+eval)/num_ctx, used, max)` (TI). При пересечении вверх 50%/70%/85% — ОДИН раз дописывается строка `CONTEXT_PRESSURE: контекст ~N% (used/max ток.) …` в конец `TOOL_RESULT_SUMMARY` (`PRESSURE_LEVELS`, TI): 50% — «планируй остаток (context_stats, разбивай, compact)», 70% — «сворачивай рассуждения», 85% — «завершай ход». Гистерезис: уровень объявляется раз до сброса (финальный ответ хода / reset).

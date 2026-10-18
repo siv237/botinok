@@ -219,6 +219,9 @@ DefaultModel = qwen3.5:4b
 DefaultContext = 16384
 RequestTimeout = 300
 VerifySSL = false
+; Предел вызовов инструментов в одном ходе. Достижение предела завершает ход,
+; НЕ стирая память. 0 — без предела.
+MaxToolRounds = 80
 
 [Storage]
 SessionsDir = ~/.botinok/sessions
