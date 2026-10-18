@@ -6,7 +6,7 @@
 - **Назначение:** Единый добыватель данных из сети
 - **Пакет:** `tools.web` · **Вход:** `execute` · **Алиасы:** нет
 - **Платформа передаёт в вызов:** `session_path`, `progress`
-- **Схема:** ручная, из [tool.json](./tool.json) (25 параметров)
+- **Схема:** ручная, из [tool.json](./tool.json) (26 параметров)
 - **Опасность:** session_output — запись вывода/скачанного файла вне папки сессии требует dangerous mode
 - **Always-on:** нет
 - **Тесты:** `tests/test_web_jobs.py`, `tests/test_web_kit.py`, `tests/test_web_mirror.py`, `tests/test_web_mirror_page.py`, `tests/test_web_progress.py`
@@ -26,6 +26,7 @@
 | `jq` | string | нет |
 | `output_path` | string | нет |
 | `resume` | boolean | нет |
+| `verify` | boolean | нет |
 | `expected_sha256` | string | нет |
 | `headers` | array | нет |
 | `timeout_sec` | integer | нет |

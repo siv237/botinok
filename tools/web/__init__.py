@@ -218,6 +218,8 @@ def _help() -> str:
         "    resume=true — докачать/перекачать; если файл уже цел — вернётся из памяти\n"
         "    expected_sha256=… — проверка хеша (при несовпадении файл удаляется)\n"
         "  web action=downloads                      — память загрузок: что/куда/целое\n"
+        "    verify=true — сверить sha256 файлов (потоком; долго на гигабайтах),\n"
+        "    без него проверка быстрая: наличие и размер против записанного\n"
         "  web action=search query=\"…\"               — поиск в интернете\n"
         "  web action=proxy [command=show|set|clear|test] — прокси (см. ниже)\n"
         "  web action=jobs                           — фоновые задачи: что готово/идёт\n"
@@ -941,8 +943,7 @@ def _do_download(url: str, output_path: Optional[str], headers, timeout_sec: int
     size = os.path.getsize(dest)
     sha = ""
     try:
-        with open(dest, "rb") as f:
-            sha = hashlib.sha256(f.read()).hexdigest()
+        sha = _sha256_file(dest)
     except Exception:
         pass
     if expected_sha256:
@@ -979,8 +980,14 @@ def _do_download(url: str, output_path: Optional[str], headers, timeout_sec: int
         "saved", advice, next_actions)
 
 
-def _action_downloads(session_path: Optional[str], limit: int = 50) -> str:
-    """История загрузок web (глобальная) + проверка наличия и типа файлов."""
+def _action_downloads(session_path: Optional[str], limit: int = 50,
+                      deep: bool = False) -> str:
+    """История загрузок web (глобальная) + проверка наличия и типа файлов.
+
+    По умолчанию проверка быстрая (наличие/размер) — sha256 гигабайтных
+    файлов не пересчитывается; `verify=true` включает глубокую сверку
+    (потоком) с кэшированием результата в истории.
+    """
     if not _dlm:
         return _finish("❌ Менеджер загрузок недоступен.", {}, "error", "", [])
     entries = _dlm.list_entries(session_path)
@@ -989,10 +996,13 @@ def _action_downloads(session_path: Optional[str], limit: int = 50) -> str:
                        "скачай что-нибудь через web action=download",
                        ['web action=download url="…"'])
     entries.sort(key=lambda e: e.get("updated", ""), reverse=True)
-    lines = [f"📥 История загрузок web ({len(entries)}):", ""]
+    mode = "sha256 сверяется" if deep else "быстрая проверка (без sha256)"
+    lines = [f"📥 История загрузок web ({len(entries)}, {mode}):", ""]
     pending = []
     for e in entries[:limit]:
-        ok, reason = _dlm.verify(e)
+        ok, reason = _dlm.verify(e, deep=deep)
+        if ok and deep:
+            _dlm.record_verification(session_path, e)
         exists = os.path.exists(e.get("dest") or "")
         ftype = _file_type(e["dest"]) if exists else "отсутствует"
         mark = "✅" if ok else ("⏳" if exists else "❌")
@@ -1009,9 +1019,12 @@ def _action_downloads(session_path: Optional[str], limit: int = 50) -> str:
     for e in pending[:5]:
         nxt.append(f'web action=download url="{e.get("url")}" '
                    f'output_path="{e.get("dest")}" resume=true')
+    if not deep:
+        nxt.append('web action=downloads verify=true   # сверить sha256 (долго на больших файлах)')
     if not pending:
         nxt.append("web action=help")
-    return _finish("\n".join(lines), {"action": "downloads", "count": len(entries)},
+    return _finish("\n".join(lines),
+                   {"action": "downloads", "count": len(entries), "sha_verified": deep},
                    "extracted",
                    f"незавершённых: {len(pending)} — докачай через resume=true", nxt)
 
@@ -2033,6 +2046,25 @@ def _action_job(job_id: Optional[str], command: Optional[str], wait: bool,
             + (job.result or "∅ (пустой результат)"))
 
 
+def _as_bool(value) -> bool:
+    """Булев аргумент из модели: 'false'/'0'/'no'/'нет' — это False, не True."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "да", "y", "t")
+    return bool(value)
+
+
+def _sha256_file(path: str, chunk: int = 1024 * 1024) -> str:
+    """sha256 файла потоком — не тянем гигабайты в память."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
 def execute(
     url: str = None,
     action: str = "auto",
@@ -2049,6 +2081,7 @@ def execute(
     max_items: int = 100,
     session_path: str = None,
     resume: bool = False,
+    verify: bool = False,
     expected_sha256: str = None,
     sha256: str = None,
     method: str = "GET",
@@ -2069,6 +2102,8 @@ def execute(
 ) -> str:
     """Единый вход web. См. action=help."""
     action = (action or "auto").strip().lower()
+    resume = _as_bool(resume)
+    verify = _as_bool(verify)
     aliases = {"get": "auto", "fetch": "auto", "read": "open", "text": "open",
                "links": "extract", "parse": "extract", "project": "json",
                "filter": "json", "save": "download", "find": "search",
@@ -2099,7 +2134,7 @@ def execute(
                    "proxy_clear": "clear", "proxy_test": "test"}.get(raw_action, "show")
         return _action_proxy(sub, proxy, no_proxy, scope, url, session_path)
     if action == "downloads":
-        return _action_downloads(session_path)
+        return _action_downloads(session_path, deep=bool(verify))
     # Фоновый запуск: сетевое действие уходит в тред, агент получает job_id сразу.
     bg_on = str(background).strip().lower() in ("1", "true", "yes", "on", "да") if not isinstance(background, bool) else background
     if bg_on and action in BACKGROUNDABLE:

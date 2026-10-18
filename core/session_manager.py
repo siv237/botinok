@@ -619,7 +619,13 @@ class SessionManager:
             f.write(footer)
 
     def log_tool_call(self, session_path, tool_name, arguments, result, status="success", call_id=None):
-        """Записывает подробный лог вызова инструмента в отдельный файл."""
+        """Записывает подробный лог вызова инструмента в отдельный файл.
+
+        Аргументы и результат попадают в лог с замаскированными секретами
+        (токены в заголовках Authorization/Cookie и т.п.): лог читается
+        агентом через session_memory и не должен хранить чужие ключи открыто.
+        """
+        from core.redact import redact
         tool_log_file = os.path.join(session_path, "tools.log")
         
         # Вычисляем размер результата в КБ
@@ -628,10 +634,10 @@ class SessionManager:
         entry = {
             "timestamp": datetime.now().isoformat(),
             "tool": tool_name,
-            "arguments": arguments,
+            "arguments": redact(arguments),
             "status": status,
             "size_kb": round(result_size_kb, 2),
-            "full_result": str(result)
+            "full_result": redact(str(result))
         }
         if call_id:
             entry["call_id"] = call_id

@@ -83,6 +83,18 @@ def record(session_path: Optional[str], url: str, dest: Optional[str],
     })
     if "created" not in entry:
         entry["created"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    # Файл только что скачан и sha256 посчитан самим загрузчиком — это и есть
+    # глубокая проверка: кэшируем, чтобы `downloads verify=true` не хешировал
+    # свежую загрузку повторно.
+    if status == "completed" and dest:
+        try:
+            st = os.stat(dest)
+            entry["verified_size"] = st.st_size
+            entry["verified_mtime_ns"] = st.st_mtime_ns
+            entry["verified_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        except OSError:
+            entry.pop("verified_size", None)
+            entry.pop("verified_mtime_ns", None)
     data[key] = entry
     _save(session_path, data)
     return entry
@@ -97,8 +109,30 @@ def list_entries(session_path: Optional[str]) -> List[dict]:
     return list(_load(session_path).values())
 
 
-def verify(entry: dict) -> Tuple[bool, str]:
-    """Проверить, что файл на месте и не обрезан. -> (ok, причина)."""
+def sha256_file(path: str, chunk: int = 1024 * 1024) -> str:
+    """sha256 файла потоком (не тянем гигабайты в память)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def verify(entry: dict, deep: bool = False) -> Tuple[bool, str]:
+    """Проверить, что файл на месте и не обрезан. -> (ok, причина).
+
+    По умолчанию — быстрая проверка: наличие, непустой каталог, размер против
+    записанного `total`. sha256 **не** пересчитывается: в истории бывают файлы
+    на гигабайты (модели, ISO), и хеширование всей истории на каждый вызов
+    `web action=downloads` занимало минуты — выглядело как зависание.
+
+    `deep=True` — сверить sha256 (потоком, чанками). Успешная сверка
+    кэшируется в записи (`verified_size`/`verified_mtime_ns`): пока файл не
+    изменился, повторная глубокая проверка не хеширует его снова.
+    """
     dest = entry.get("dest")
     if not dest:
         return False, "не задан путь"
@@ -117,21 +151,49 @@ def verify(entry: dict) -> Tuple[bool, str]:
     if total and size != total:
         return False, f"недокачан: {size} из {total} байт"
     sha = entry.get("sha256")
-    if sha:
-        try:
-            with open(dest, "rb") as f:
-                if hashlib.sha256(f.read()).hexdigest() != sha:
-                    return False, "sha256 не совпадает"
-        except Exception as e:
-            return False, f"ошибка чтения: {e}"
-    return True, "ок"
+    if not sha:
+        return True, "ок"
+    try:
+        st = os.stat(dest)
+    except OSError as e:
+        return False, f"ошибка чтения: {e}"
+    if (entry.get("verified_size") == st.st_size
+            and entry.get("verified_mtime_ns") == st.st_mtime_ns):
+        return True, "ок (sha256 сверен ранее)"
+    if not deep:
+        return True, "ок (по размеру; sha256 не пересчитывался)"
+    try:
+        digest = sha256_file(dest)
+    except Exception as e:
+        return False, f"ошибка чтения: {e}"
+    if digest != sha:
+        return False, "sha256 не совпадает"
+    return True, "ок (sha256 сверен)"
 
 
-def pending(session_path: Optional[str]) -> List[dict]:
-    """Загрузки, которые нужно проверить/докачать."""
+def record_verification(session_path: Optional[str], entry: dict) -> None:
+    """Запомнить успешную глубокую сверку файла (кэш `verified_*`)."""
+    dest = entry.get("dest")
+    try:
+        st = os.stat(dest)
+    except OSError:
+        return
+    data = _load(session_path)
+    key = _key(entry.get("url"), dest)
+    stored = data.get(key)
+    if stored is None:
+        return
+    stored["verified_size"] = st.st_size
+    stored["verified_mtime_ns"] = st.st_mtime_ns
+    stored["verified_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    data[key] = stored
+    _save(session_path, data)
+
+
+def pending(session_path: Optional[str], deep: bool = False) -> List[dict]:
     out = []
     for entry in list_entries(session_path):
-        ok, reason = verify(entry)
+        ok, reason = verify(entry, deep=deep)
         if not ok:
             item = dict(entry)
             item["reason"] = reason
