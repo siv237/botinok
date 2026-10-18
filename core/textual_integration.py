@@ -38,6 +38,7 @@ from core.openai_compat import (is_openai_backend, chat_stream_request, chat_onc
 from core.api_key_gate import is_auth_error, key_entry_url, save_api_key
 from core.textual_app import BotinokTextualApp, ApiKeyScreen
 from core import server_history
+from core.slash_commands import help_rows
 from core import themes as botinok_themes
 from core.terminal_keys import install as install_terminal_keys
 from core import token_calibrator
@@ -1405,7 +1406,7 @@ def ask_ollama_textual(
     # рассуждение) — лениво по клику в шапке и на дисковом кэше:
     # при старте ни одного лишнего запроса к серверу.
     app.sm = sm
-    app.set_model_info(model, dangerous=dangerous_mode,
+    app.set_model_info(model, dangerous=dangerous_mode, proofreader=proofread,
                        server=_server_label(sm), ctx=num_ctx)
     # Первый запуск с openai-бэкендом без ключа — окошко ключа сразу при старте.
     try:
@@ -2970,21 +2971,18 @@ def ask_ollama_textual(
         threading.Thread(target=_verify_and_store_key, args=(key,), daemon=True).start()
 
     def _handle_slash_command(cmd: str):
-        nonlocal _current_model, _current_ctx, _ollama_chat_url
+        nonlocal _current_model, _current_ctx, _ollama_chat_url, proofread
         parts = cmd.strip().split()
         command = parts[0].lower()
 
         if command == "/help":
             _write_log("[bold cyan]📋 Доступные команды:[/bold cyan]")
-            _write_log("  [green]/model <name>[/green]  — сменить модель (например /model qwen3.5:9b)")
-            _write_log("  [green]/models[/green]         — список доступных моделей Ollama")
-            _write_log("  [green]/ctx <n>[/green]         — сменить размер контекста (например /ctx 32768)")
-            _write_log("  [green]/key[/green]           — ввести или сменить API-ключ")
-            _write_log("  [green]/clear[/green]          — очистить экран")
-            _write_log("  [green]/dangerous[/green]      — переключить опасный режим")
-            _write_log("  [green]/retry[/green]          — повторить последний запрос")
-            _write_log("  [green]/vram[/green]           — показать статус VRAM")
-            _write_log("  [green]exit[/green]            — выход")
+            rows = help_rows()
+            width = max((len(lbl) for lbl, _ in rows), default=8)
+            for lbl, desc in rows:
+                pad = " " * (width - len(lbl) + 2)
+                _write_log(f"  [green]{lbl}[/green]{pad}— {desc}")
+            _write_log(f"  [green]exit[/green]{' ' * (width - 4 + 2)}— выход")
             _write_log("")
 
         elif command == "/models":
@@ -3008,7 +3006,8 @@ def ask_ollama_textual(
                 sm.config.set('Ollama', 'DefaultModel', new_model)
                 with open(sm.config_path, 'w') as cf:
                     sm.config.write(cf)
-                _call_from_thread(app.set_model_info, new_model, dangerous=tm.dangerous_mode)
+                _call_from_thread(app.set_model_info, new_model, dangerous=tm.dangerous_mode,
+                                  proofreader=proofread)
                 _write_log(f"[green]✅ Модель сменена на: {new_model}[/green]")
                 _write_log("[dim]Новая модель будет использована в следующем запросе.[/dim]")
 
@@ -3039,13 +3038,87 @@ def ask_ollama_textual(
                            "истории) — открываю окно ввода.[/yellow]")
             _prompt_key_change()
 
+        elif command == "/info":
+            esc = app._rich_escape
+            try:
+                backend = ("OpenAI-совместимый" if is_openai_backend(sm)
+                           else "Ollama")
+            except Exception:
+                backend = "?"
+            url = esc(str(sm.config.get('Ollama', 'BaseUrl',
+                                        fallback='http://localhost:11434') or ''))
+            key = _mask_api_key(sm.config.get('Ollama', 'ApiKey', fallback=''))
+            theme = botinok_themes.THEME_LABELS.get(
+                getattr(app, 'theme', ''), str(getattr(app, 'theme', '?')))
+            danger = "ON" if tm.dangerous_mode else "OFF"
+            proof = "ON" if proofread else "OFF"
+            _write_log("[bold cyan]ℹ О сессии:[/bold cyan]")
+            _write_log(f"  Сервер: {backend} · {url}")
+            _write_log(f"  Модель: {esc(str(_current_model))} · контекст: {_current_ctx}")
+            _write_log(f"  Ключ: {key} · Тема: {theme} · Корректор: {proof}")
+            _write_log(f"  Dangerous: {danger} · Версия: {esc(str(version))}")
+            _write_log(f"  Сессия: {esc(str(session_path))}")
+
+        elif command == "/tools":
+            try:
+                from tools.tools_catalog import catalog_lines
+                lines = catalog_lines(tm)
+            except Exception as e:
+                lines = None
+                _write_log(f"[red]Каталог недоступен: {e}[/red]")
+            if lines is not None:
+                if lines:
+                    _write_log("[bold cyan]🛠 Инструменты агента (кратко):[/bold cyan]")
+                    for line in lines:
+                        _write_log(f"[dim]{app._rich_escape(line)}[/dim]")
+                else:
+                    _write_log("[yellow]Каталог пуст[/yellow]")
+
+        elif command == "/theme":
+            wanted = parts[1].lower() if len(parts) > 1 else ""
+            if not wanted:
+                # Как клик по иконке в шапке — следующая тема по циклу.
+                app.apply_theme(botinok_themes.next_theme(getattr(app, 'theme', '')))
+            else:
+                aliases = {
+                    "ночь": "night", "ночной": "night", "night": "night",
+                    "день": "day", "дневной": "day", "day": "day",
+                    "вечер": "evening", "вечерний": "evening", "evening": "evening",
+                }
+                target = aliases.get(wanted)
+                if not target:
+                    _write_log(f"[red]Неизвестная тема: {wanted}[/red]")
+                    _write_log("[dim]Доступно: ночь / день / вечер "
+                               "(night / day / evening)[/dim]")
+                elif target == getattr(app, 'theme', ''):
+                    _write_log(f"[dim]Тема уже выбрана: "
+                               f"{botinok_themes.THEME_LABELS[target]}[/dim]")
+                else:
+                    app.apply_theme(target)
+
+        elif command == "/reasoning":
+            # Уровни диктует сервер — список как в окне чипа 🧠 в шапке.
+            app.show_reasoning_modal()
+
+        elif command == "/proofread":
+            proofread = not proofread
+            _call_from_thread(app.set_model_info, _current_model,
+                              dangerous=tm.dangerous_mode, proofreader=proofread,
+                              server=_server_label(sm), ctx=_current_ctx)
+            status = "[green]ON[/green]" if proofread else "[red]OFF[/red]"
+            _write_log(f"[yellow]✒️ Режим корректора: {status}[/yellow]")
+            if proofread:
+                _write_log("[dim]Каждый ход после ответа проверит корректор "
+                           "— ответ будет готовиться дольше.[/dim]")
+
         elif command == "/dangerous":
             current = os.environ.get("BOTINOK_DANGEROUS", "0") == "1"
             new_val = "0" if current else "1"
             os.environ["BOTINOK_DANGEROUS"] = new_val
             tm.dangerous_mode = not current
             status = "[green]ON[/green]" if not current else "[red]OFF[/red]"
-            _call_from_thread(app.set_model_info, _current_model, dangerous=tm.dangerous_mode)
+            _call_from_thread(app.set_model_info, _current_model,
+                                  dangerous=tm.dangerous_mode, proofreader=proofread)
             _write_log(f"[yellow]⚠️ Dangerous mode: {status}[/yellow]")
 
         elif command == "/vram":

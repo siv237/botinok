@@ -25,6 +25,9 @@ _PAGER_THEME = RichTheme({"markdown.code": "bold", "markdown.code_block": "none"
 _PAGER_CODE_THEME = "ansi_light"
 from core.image_block import ImageBlock, refresh_visible_images
 from core import themes as botinok_themes
+from core.slash_commands import (prefix_matches as slash_prefix_matches,
+                                 command_label as slash_command_label,
+                                 command_completion as slash_command_completion)
 from core.openai_compat import (get_reasoning_effort, probe_reasoning_cached,
                                 is_openai_backend, load_reasoning_cache,
                                 reasoning_cache_key, load_cache_entry,
@@ -907,6 +910,11 @@ class Composer(TextArea):
                 # Похоже на вставку из буфера — не отправляем.
                 self.insert("\n")
             else:
+                # Enter при открытом списке slash-команд: неполный префикс
+                # дописывается вместо отправки (дальше — опять Enter).
+                if getattr(self.app, "slash_try_complete_on_enter",
+                           lambda: False)():
+                    return
                 self.action_submit()
             return
         # Новая строка: Alt+Enter — универсально (VTE/xterm/VS Code), Ctrl+J —
@@ -927,6 +935,19 @@ class Composer(TextArea):
                 except Exception:
                     pass
             return
+        # Список slash-команд: ↓/↑ ходят по кандидатам, Tab — подставить
+        # выбранную (перехватываем, пока список открыт).
+        if key in ("down", "up", "tab") and \
+                getattr(self.app, "slash_popup_visible", lambda: False)():
+            event.stop()
+            event.prevent_default()
+            if key == "down":
+                self.app.slash_popup_move(1)
+            elif key == "up":
+                self.app.slash_popup_move(-1)
+            else:
+                self.app.slash_complete()
+            return
         if key == "escape":
             event.stop()
             event.prevent_default()
@@ -939,6 +960,10 @@ class Composer(TextArea):
                     app.handle_escape()
                 except Exception:
                     pass
+                return
+            # Esc первым делом закрывает список команд, вторым — очищает ввод.
+            if getattr(app, "slash_popup_visible", lambda: False)():
+                app.slash_hide_popup()
                 return
             self.text = ""
             return
@@ -1153,6 +1178,15 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     #footer { height: 3; border: round $hl; border-title-color: $hl; padding: 0 1; }
     Input { height: 3; }
     #input { height: 3; min-height: 3; max-height: 10; }
+    /* Список slash-команд над вводом: появляется на «/», фильтруется по
+       префиксу; OptionList без рамки (рамку держит контейнер). */
+    #slash_popup { display: none; height: auto; max-height: 12; width: 1fr;
+                   background: $surface; border: round $hl; padding: 0 1; }
+    #slash_options { height: auto; max-height: 12; border: none; padding: 0;
+                     background: transparent; }
+    #slash_options:focus { border: none; }
+    #slash_options > .option-list--option-highlighted {
+                     background: $panel; color: $text; text-style: bold; }
     /* Очередь «мыслей»: висит внизу над полем ввода, у каждой — крестик отмены. */
     #thought_queue { height: auto; max-height: 8; display: none;
                      background: $surface; border-top: solid $panel; padding: 0 1; }
@@ -1736,6 +1770,9 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                 yield self.shells_display
         self.thought_queue = Vertical(id="thought_queue")
         yield self.thought_queue
+        # Список slash-команд (автокомплит по «/») — сразу над полем ввода.
+        self.slash_popup = Vertical(OptionList(id="slash_options"), id="slash_popup")
+        yield self.slash_popup
         self.input_widget = Composer(
             id="input",
             placeholder="Введите ваш вопрос (Enter — отправить, Alt+Enter — новая строка, "
@@ -3530,6 +3567,139 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         c._prev_len = new_len
         c._last_change = now
         self.call_after_refresh(self._autosize_composer)
+        self.update_slash_popup(c.text or "")
+
+    # --- Slash-команды: список под полем ввода (автокомплит по «/») ---
+    def slash_popup_visible(self) -> bool:
+        try:
+            popup = getattr(self, "slash_popup", None)
+            return popup is not None and popup.display
+        except Exception:
+            return False
+
+    def update_slash_popup(self, text: str) -> None:
+        """Список slash-команд под Composer: появляется на «/», фильтруется
+        по введённому префиксу, скрывается, как только набран пробел
+        (команда выбрана) или первый токен не похож на команду."""
+        try:
+            popup = getattr(self, "slash_popup", None)
+            if popup is None:
+                return
+            matched = slash_prefix_matches(text)
+            if not matched:
+                self._slash_entries = []
+                popup.display = False
+                return
+            opts = []
+            labels = [slash_command_label(e) for e in matched]
+            width = max(len(s) for s in labels)
+            for entry, label in zip(matched, labels):
+                row = Text()
+                row.append(label, style="bold")
+                row.append(" " * (width - len(label) + 1))
+                row.append(entry[2], style="dim")
+                opts.append(Option(row))
+            lst = self.query_one("#slash_options", OptionList)
+            lst.clear_options()
+            lst.add_options(opts)
+            self._slash_entries = list(matched)
+            # Точное совпадение подсвечиваем сразу, иначе — первое.
+            cur = (text or "").strip().lower()
+            idx = 0
+            for i, entry in enumerate(matched):
+                if cur == f"/{entry[0]}":
+                    idx = i
+                    break
+            lst.highlighted = idx
+            popup.display = True
+        except Exception:
+            pass
+
+    def slash_popup_move(self, delta: int) -> None:
+        """↓/↑ по кандидатам (с захватом фокуса у Composer не требуется)."""
+        try:
+            lst = self.query_one("#slash_options", OptionList)
+            if not lst.option_count:
+                return
+            if lst.highlighted is None:
+                lst.highlighted = 0
+                return
+            lst.highlighted = (lst.highlighted + delta) % lst.option_count
+        except Exception:
+            pass
+
+    def slash_hide_popup(self) -> None:
+        try:
+            popup = getattr(self, "slash_popup", None)
+            if popup is not None:
+                popup.display = False
+            self._slash_entries = []
+        except Exception:
+            pass
+
+    def slash_complete(self, index: Optional[int] = None) -> bool:
+        """Подставить выбранную команду в Composer (с пробелом — список
+        закрывается, Enter отправляет). Возвращает True, если подставили."""
+        try:
+            entries = getattr(self, "_slash_entries", None) or []
+            if not entries or not self.slash_popup_visible():
+                return False
+            lst = self.query_one("#slash_options", OptionList)
+            idx = index if index is not None else lst.highlighted
+            if idx is None or not (0 <= idx < len(entries)):
+                idx = 0
+            comp = slash_command_completion(entries[idx])
+            c = self.input_widget
+            if c is None:
+                return False
+            c.text = comp
+            try:
+                c.move_cursor((0, len(comp)))
+            except Exception:
+                pass
+            self.slash_hide_popup()
+            # Клик по строке мог перевести фокус на OptionList — возвращаем
+            # ввод, иначе следующие символы уйдут не туда.
+            try:
+                self.set_focus(c)
+            except Exception:
+                pass
+            return True
+        except Exception:
+            return False
+
+    def slash_try_complete_on_enter(self) -> bool:
+        """Enter при открытом списке: неполный префикс дописывается вместо
+        отправки (набирайте дальше или Enter ещё раз); точное имя команды
+        отправляется сразу."""
+        try:
+            entries = getattr(self, "_slash_entries", None) or []
+            c = self.input_widget
+            if not entries or c is None or not self.slash_popup_visible():
+                return False
+            lst = self.query_one("#slash_options", OptionList)
+            idx = lst.highlighted
+            if idx is None or not (0 <= idx < len(entries)):
+                idx = 0
+            full = f"/{entries[idx][0]}"
+            text = (c.text or "").strip().lower()
+            if text == full:
+                return False
+            if full.startswith(text):
+                return self.slash_complete(idx)
+            return False
+        except Exception:
+            return False
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Клик по строке списка slash-команд — подставить её в поле ввода."""
+        try:
+            if getattr(event.option_list, "id", None) != "slash_options":
+                return
+            event.stop()
+            self.slash_complete(int(event.option_index))
+        except Exception:
+            pass
 
     def on_composer_submitted(self, event: "Composer.Submitted") -> None:
         user_input = (event.value or "").strip()

@@ -2,7 +2,7 @@
 type: entity
 tags: [tui]
 updated: 2026-10-18
-sources: 7
+sources: 8
 status: stable
 ---
 
@@ -113,7 +113,11 @@ status: stable
 Подробно: `entities/shell_screen.md`, `entities/shell_session.md`, `concepts/embedded_terminal.md`.
 
 ## Slash-команды
-Ввод в Composer, начинающийся с `/`, уходит в `_handle_slash_command` (`core/textual_integration.py`, роутинг `on_composer_submitted` → `on_slash_command`): `/help`, `/model <name>`, `/models`, `/ctx <n>`, `/key`, `/clear`, `/dangerous`, `/retry`, `/vram`, и `exit`/`quit`/`выход`. Ввод во время стрима для обычного текста уходит в очередь, слэш-команды выполняются сразу. → `concepts/dangerous_mode.md`, `entities/config_system.md`
+Ввод в Composer, начинающийся с `/`, уходит в `_handle_slash_command` (`core/textual_integration.py`, роутинг `on_composer_submitted` → `on_slash_command`). Единый реестр — `core/slash_commands.py` (`SLASH_COMMANDS`): `/help`, `/model <name>`, `/models`, `/ctx <n>`, `/key`, `/info`, `/tools`, `/theme имя`, `/reasoning`, `/proofread`, `/clear`, `/dangerous`, `/retry`, `/vram`, плюс `exit`/`quit`/`выход`; `/help` печатается из реестра, поэтому описания не расходятся со списком. Ввод во время стрима для обычного текста уходит в очередь, слэш-команды выполняются сразу. → `concepts/dangerous_mode.md`, `entities/config_system.md`
+
+- **Автокомплит по «/»** — нажатие `/` сразу открывает список команд с описаниями (`#slash_popup` + `OptionList #slash_options` над полем ввода): набор букв фильтрует по префиксу (`/mo` → model, models), `↓/↑` ходят по кандидатам (с захватом стрелок у Composer, пока список открыт), `Tab` и `Enter` дописывают выбранную команду с пробелом (Enter дописывает только неполный префикс — точное имя команды отправляется сразу), клик по строке подставляет (фокус возвращается в Composer), `Esc` первым нажатием закрывает список (текст цел), вторым — очищает ввод; пробел в строке (аргументы набраны) список скрывает. Метки/описания без «[» — строка уезжает в rich-разметку `/help`.
+- **`/info`** — сводка о сессии: бэкенд и BaseUrl (экранированы `_rich_escape`), модель и контекст, маска ключа, тема, режим корректора, dangerous, версия и путь сессии. **`/tools`** — каталог инструментов (`tools_catalog.catalog_lines`) построчно в чат.
+- **`/theme`** — без имени: следующая тема по циклу (как клик по иконке в шапке); с именем (`ночь`/`день`/`вечер`, `night`/`day`/`evening`) — `app.apply_theme` с сохранением в глобальный конфиг. **`/reasoning`** — открывает то же окно выбора уровня, что и чип 🧠 (`show_reasoning_modal`). **`/proofread`** — переключает режим корректора вживую (монотонный флаг `proofread` замыкания + `set_model_info(proofreader=...)` — шапка «АГЕНТ-КОРРЕКТОР» синхронна; ветки `/model` и `/dangerous` тоже передают `proofreader`, чтобы не сбивать флаг).
 
 - **`/key`** — ввести или сменить API-ключ. Открывает то же модальное окно `ApiKeyScreen`, что и окошко при 401/403, но со своим заголовком и лидом (новые необязательные параметры `title=`/`intro=`; без них текст 401-потока не изменился — покрыто тестом). Текущий ключ показывается маской (`abcd...wxyz`). Ключ проверяется в фоне **теми же методами визарда** — `ConfigWizard(sm).check_openai(url, key)`: канонический `/v1/models` с Bearer, классификация моделей, уточнение `api_base` — и сохраняется только при успехе: `save_api_key` (персональный `~/.config/botinok/config.cfg` с мержом эффективного конфига, как в 401-потоке), запись в `server_history` (presets мастера видят новый ключ), синхронизация env `BOTINOK_API_KEY`, если он задан `--api-key`. При `backend=ollama` ключ сохраняется без проверки с пометкой, что Authorization этот бэкенд не отправляет. → `entities/openai_compat.md`, `concepts/config_priority.md`
 
