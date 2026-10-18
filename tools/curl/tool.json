@@ -1,0 +1,85 @@
+{
+  "name": "curl",
+  "entry": "curl",
+  "provides": [
+    "session_path",
+    "progress"
+  ],
+  "danger": [
+    "session_output"
+  ],
+  "description": "Legacy-алиас web (HTTP-запросы, JSON, файлы)",
+  "schema": {
+    "type": "function",
+    "function": {
+      "name": "curl",
+      "description": "Legacy-алиас web (HTTP-запросы, JSON, файлы). Поддерживает jq_filter, методы и тело запроса. Для новых задач используй web.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "URL (http/https)"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "PATCH",
+              "DELETE"
+            ],
+            "description": "HTTP-метод (по умолчанию GET)"
+          },
+          "body": {
+            "type": "string",
+            "description": "Тело запроса (строка); для JSON лучше json_body"
+          },
+          "json_body": {
+            "type": "object",
+            "description": "Тело запроса как JSON-объект (для API: POST/PUT)"
+          },
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "HTTP заголовки, формат 'Key: Value'"
+          },
+          "timeout_sec": {
+            "type": "integer",
+            "description": "Таймаут в секундах (по умолчанию 30)"
+          },
+          "max_bytes": {
+            "type": "integer",
+            "description": "Максимальный размер ответа"
+          },
+          "follow_redirects": {
+            "type": "boolean",
+            "description": "Следовать за редиректами (по умолчанию true)"
+          },
+          "jq_filter": {
+            "type": "string",
+            "description": "Фильтр jq для обработки JSON. Примеры: .userId | .items[] | {name:.name}. ВАЖНО: без кавычек вокруг фильтра"
+          },
+          "output_path": {
+            "type": "string",
+            "description": "Путь для сохранения ответа в файл (опционально, только внутри папки сессии без dangerous_mode)"
+          },
+          "resume": {
+            "type": "boolean",
+            "description": "Докачать/перекачать файл (aria2c)"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "description": "Ожидаемый sha256 скачанного файла"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
+    }
+  }
+}

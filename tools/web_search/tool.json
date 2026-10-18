@@ -1,0 +1,28 @@
+{
+  "name": "web_search",
+  "entry": "ddg_search",
+  "provides": [
+    "session_path",
+    "progress"
+  ],
+  "description": "Поиск информации в интернете через DuckDuckGo (использует lynx)",
+  "schema": {
+    "type": "function",
+    "function": {
+      "name": "web_search",
+      "description": "Поиск информации в интернете через DuckDuckGo (использует lynx)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Поисковый запрос"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "tools",
+  "entry": "tools_catalog_tool",
+  "provides": [
+    "session_path"
+  ],
+  "always_on": true,
+  "description": "Менеджер инструментов: краткий каталог всех инструментов (action=list) и ступенчатое раскрытие схем",
+  "schema": {
+    "type": "function",
+    "function": {
+      "name": "tools",
+      "description": "Менеджер инструментов: краткий каталог всех инструментов (action=list) и ступенчатое раскрытие схем. В запросе всегда доступны tools, sign_step и session_memory; нужен инструмент из каталога — tools(action=enable, name=…), его полная схема появится в следующем запросе и останется на сессию. Включай только то, чем будешь пользоваться в этом ходе.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "list",
+              "enable",
+              "disable"
+            ],
+            "description": "list — каталог; enable/disable — включить/выключить инструмент по имени"
+          },
+          "name": {
+            "type": "string",
+            "description": "Имя инструмента для enable/disable"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "name": "experience",
+  "entry": "experience",
+  "description": "База опыта работы",
+  "schema": {
+    "type": "function",
+    "function": {
+      "name": "experience",
+      "description": "База опыта работы",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "add_positive",
+              "add_negative",
+              "search",
+              "list",
+              "check"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  }
+}

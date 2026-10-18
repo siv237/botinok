@@ -1,0 +1,37 @@
+{
+  "name": "audio",
+  "entry": "execute",
+  "provides": [
+    "session_path"
+  ],
+  "description": "Анализ аудио мультимодальной (omni) моделью",
+  "schema": {
+    "type": "function",
+    "function": {
+      "name": "audio",
+      "description": "Анализ аудио мультимодальной (omni) моделью. Конвертирует аудиофайл в base64 для передачи в LLM (Qwen3-Omni, Qwen3.5-Omni/27B и др.). Для работы нужна модель с поддержкой аудио.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "audio_path": {
+            "type": "string",
+            "description": "Путь к локальному аудиофайлу (wav, mp3, ogg, flac, m4a, webm)"
+          },
+          "url": {
+            "type": "string",
+            "description": "URL аудио (альтернатива audio_path)"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Вопрос к модели про аудио (по умолчанию: 'Опиши, что ты слышишь')"
+          },
+          "timeout_sec": {
+            "type": "integer",
+            "description": "Таймаут скачивания URL в секундах (по умолчанию 30)"
+          }
+        },
+        "required": []
+      }
+    }
+  }
+}

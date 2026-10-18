@@ -57,6 +57,7 @@
 - [concepts/context_memory_research.md](concepts/context_memory_research.md) — изыскания: механическая память сессии без LLM-суммаризации, окна-дайджесты, sign_step; draft
 - [concepts/harness_eval_plan.md](concepts/harness_eval_plan.md) — план измерения и улучшения харнеса: фиксированная модель, слайсы по категориям, абляции узлов, PawBench-методология; draft
 - [concepts/function_calling.md](concepts/function_calling.md) — механика tool-calls в потоке агента
+- [concepts/tool_plugins.md](concepts/tool_plugins.md) — инструменты как плагины: папка + манифест `tool.json`, подключение/отключение на лету, контракт `provides`, автосхема
 - [concepts/dangerous_mode.md](concepts/dangerous_mode.md) — безопасность: dangerous mode и подтверждения
 - [concepts/web_kit.md](concepts/web_kit.md) — единый веб-кит: один добыватель, харнес подсказок, контекстная дисциплина
 - [concepts/edit_kit.md](concepts/edit_kit.md) — edit-кит: редактор с каркасом-советником, fuzzy, атомарность, чекпоинты

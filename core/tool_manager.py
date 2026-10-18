@@ -1,11 +1,18 @@
 import json
 import os
 import sys
+import inspect
 import importlib
+import importlib.util
 import traceback
 from datetime import datetime
 
+from core import tool_discovery
 from core.path_utils import resolve_session_path
+from core.tool_discovery import (DANGER_SESSION_OUTPUT, DANGER_SESSION_WRITE,
+                                 DANGER_SHELL, PROVIDES_DANGEROUS,
+                                 PROVIDES_PROGRESS, PROVIDES_SESSION,
+                                 provides_kwarg)
 
 try:
     from tools import safe_ops as _safe_ops
@@ -17,6 +24,26 @@ TOOLS_LOG = os.path.expanduser("~/.botinok/logs/tools.log")
 DANGEROUS_FILESYSTEM_ACTIONS = ("delete", "move", "copy", "mkdir", "chmod", "symlink", "touch")
 DANGEROUS_EDITOR_ACTIONS = ("write", "replace", "apply", "undo")
 DANGEROUS_SHELL_ACTIONS = ("run", "send", "send_key", "kill", "wait")
+
+# Классы опасности встроенных инструментов. Источник правды — манифест плагина
+# (`danger`); таблица ниже — страховка на случай, если сканирование недоступно
+# (и обратная совместимость для установок со старыми манифестами).
+_LEGACY_DANGER = {
+    "shell_exec": (DANGER_SHELL,),
+    "code_editor": (DANGER_SESSION_WRITE,),
+    "file_system": (DANGER_SESSION_WRITE,),
+    "curl": (DANGER_SESSION_OUTPUT,),
+    "web": (DANGER_SESSION_OUTPUT,),
+}
+
+
+def danger_kinds(name) -> tuple:
+    """Классы опасности инструмента: из манифеста, иначе — легаси-таблица."""
+    try:
+        kinds = tool_discovery.danger_kinds(name)
+    except Exception:
+        kinds = ()
+    return tuple(kinds) or _LEGACY_DANGER.get(name, ())
 
 
 def path_within(base, path) -> bool:
@@ -51,31 +78,48 @@ def editor_action_of(args):
         return action
 
 
+def _accepted_provides(func, declared):
+    """Оставить из манифеста только те context-kwargs, что принимает функция.
+
+    Контракт (манифест) декларативен, а сигнатура — источник правды о вызове:
+    лишнее объявленное молча не передаём (иначе вызов падал бы с TypeError).
+    """
+    if not declared:
+        return ()
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return tuple(declared)
+    has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    accepted = []
+    for item in declared:
+        if has_kwargs or provides_kwarg(item) in params:
+            accepted.append(item)
+    return tuple(accepted)
+
+
 def allowed_in_session(name, args, session_path) -> bool:
     """Опасное действие целиком внутри папки сессии — dangerous mode не нужен.
 
     Единый источник политики «внутри/вне сессии» для гейта `ToolManager.call_tool`
-    и для TUI (окно переключения в dangerous mode).
+    и для TUI (окно переключения в dangerous mode). Классы опасности инструмент
+    объявляет сам в манифесте (`danger`), поэтому политика не знает имён.
     """
     if not isinstance(args, dict) or not session_path:
         return False
-    if name == "code_editor":
-        if editor_action_of(args) in DANGEROUS_EDITOR_ACTIONS:
-            return path_within(session_path, resolve_session_path(args.get("path"), session_path))
-        return True
-    if name == "file_system":
-        action = args.get("action")
-        if action in DANGEROUS_FILESYSTEM_ACTIONS:
+    kinds = danger_kinds(name)
+    if DANGER_SESSION_WRITE in kinds:
+        action = editor_action_of(args) if name == "code_editor" else args.get("action")
+        if action in (DANGEROUS_EDITOR_ACTIONS + DANGEROUS_FILESYSTEM_ACTIONS):
             if not path_within(session_path, resolve_session_path(args.get("path"), session_path)):
                 return False
             if action in ("move", "copy", "symlink"):
                 return path_within(session_path, resolve_session_path(args.get("dest"), session_path))
-            return True
         return True
-    if name in ("curl", "web"):
+    if DANGER_SESSION_OUTPUT in kinds:
         out = args.get("output_path")
         return True if not out else path_within(session_path, resolve_session_path(out, session_path))
-    # shell_exec всегда опасен и не привязан к папке сессии.
+    # shell-подобные и всё необъявленное — всегда «вне сессии».
     return False
 
 
@@ -88,13 +132,14 @@ def requires_dangerous(name, args, session_path) -> bool:
     if not isinstance(args, dict):
         return False
     action = args.get("action")
-    if name == "shell_exec":
+    kinds = danger_kinds(name)
+    if DANGER_SHELL in kinds:
         return (action or "run") in DANGEROUS_SHELL_ACTIONS
-    if name in ("code_editor", "file_system"):
+    if DANGER_SESSION_WRITE in kinds:
         gate_action = editor_action_of(args) if name == "code_editor" else action
         return (gate_action in (DANGEROUS_EDITOR_ACTIONS + DANGEROUS_FILESYSTEM_ACTIONS)
                 and not allowed_in_session(name, args, session_path))
-    if name in ("curl", "web"):
+    if DANGER_SESSION_OUTPUT in kinds:
         return bool(args.get("output_path")) and not allowed_in_session(name, args, session_path)
     return False
 
@@ -113,461 +158,139 @@ def log_tool_error(tool_name, error_type, error_msg, traceback_str):
         f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
 class ToolManager:
-    def __init__(self):
+    def __init__(self, tools_dir=None):
         self.dangerous_mode = os.environ.get("BOTINOK_DANGEROUS", "0") == "1"
         self.tools = {}
         self.broken_tools = {}  # {name: {error_type, error, traceback}}
         self._loaded = set()    # какие уже пробовали загружать
         
-        # Регистрация инструментов: имя -> модуль.функция
-        self._tool_registry = {
-            "web": ("tools.web", "execute"),
-            "web_search": ("tools.web_search", "ddg_search"),
-            "open_url": ("tools.open_url", "open_url"),
-            "web_extract": ("tools.web_extract", "web_extract"),
-            "web_extractor": ("tools.web_extract", "web_extract"),  # alias для совместимости
-            "file_system": ("tools.file_system", "file_system_tool"),
-            "journal": ("tools.journal", "journal_tool"),
-            "code_editor": ("tools.code_editor", "code_editor"),
-            "shell_exec": ("tools.shell_exec", "shell_exec"),
-            "experience": ("tools.experience", "experience"),
-            "github": ("tools.github", "github"),
-            "skills": ("tools.skills", "skills"),
-            "curl": ("tools.curl", "curl"),
-            "vision": ("tools.vision", "execute"),
-            "image": ("tools.image_show", "image"),
-            "audio": ("tools.audio", "execute"),
-            "session_memory": ("tools.session_memory", "session_memory_tool"),
-            "sign_step": ("tools.sign_step", "sign_step_tool"),
-            "tools": ("tools.tools_catalog", "tools_catalog_tool"),
-        }
-        
-        # Базовые описания (пока tool не загружен)
-        self._descriptions = {
-            "web": {
-                "type": "function",
-                "function": {
-                    "name": "web",
-                    "description": ("Единый добыватель данных из сети. Один инструмент вместо web_search/open_url/web_extract/curl. "
-                                    "action: auto — сам выберет стратегию по типу данных; open — читаемый текст страницы; "
-                                    "extract — структура (links/images/headings/meta/tables/css); "
-                                    "images — найти прямые картинки (со страницы url=… или из выдачи query=…; ссылки проверяются на живую картинку); "
-                                    "json — JSON + jq-фильтр; "
-                                    "download — скачать файл (докачка, торренты/magnet, проверка sha256; память загрузок action=downloads); "
-                                    "search — поиск в интернете; proxy — настройка/проверка прокси (command=show|set|clear|test); help — справка. "
-                                    "ФОН (параллельность): к любому сетевому action добавь background=true и name=метка — "
-                                    "задача уйдёт в отдельный тред, job_id вернётся сразу; запускай пачку таких задач, "
-                                    "занимайся другим, опрашивай action=jobs, забирай готовые action=job job_id=… "
-                                    "(wait=true — подождать, command=kill — убить); о завершении/сбое придёт уведомление. "
-                                    "Без background всё работает как раньше (синхронно). "
-                                    "После любого получения страницы инструмент сообщает, что на ней есть (images/links/tables), и как это достать. "
-                                    "Чем качать: большие файлы/докачка/торренты — aria2c; сложные HTTP-запросы (методы, тело, JSON) — HTTP-клиент; "
-                                    "при сбое aria2c загрузка автоматически повторяется HTTP-клиентом. "
-                                    "Возвращает мета-данные, совет и следующие шаги. Запись вне папки сессии требует dangerous mode."),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "action": {"type": "string", "enum": ["auto", "open", "extract", "json", "images", "download", "downloads", "search", "proxy", "jobs", "job", "help"],
-                                       "description": "Что сделать (по умолчанию auto). downloads — память загрузок; images — найти прямые картинки; proxy — прокси; jobs — список фоновых задач; job — статус/результат фоновой задачи"},
-                            "url": {"type": "string", "description": "URL http/https (для auto/open/extract/json/download)"},
-                            "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP-метод (по умолчанию GET). Для API, требующих POST (например Ollama /api/generate), задай method=POST"},
-                            "json_body": {"type": "object", "description": ("Тело запроса как JSON-объект (POST/PUT/PATCH) — для веб-API. "
-                                           "Чтобы передать локальный файл без ручного base64, используй маркер "
-                                           "{\"$file_base64\":\"/путь/к/файлу\"} — web сам прочитает и закодирует его "
-                                           "(например в messages[].images для Ollama)")},
-                            "body": {"type": "string", "description": "Тело запроса строкой (если не JSON)"},
-                            "query": {"type": "string", "description": "Поисковый запрос (для action=search)"},
-                            "extract": {"type": "array", "items": {"type": "string", "enum": ["links", "images", "headings", "meta", "tables", "all"]},
-                                        "description": "Что извлекать (action=extract), по умолчанию all"},
-                            "css": {"type": "array", "items": {"type": "string"}, "description": "CSS-селекторы для точечного извлечения (action=extract)"},
-                            "jq": {"type": "string", "description": ("jq-фильтр (action=json). Применяется к ответу как к входу '.': "
-                                       "'.daily', '.items[] | .name', '{temp: .current.temperature_2m}'. "
-                                       "Выборка по условию: '.items[] | select(.value | startswith(\"2026\"))' "
-                                       "(после 'as $x |' вход НЕ меняется — внутри select пиши '$x | ...', напр. "
-                                       "select($x | startswith(\"…\"))). Ведущая точка не обязательна (добавится). "
-                                       "Проще всего: сначала '.daily', потом уточняй; при ошибке jq вернётся её текст.")},
-                            "output_path": {"type": "string", "description": "Куда сохранить файл (action=download; вне сессии — dangerous mode)"},
-                            "resume": {"type": "boolean", "description": "Для download: докачать/перекачать (aria2c). Если файл уже цел — вернётся из глобальной памяти загрузок"},
-                            "expected_sha256": {"type": "string", "description": "Для download: ожидаемый sha256 файла; при несовпадении файл удаляется и возвращается ошибка"},
-                            "headers": {"type": "array", "items": {"type": "string"}, "description": "HTTP заголовки, формат 'Key: Value'"},
-                            "timeout_sec": {"type": "integer", "description": "Таймаут в секундах (по умолчанию 30)"},
-                            "max_bytes": {"type": "integer", "description": "Максимальный размер ответа в байтах"},
-                            "follow_redirects": {"type": "boolean", "description": "Следовать за редиректами (по умолчанию true)"},
-                            "max_items": {"type": "integer", "description": "Максимум элементов на категорию (action=extract/search/images)"},
-                            "proxy": {"type": "string", "description": ("Прокси для этого запроса или для настройки. Прощающий формат: 17277, host:port, "
-                                       "host:port user pass, scheme://user:pass@host:port, none. action=proxy command=set — записать; "
-                                       "иначе используется как разовый прокси для текущего запроса")},
-                            "no_proxy": {"type": "string", "description": "Список хостов в обход прокси (через запятую), для action=proxy command=set"},
-                            "scope": {"type": "string", "enum": ["session", "global"],
-                                      "description": "Куда записать прокси (action=proxy command=set/clear): session (по умолчанию) или global"},
-                             "command": {"type": "string", "enum": ["show", "set", "clear", "test", "kill"],
-                                         "description": "Подкоманда: для action=proxy — show/set/clear/test; для action=job — kill (убить фоновую задачу)"},
-                             "background": {"type": "boolean", "description": "true — выполнить сетевое действие в фоне (отдельный тред) и сразу вернуть job_id; для action=search/open/extract/json/images/download/auto"},
-                             "name": {"type": "string", "description": "Короткая метка фоновой задачи (для background) — по ней удобно ориентироваться в action=jobs"},
-                             "job_id": {"type": "string", "description": "ID фоновой задачи (action=job)"},
-                             "wait": {"type": "boolean", "description": "Для action=job: подождать завершения до timeout_sec вместо немедленного статуса"}
-                        },
-                        "required": []
-                    }
+        # Плагинные инструменты: папка tools/<name>/ с манифестом tool.json —
+        # единственный контракт подключения (core/tool_discovery.py). Реестр и
+        # схемы собираются сканированием, а не рукописными таблицами: положили
+        # папку — инструмент появился, удалили — исчез из реестра, каталога и
+        # payload; правок в ядре не требуется.
+        self._tools_dir = tools_dir
+        self._discovery = None
+        self._loaded_module_names = {}  # name -> модуль (для горячего отключения)
+        self._sync_discovery()
+
+    def _sync_discovery(self):
+        """Собрать реестр/схемы/состояние сломанных из папки инструментов.
+
+        Если с прошлой синхронизации плагин изменился или исчез — сбрасываем
+        закэшированный вызов (и модуль), чтобы правка/удаление папки действовали
+        сразу, без перезапуска процесса. Сравнение — по отпечатку файлов плагина
+        (`spec.stamp`), а не по идентичности объекта: иначе пересканирование
+        из-за соседнего плагина выгружало бы все загруженные инструменты.
+        """
+        d = tool_discovery.discover(self._tools_dir)
+        prev = getattr(self, "_spec_by_name", {})
+        new_specs = {}
+        for name, spec in d.specs.items():
+            new_specs[name] = spec
+            for alias in spec.aliases:
+                new_specs[alias] = spec
+        for name, old_spec in prev.items():
+            new_spec = new_specs.get(name)
+            if new_spec is old_spec or (new_spec is not None
+                                        and new_spec.stamp == old_spec.stamp):
+                continue
+            # Инструмент исчез или его файлы изменились — старый вызов невалиден.
+            self.tools.pop(name, None)
+            self._loaded.discard(name)
+            module = self._loaded_module_names.pop(name, None)
+            if module:
+                sys.modules.pop(module, None)
+                # Подмодули плагина (from .helper import …) тоже кэшируются.
+                for cached in [m for m in sys.modules if m.startswith(module + ".")]:
+                    sys.modules.pop(cached, None)
+            # Байткод .pyc инвалидируется по (секунды, размер) — правка кода
+            # того же размера в ту же секунду осталась бы «старой». Для
+            # горячей перезагрузки плагина сносим кэш явно.
+            for source in tool_discovery.source_files(old_spec.path):
+                try:
+                    pyc = importlib.util.cache_from_source(source)
+                    if os.path.isfile(pyc):
+                        os.remove(pyc)
+                except (OSError, ValueError, AttributeError):
+                    pass
+        self._spec_by_name = new_specs
+
+        self._discovery = d
+        self.broken_tools = {}
+        self._tool_registry = {}
+        self._descriptions = {}
+        if d.error:
+            # Скан не удался (нет папки/прав): это сломанная конфигурация, о ней
+            # надо сказать громко, а не молча остаться без инструментов.
+            self.broken_tools["tools/"] = {
+                "error_type": "ToolsDirError",
+                "error": d.error,
+                "traceback": "",
+            }
+        for name, spec in d.specs.items():
+            self._tool_registry[name] = (spec.module_path, spec.entry)
+            if spec.schema:
+                self._descriptions[name] = spec.schema
+            if spec.load_error:
+                self.broken_tools[name] = {
+                    "error_type": spec.load_error_type or "PluginError",
+                    "error": spec.load_error,
+                    "traceback": "",
                 }
-            },
-            "web_search": {
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": "Поиск информации в интернете через DuckDuckGo (использует lynx)",
-                    "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Поисковый запрос"}}, "required": ["query"]}
-                }
-            },
-            "open_url": {
-                "type": "function",
-                "function": {
-                    "name": "open_url",
-                    "description": "Открыть ссылку и извлечь текст со страницы (использует lynx -dump)",
-                    "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "URL страницы (http/https)"}}, "required": ["url"]}
-                }
-            },
-            "web_extract": {
-                "type": "function",
-                "function": {
-                    "name": "web_extract",
-                    "description": "Извлечь структурированные ресурсы со страницы: ссылки, картинки, заголовки, мета-теги, таблицы. Использует httpx + selectolax (быстрый парсер на C).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "url": {"type": "string", "description": "URL страницы (http/https)"},
-                            "extract": {"type": "array", "items": {"type": "string", "enum": ["links", "images", "headings", "meta", "tables", "all"]}, "description": "Что извлекать. По умолчанию ['all']"},
-                            "max_items": {"type": "integer", "description": "Максимум элементов на категорию (по умолчанию 100)"},
-                            "timeout_sec": {"type": "integer", "description": "Таймаут запроса в секундах (по умолчанию 15)"},
-                            "headers": {"type": "array", "items": {"type": "string"}, "description": "HTTP заголовки (опционально, формат 'Key: Value')"}
-                        },
-                        "required": ["url"]
-                    }
-                }
-            },
-            "file_system": {
-                "type": "function",
-                "function": {
-                    "name": "file_system",
-                    "description": ("Файлы и система. Безопасные read-only действия работают всегда (везде): "
-                                    "list/search/grep/read/info/find и inspect (fs.base64, fs.file_type, fs.stat, fs.count, "
-                                    "fs.hash, fs.listing, fs.readlink, sys.*, proc.*, svc.*, net.*, git.*, image.meta, "
-                                    "text.base64_decode). Подробности и примеры: action=help. "
-                                    "Файловые мутации (delete/move/copy/mkdir/chmod/symlink/touch) разрешены внутри папки сессии "
-                                    "(вне — dangerous_mode)."),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "action": {
-                                "type": "string",
-                                "enum": ["help", "list", "search", "grep", "read", "info", "inspect", "find", "delete", "move", "copy", "mkdir", "chmod", "symlink", "touch"],
-                                "description": "help — каталог безопасных возможностей. Безопасные: list,search,grep,read,info,inspect,find. Мутации: delete,move,copy,mkdir,chmod,symlink,touch (внутри сессии без dangerous_mode)"
-                            },
-                            "path": {"type": "string", "description": "Исходный путь (для всех команд)"},
-                            "dest": {"type": "string", "description": "Целевой путь (для move, copy, symlink)"},
-                            "mode": {"type": "string", "description": "Права доступа в octal или символьном виде (для chmod, mkdir)"},
-                            "command": {"type": "string", "description": "Подкоманда для action=inspect, напр. fs.base64, fs.file_type, fs.hash, net.ports, git.log, image.meta. Полный список: action=help"},
-                            "algo": {"type": "string", "description": "Алгоритм для fs.hash: md5|sha1|sha256|sha512"},
-                            "pattern": {"type": "string", "description": "Маска ИМЕНИ файла (glob, напр. *.py) для search/grep; по умолчанию *"},
-                            "recursive": {"type": "boolean", "description": "Рекурсивно по подкаталогам (search/grep/inspect)"},
-                            "content_query": {"type": "string", "description": "grep — regex по содержимому (регистронезависимо; path может быть файлом или каталогом; спецсимволы экранируй). search — если задан, ищет по содержимому. Также имя для net.dns/dev.which, ref для git.grep, base64 для text.base64_decode"},
-                            "max_results": {"type": "integer"},
-                            "max_bytes": {"type": "integer", "description": "Лимит вывода (для чтения/base64/ls)"},
-                            "offset": {"type": "integer"},
-                            "limit": {"type": "integer"}
-                        },
-                        "required": ["action"]
-                    }
-                }
-            },
-            "journal": {
-                "type": "function",
-                "function": {
-                    "name": "journal",
-                    "description": "Read-only анализ systemd journal через journalctl",
-                    "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["tail", "unit_tail", "since", "query", "stats"]}}, "required": ["action"]}
-                }
-            },
-            "code_editor": {
-                "type": "function",
-                "function": {
-                    "name": "code_editor",
-                    "description": ("Единый редактор файлов. action=read — чтение с пагинацией (offset/limit, line_numbers), "
-                                    "возвращает sha256 и мету; action=write — полная запись (content, атомарно, сохраняет кодировку/EOL); "
-                                    "action=replace — одна замена (old_text→new_text, replace_all); "
-                                    "action=apply — несколько замен за вызов атомарно (edits=[{old_text,new_text}]); "
-                                    "action=undo — откат последней правки из чекпоинта; "
-                                    "action=check — проверка синтаксиса без запуска кода (python/json/yaml/toml/xml/bash/js/ts/html), "
-                                    "при неоднозначном типе возвращает candidates и kind=; action=help — справка. "
-                                    "Инструмент прощает дрейф отступов и переводов строк (fuzzy) и сообщает ближайшее совпадение, "
-                                    "если точного нет. Возвращает unified diff; после правок автоматически проверяет синтаксис (поле syntax). "
-                                    "Устаревший файл (изменён вне сессии) отклоняется. Запись вне папки сессии требует dangerous mode."),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "action": {"type": "string", "enum": ["read", "write", "replace", "apply", "undo", "check", "help"], "description": "Действие"},
-                            "path": {"type": "string", "description": "Путь к файлу (в сессии относительный резолвится в session_path/project/)"},
-                            "content": {"type": "string", "description": "Содержимое для action=write"},
-                            "old_text": {"type": "string", "description": "Текст для замены (action=replace)"},
-                            "new_text": {"type": "string", "description": "Новый текст (action=replace); пустая строка = удаление"},
-                            "edits": {"type": "array", "items": {"type": "object", "properties": {"old_text": {"type": "string"}, "new_text": {"type": "string"}, "replace_all": {"type": "boolean"}}}, "description": "Список замен для action=apply (атомарно)"},
-                            "replace_all": {"type": "boolean", "description": "Заменить все вхождения old_text (по умолчанию false)"},
-                            "create": {"type": "boolean", "description": "Создавать файл если не существует (по умолчанию false)"},
-                            "expected_sha256": {"type": "string", "description": "Ожидаемый SHA256 файла для проверки перед записью"},
-                            "offset": {"type": "integer", "description": "Строка начала чтения (action=read, с 0)"},
-                            "limit": {"type": "integer", "description": "Сколько строк читать (action=read; 0 = все)"},
-                            "line_numbers": {"type": "boolean", "description": "Показывать номера строк при чтении"},
-                            "checkpoint": {"type": "string", "description": "Путь чекпоинта для action=undo (иначе последний)"},
-                            "force": {"type": "boolean", "description": "Для action=undo: откатить даже если файл изменился после правки"},
-                            "kind": {"type": "string", "description": "Для action=check: язык/тип вручную (python/json/yaml/toml/xml/bash/javascript/typescript/html), если автоопределение неоднозначно"}
-                        },
-                        "required": ["action", "path"]
-                    }
-                }
-            },
-            "shell_exec": {
-                "type": "function",
-                "function": {
-                    "name": "shell_exec",
-                    "description": "Выполнение shell команд в отдельной PTY-сессии (dangerous mode). Сессия не держит агента: читай вывод через action=read/search, шлите ввод через action=send/send_key",
-                    "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "Команда (для action=run)"}, "cwd": {"type": "string"}, "timeout_sec": {"type": "integer"}, "action": {"type": "string", "enum": ["run", "status", "read", "search", "send", "send_key", "wait", "kill", "list"], "description": "Действие над сессией (по умолчанию run)"}, "session_id": {"type": "string", "description": "ID сессии (из ответа action=run)"}, "input": {"type": "string", "description": "Текст ввода для action=send"}, "key": {"type": "string", "description": "Клавиша для action=send_key: enter, down, up, y, n, ctrl-c, ..."}, "pattern": {"type": "string", "description": "Строка/regex для action=search"}, "regex": {"type": "boolean"}, "context": {"type": "integer", "description": "Строк контекста вокруг match для action=search"}, "tail_lines": {"type": "integer", "description": "Сколько строк хвоста вывода вернуть"}, "wait_timeout": {"type": "number", "description": "Таймаут ожидания для action=wait"}, "interactive": {"type": "boolean", "description": "true — открыть встроенный экран терминала"}}, "required": []}
-                }
-            },
-            "experience": {
-                "type": "function",
-                "function": {
-                    "name": "experience",
-                    "description": "База опыта работы",
-                    "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["add_positive", "add_negative", "search", "list", "check"]}, "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["action"]}
-                }
-            },
-            "github": {
-                "type": "function",
-                "function": {
-                    "name": "github",
-                    "description": "Работа с GitHub API",
-                    "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["search_repos", "get_repo", "get_readme", "get_file", "get_tags", "get_branches"]}, "query": {"type": "string"}, "repo": {"type": "string"}}, "required": ["action"]}
-                }
-            },
-            "skills": {
-                "type": "function",
-                "function": {
-                    "name": "skills",
-                    "description": "Менеджер AI скиллов",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "action": {
-                                "type": "string",
-                                "enum": [
-                                    "list",
-                                    "get",
-                                    "add",
-                                    "remove",
-                                    "run",
-                                    "search",
-                                    "clawhub",
-                                    "install-clawhub"
-                                ]
-                            },
-                            "name": {"type": "string"},
-                            "query": {"type": "string"},
-                            "url": {"type": "string"},
-                            "content": {"type": "string"},
-                            "task": {"type": "string"},
-                            "limit": {"type": "integer"},
-                            "sort": {"type": "string"}
-                        },
-                        "required": ["action"]
-                    }
-                }
-            },
-            "curl": {
-                "type": "function",
-                "function": {
-                    "name": "curl",
-                    "description": "Legacy-алиас web (HTTP-запросы, JSON, файлы). Поддерживает jq_filter, методы и тело запроса. Для новых задач используй web.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "url": {"type": "string", "description": "URL (http/https)"},
-                            "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP-метод (по умолчанию GET)"},
-                            "body": {"type": "string", "description": "Тело запроса (строка); для JSON лучше json_body"},
-                            "json_body": {"type": "object", "description": "Тело запроса как JSON-объект (для API: POST/PUT)"},
-                            "headers": {"type": "array", "items": {"type": "string"}, "description": "HTTP заголовки, формат 'Key: Value'"},
-                            "timeout_sec": {"type": "integer", "description": "Таймаут в секундах (по умолчанию 30)"},
-                            "max_bytes": {"type": "integer", "description": "Максимальный размер ответа"},
-                            "follow_redirects": {"type": "boolean", "description": "Следовать за редиректами (по умолчанию true)"},
-                            "jq_filter": {"type": "string", "description": "Фильтр jq для обработки JSON. Примеры: .userId | .items[] | {name:.name}. ВАЖНО: без кавычек вокруг фильтра"},
-                            "output_path": {"type": "string", "description": "Путь для сохранения ответа в файл (опционально, только внутри папки сессии без dangerous_mode)"},
-                            "resume": {"type": "boolean", "description": "Докачать/перекачать файл (aria2c)"},
-                            "expected_sha256": {"type": "string", "description": "Ожидаемый sha256 скачанного файла"}
-                        },
-                        "required": ["url"]
-                    }
-                }
-            },
-            "vision": {
-                "type": "function",
-                "function": {
-                    "name": "vision",
-                    "description": "Анализ изображений мультимодальной моделью. Конвертирует картинку в base64 для передачи в LLM (llava, bakllava и др.)",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "image_path": {"type": "string", "description": "Путь к локальному файлу изображения (jpg, png, gif, webp)"},
-                            "url": {"type": "string", "description": "URL изображения (альтернатива image_path)"},
-                            "prompt": {"type": "string", "description": "Вопрос к модели про изображение (по умолчанию: 'Опиши что ты видишь')"},
-                            "timeout_sec": {"type": "integer", "description": "Таймаут скачивания URL в секундах (по умолчанию 30)"}
-                        },
-                        "required": []
-                    }
-                }
-            },
-            "image": {
-                "type": "function",
-                "function": {
-                    "name": "image",
-                    "description": ("Показать изображение В ЧАТЕ (не анализ, а отображение). "
-                                    "Принимает картинку файлом или по URL, кладёт её в каталог проекта "
-                                    "и возвращает короткий идентификатор. Чтобы картинка появилась в ответе, "
-                                    "вставь полученный token вида [[image:<id>]] прямо в текст ответа — "
-                                    "рендер чата сам превратит его в изображение по мере прокрутки. "
-                                    "В сессии хранится только идентификатор, не сам файл. "
-                                    "Идентификаторы уникальны и никогда не повторяются; повторная вставка того же файла "
-                                    "вернёт тот же id. Действия: show (по умолчанию), list, get, help."),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "action": {"type": "string", "enum": ["show", "list", "get", "help"],
-                                       "description": "show — добавить картинку (по умолчанию); list — что уже добавлено; get — запись по id; help — справка"},
-                            "source": {"type": "string", "description": "Путь к файлу (относительный ищется в project/ сессии) или URL http/https"},
-                            "path": {"type": "string", "description": "Альтернатива source: путь к локальному файлу"},
-                            "url": {"type": "string", "description": "Альтернатива source: ссылка на изображение"},
-                            "alt": {"type": "string", "description": "Подпись к изображению (необязательно)"},
-                            "id": {"type": "string", "description": "Идентификатор для action=get"},
-                            "limit": {"type": "integer", "description": "Сколько записей вернуть для action=list (по умолчанию 50)"}
-                        },
-                        "required": []
-                    }
-                }
-            },
-            "audio": {
-                "type": "function",
-                "function": {
-                    "name": "audio",
-                    "description": "Анализ аудио мультимодальной (omni) моделью. Конвертирует аудиофайл в base64 для передачи в LLM (Qwen3-Omni, Qwen3.5-Omni/27B и др.). Для работы нужна модель с поддержкой аудио.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "audio_path": {"type": "string", "description": "Путь к локальному аудиофайлу (wav, mp3, ogg, flac, m4a, webm)"},
-                            "url": {"type": "string", "description": "URL аудио (альтернатива audio_path)"},
-                            "prompt": {"type": "string", "description": "Вопрос к модели про аудио (по умолчанию: 'Опиши, что ты слышишь')"},
-                            "timeout_sec": {"type": "integer", "description": "Таймаут скачивания URL в секундах (по умолчанию 30)"}
-                        },
-                        "required": []
-                    }
-                }
-            },
-            "session_memory": {
-                "type": "function",
-                "function": {
-                    "name": "session_memory",
-                    "description": "Протокольный доступ к истории сессии: точные timestamps, строгий порядок ходов (turn_id 1..N), полный текст сообщений и указатели на артефакты/инструменты. Основной инструмент для продолжения сессии и поиска в ней — НЕ читай context.json/response.md через file_system, здесь то же самое быстрее и с подсказками следующих шагов. Вызов: action=restore — ТОЧНОЕ восстановление контекста из снапшота (EXACT, можно доверять как есть); action=resume_brief — обзор для продолжения; get_turn(turn_id, include_content=true) — полный ход (DERIVED); search(query) — гибкий поиск (HINT, требует перепроверки); turns/timeline — последовательность; context_map — карта живого контекста (кто сколько токенов съел); context_stats — исторические цены (типичный раунд, цены инструментов, запас контекста) для ПЛАНИРОВАНИЯ большой задачи; compact(blocks=\"1,3-5\") — освободить отработанные блоки из контекста (текущий ход не сжимается); help — справка. В каждом ответе поле _confidence: EXACT | DERIVED | HINT — отличай точный результат от наметки. Синтаксис прощающий по формату: синонимы (brief/turn/list/find/exact), строковые числа, алиасы (q/id/full), пустой action → resume_brief; неизвестное действие → ambiguous=true со списком вариантов (смысл не подменяется). Поиск: регистр/пробелы не важны, части слов, кириллические окончания, выдаёт файл:строка и время. Каждый ответ содержит совет и блок «Следующие шаги».",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "action": {
-                                "type": "string",
-                                "enum": ["resume_brief", "summary", "turns", "get_turn", "search", "filter", "timeline", "stats", "chain", "restore", "windows", "context_map", "compact", "context_stats"],
-                                "description": "resume_brief - быстрый сбор сессии для продолжения (задача, состояние, последние ходы), summary - сводка сессии, turns - список обменов, get_turn - конкретный turn, search - поиск по тексту, filter - фильтрация, timeline - хронология, stats - статистика, chain - цепочка turns, restore - точное восстановление из снапшота, windows - окна вызовов модели (дайджест), context_map - карта живого контекста (стоимость каждого блока), compact - запросить сжатие указанных блоков, context_stats - исторические цены для планирования расхода"
-                            },
-                            "session_path": {"type": "string", "description": "Путь к сессии (опционально, по умолчанию текущая)"},
-                            "turn_id": {"type": "integer", "description": "ID turn для get_turn"},
-                            "query": {"type": "string", "description": "Строка поиска для search"},
-                            "blocks": {"type": "string", "description": "Для compact: id блоков из context_map, формат \"1,3-5\""},
-                            "note": {"type": "string", "description": "Для compact: короткая пометка, что было в блоках (попадёт в заглушку)"},
-                            "since": {"type": "string", "description": "Фильтр: начальное время (ISO format)"},
-                            "until": {"type": "string", "description": "Фильтр: конечное время (ISO format)"},
-                            "role": {"type": "string", "enum": ["user", "assistant", "system"], "description": "Фильтр по роли сообщения"},
-                            "has_tool_calls": {"type": "boolean", "description": "Фильтр: только turns с tool_calls"},
-                            "limit": {"type": "integer", "description": "Лимит результатов (по умолчанию 20)"},
-                            "offset": {"type": "integer", "description": "Смещение для пагинации"},
-                            "include_content": {"type": "boolean", "description": "Включать полный content (иначе только preview)"},
-                            "include_thinking": {"type": "boolean", "description": "Включать полный thinking (иначе только preview)"}
-                        },
-                        "required": ["action"]
-                    }
-                }
-            },
-            "tools": {
-                "type": "function",
-                "function": {
-                    "name": "tools",
-                    "description": ("Менеджер инструментов: краткий каталог всех инструментов (action=list) и "
-                                    "ступенчатое раскрытие схем. В запросе всегда доступны tools, sign_step и "
-                                    "session_memory; нужен инструмент из каталога — tools(action=enable, name=…), "
-                                    "его полная схема "
-                                    "появится в следующем запросе и останется на сессию. Включай только то, чем "
-                                    "будешь пользоваться в этом ходе."),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "action": {"type": "string", "enum": ["list", "enable", "disable"], "description": "list — каталог; enable/disable — включить/выключить инструмент по имени"},
-                            "name": {"type": "string", "description": "Имя инструмента для enable/disable"}
-                        },
-                        "required": ["action"]
-                    }
-                }
-            },
-            "sign_step": {
-                "type": "function",
-                "function": {
-                    "name": "sign_step",
-                    "description": ("Короткая отметка сделанного. Зови ЧЕКПОИНТАМИ в процессе: после каждого "
-                                    "значимого шага — sign_step(done=…) и продолжай без паузы (страховка от "
-                                    "потери прогресса при сбросе контекста). Финальная подпись — один раз "
-                                    "перед ответом, со status. "
-                                    "goal — что делал за ход (≤15 слов), done — что сделано (≤15 слов), "
-                                    "status: progress|blocked|decision|answered, "
-                                    "entities — только то, что реально встречалось в ходе (пути, URL, имена инструментов; ≤6). "
-                                    "Свободная проза запрещена; служебный инструмент, в ответе человеку его не упоминай."),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "goal": {"type": "string", "description": "Цель хода, ≤15 слов (можно пустую для чекпоинта)"},
-                            "done": {"type": "string", "description": "Что сделано, ≤15 слов"},
-                            "status": {"type": "string", "enum": ["progress", "blocked", "decision", "answered"], "description": "Итог хода (для чекпоинта — progress)"},
-                            "entities": {"type": "array", "items": {"type": "string"}, "description": "Сущности, реально встречавшиеся в ходе (≤6)"}
-                        },
-                        "required": ["goal", "done", "status"]
-                    }
-                }
-            },
-        }
-    
+            for alias in spec.aliases:
+                self._tool_registry[alias] = (spec.module_path, spec.entry)
+        # Папки-плагины, нарушившие контракт (битый манифест, нет README, …).
+        for folder, reason in d.invalid.items():
+            self.broken_tools[f"tools/{folder}/"] = {
+                "error_type": "PluginContractError",
+                "error": reason,
+                "traceback": "",
+            }
+
+    def _refresh_if_stale(self):
+        """Дёшево проверить, не изменилась ли папка инструментов.
+
+        ``tool_discovery.discover`` возвращает тот же объект, пока штамп
+        содержимого не изменился, поэтому проверка стоит один обход папки и не
+        требует перезапуска: удалили/положили/поправили плагин — видно сразу.
+        """
+        try:
+            if tool_discovery.discover(self._tools_dir) is not self._discovery:
+                self._sync_discovery()
+        except Exception:
+            pass
+
+    def rediscover(self):
+        """Пересканировать папку инструментов: подключить/отключить плагины."""
+        tool_discovery.clear_cache()
+        self._sync_discovery()
+        return self._tool_registry
+
     def _load_tool(self, name):
         """Загружает инструмент по требованию (lazy load)"""
         if name in self._loaded:
             return name in self.tools
-        
+
         self._loaded.add(name)
-        
-        if name not in self._tool_registry:
+
+        spec = self._discovery.by_name(name) if self._discovery else None
+        if spec is None:
             return False
-        
-        module_name, func_name = self._tool_registry[name]
-        
+
         try:
-            module = importlib.import_module(module_name)
-            func = getattr(module, func_name)
-            
+            func = spec.entry_func()
+
             self.tools[name] = {
                 "function": func,
-                "description": self._descriptions.get(name, {})
+                "description": self._descriptions.get(name, {}),
+                # Что из контекста реально принимает функция (проверка по
+                # сигнатуре: манифест мог объявить лишнее, **kwargs — принять всё).
+                "provides": _accepted_provides(func, spec.provides),
             }
+            self._loaded_module_names[name] = spec.module_path
             return True
-            
+
         except SyntaxError as e:
             tb = traceback.format_exc()
             error_msg = f"SyntaxError: {e}"
@@ -626,6 +349,7 @@ class ToolManager:
     
     def get_all_descriptions(self):
         """Описания всех инструментов (включая сломанные с пометкой)"""
+        self._refresh_if_stale()
         result = {}
         for name in self._tool_registry:
             desc = self._descriptions.get(name, {}).copy() if self._descriptions.get(name) else {}
@@ -684,15 +408,23 @@ class ToolManager:
         if not name or not isinstance(name, str):
             return "Error: tool name is empty"
 
+        # Папку могли удалить/положить прямо сейчас — сначала свериться с диском.
+        self._refresh_if_stale()
+        if name not in self._tool_registry:
+            # Плагин могли положить в этом же ходе — пересканировать папку.
+            self.rediscover()
         if name not in self._tool_registry:
             return f"Error: unknown tool '{name}'"
 
         # Опасные действия в простом режиме: разрешены только внутри папки сессии.
+        # Классы опасности берём из манифеста плагина (`danger`), а не из имён —
+        # сторонний плагин с shell-подобными действиями тоже упрётся в гейт.
         if not self.dangerous_mode:
             action = args.get("action") if isinstance(args, dict) else None
             gate_action = editor_action_of(args) if name == "code_editor" else action
-            if name == "shell_exec" and (action or "run") in DANGEROUS_SHELL_ACTIONS:
-                msg = (f"Error: shell_exec action '{action or 'run'}' requires dangerous mode "
+            kinds = danger_kinds(name)
+            if DANGER_SHELL in kinds and (action or "run") in DANGEROUS_SHELL_ACTIONS:
+                msg = (f"Error: {name} action '{action or 'run'}' requires dangerous mode "
                        "(пользователь может разрешить переключение).")
                 if _safe_ops is not None:
                     suggestion = _safe_ops.suggest_for_shell(
@@ -703,12 +435,12 @@ class ToolManager:
                     else:
                         msg += f"\n{_safe_ops.catalog_short()}"
                 return msg
-            if (name in ("code_editor", "file_system")
+            if (DANGER_SESSION_WRITE in kinds
                     and gate_action in (DANGEROUS_EDITOR_ACTIONS + DANGEROUS_FILESYSTEM_ACTIONS)
                     and not allowed_in_session(name, args, session_path)):
                 return (f"Error: {name} action '{gate_action}' outside session requires dangerous mode "
                         "(пользователь может разрешить переключение)")
-            if name in ("curl", "web") and isinstance(args, dict) and args.get("output_path") \
+            if DANGER_SESSION_OUTPUT in kinds and isinstance(args, dict) and args.get("output_path") \
                     and not allowed_in_session(name, args, session_path):
                 return (f"Error: {name} output_path outside session requires dangerous mode "
                         "(пользователь может разрешить переключение)")
@@ -720,25 +452,18 @@ class ToolManager:
             return f"Error: tool '{name}' is not available"
 
         func = tool["function"]
+        # Контекст передаём строго по контракту плагина (манифест `provides`,
+        # отфильтрованный по сигнатуре при загрузке) — без списков имён в ядре.
+        provided = tool.get("provides") or ()
+        kwargs = dict(args)
+        if session_path is not None and PROVIDES_SESSION in provided:
+            kwargs[provides_kwarg(PROVIDES_SESSION)] = session_path
+        if PROVIDES_PROGRESS in provided and progress_callback is not None:
+            kwargs[provides_kwarg(PROVIDES_PROGRESS)] = progress_callback
+        if PROVIDES_DANGEROUS in provided:
+            kwargs[provides_kwarg(PROVIDES_DANGEROUS)] = self.dangerous_mode
         try:
-            if session_path is not None:
-                try:
-                    # Для curl/web передаем progress_callback (живой прогресс в панели)
-                    if name in ("curl", "web", "web_search", "open_url", "web_extract") and progress_callback is not None:
-                        return func(session_path=session_path, progress_callback=progress_callback, **args)
-                    # Для file_system/code_editor передаем dangerous_mode
-                    if name in ("file_system", "code_editor"):
-                        return func(session_path=session_path, dangerous_mode=self.dangerous_mode, **args)
-                    return func(session_path=session_path, **args)
-                except TypeError:
-                    return func(**args)
-            # Для curl/web без session_path тоже передаем progress_callback
-            if name in ("curl", "web", "web_search", "open_url", "web_extract") and progress_callback is not None:
-                return func(progress_callback=progress_callback, **args)
-            # Для file_system без session_path тоже передаем dangerous_mode
-            if name == "file_system":
-                return func(dangerous_mode=self.dangerous_mode, **args)
-            return func(**args)
+            return func(**kwargs)
         except Exception as e:
             tb = traceback.format_exc()
             log_tool_error(name, type(e).__name__, str(e), tb)

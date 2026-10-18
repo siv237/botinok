@@ -1,27 +1,29 @@
 ---
 type: entity
 tags: [tool]
-updated: 2026-09-18
-sources: 3
+updated: 2026-10-18
+sources: 4
 status: stable
 ---
 
 # ToolManager
 
-`core/tool_manager.py` — класс `ToolManager`. Реестр, описания и **lazy-загрузка** всех инструментов (function calling).
+`core/tool_manager.py` — класс `ToolManager`. Реестр, описания и **lazy-загрузка** всех инструментов (function calling). Набор инструментов — плагинный: реестр и схемы собираются сканированием папок `tools/` (`core/tool_discovery.py`), рукописных таблиц в ядре нет. → `concepts/tool_plugins.md`
 
 ## Как работает
-- **Реестр** `_tool_registry`: имя инструмента → `(module, function)`. Единый веб-добыватель `web` (`tools/web.py`) + legacy-обёртки `web_search`/`open_url`/`web_extract`/`curl` и алиас `web_extractor` (подробно в `entities/tools/`).
-- **Lazy-загрузка** `_load_tool(name)`: модуль импортируется `importlib.import_module` только при первом обращении. Сломанные (SyntaxError/прочие исключения) фиксируются в `broken_tools` и логируются (`~/.botinok/logs/tools.log`).
-- **Описания** `_descriptions`: JSON Schema в OpenAI-формате (`type: function`) — напрямую отдаются модели как `tools`.
+- **Реестр** `_tool_registry`: имя инструмента → `(module, function)`. Собирается `_sync_discovery()` из папок `tools/<folder>/tool.json` (+ алиасы). Единый веб-добыватель `web` + legacy-обёртки `web_search`/`open_url`/`web_extract`/`curl` и алиас `web_extractor` (подробно в `entities/tools/`).
+- **Lazy-загрузка** `_load_tool(name)`: реализация плагина импортируется только при первом обращении (`ToolSpec.entry_func()`). Сломанные (SyntaxError/прочие исключения) фиксируются в `broken_tools` и логируются (`~/.botinok/logs/tools.log`).
+- **Описания** `_descriptions`: JSON Schema в OpenAI-формате (`type: function`) из манифестов — напрямую отдаются модели как `tools`.
+- **Подключение/отключение на лету**: `_refresh_if_stale()` сверяет штамп содержимого папки перед сборкой payload и вызовом, `rediscover()` пересобирает реестр и сбрасывает закэшированные вызовы. Удалили папку — инструмента нет в payload/каталоге/вызовах; положили — появился, без перезапуска.
 - **Данжер-режим**: `dangerous_mode` берётся из env `BOTINOK_DANGEROUS=1` (или переключается в TUI командой `/dangerous`). → `concepts/dangerous_mode.md`
-- **Гейт опасных действий** (`call_tool`, простой режим): `shell_exec` (`run/send/send_key/kill/wait`) запрещён; запись `code_editor`, мутации `file_system` и `curl output_path` разрешены только **внутри** `session_path`, иначе — ошибка с намёком, что пользователь может разрешить переключение.
+- **Гейт опасных действий** (`call_tool`, простой режим): работает по классам опасности из манифеста плагина (`danger`: `shell` / `session_write` / `session_output`) — `shell_exec` (опасные action) запрещён; мутации `code_editor`/`file_system` и запись `curl`/`web` разрешены только **внутри** `session_path`, иначе — ошибка с намёком, что пользователь может разрешить переключение. Сторонний плагин с объявленным `danger` гейтится так же; таблица встроенных имён осталась лишь страховкой при недоступном сканировании.
 
 ## Ключевые методы
-- `get_tool(name)`, `get_all_tools()`, `call_tool(name, args, session_path, progress_callback)` — выполнение с подстановкой `session_path`, `progress_callback` (curl), `dangerous_mode` (file_system).
-- `call_tool` принимает `args` как dict или JSON-строку; даёт понятные ошибки для неизвестного/сломанного инструмента.
+- `get_tool(name)`, `get_all_tools()`, `call_tool(name, args, session_path, progress_callback)` — выполнение; контекст подставляется строго по контракту плагина (`provides` ∩ сигнатура): `session_path`, `progress_callback`, `dangerous_mode`.
+- `call_tool` принимает `args` как dict или JSON-строку; даёт понятные ошибки для неизвестного/сломанного инструмента; неизвестное имя → `rediscover()` (папку могли положить в этом же ходе).
 - `get_all_descriptions()` / `get_tool_definitions()` — определения для модели, включая пометку сломанных.
-- `get_broken_tools_info()` — человекочитаемый свод о сломанных инструментах для агента.
+- `rediscover()` — пересканировать папку инструментов (подключить/отключить плагины).
+- `get_broken_tools_info()` — человекочитаемый свод о сломанных инструментах для агента (в т.ч. папки, нарушившие контракт: `PluginContractError`).
 
 ## Безопасность в call_tool
 Если не `dangerous_mode` — ошибку «requires dangerous mode» возвращают:
@@ -35,5 +37,5 @@ dangerous mode снимает ограничение корня). → `concepts/
 `entities/tools/file-system.md`, `entities/tools/code-editor.md`, `entities/tools/curl.md`
 
 ## Связи
-- Регистрирует модули из `tools/*`.
+- Регистрирует плагины из `tools/<folder>/` (манифест `tool.json`). → `concepts/tool_plugins.md`
 - Вызывается из `botinok.py` и `textual_integration.py` в цикле tool-calls. → `concepts/function_calling.md`

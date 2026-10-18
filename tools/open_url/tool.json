@@ -1,0 +1,28 @@
+{
+  "name": "open_url",
+  "entry": "open_url",
+  "provides": [
+    "session_path",
+    "progress"
+  ],
+  "description": "Открыть ссылку и извлечь текст со страницы (использует lynx -dump)",
+  "schema": {
+    "type": "function",
+    "function": {
+      "name": "open_url",
+      "description": "Открыть ссылку и извлечь текст со страницы (использует lynx -dump)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "URL страницы (http/https)"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "name": "session_memory",
+  "entry": "session_memory_tool",
+  "provides": [
+    "session_path"
+  ],
+  "always_on": true,
+  "description": "Протокольный доступ к истории сессии: точные timestamps, строгий порядок ходов (turn_id 1..N), полный текст сообщений и указатели на артефакты/инструменты",
+  "schema": {
+    "type": "function",
+    "function": {
+      "name": "session_memory",
+      "description": "Протокольный доступ к истории сессии: точные timestamps, строгий порядок ходов (turn_id 1..N), полный текст сообщений и указатели на артефакты/инструменты. Основной инструмент для продолжения сессии и поиска в ней — НЕ читай context.json/response.md через file_system, здесь то же самое быстрее и с подсказками следующих шагов. Вызов: action=restore — ТОЧНОЕ восстановление контекста из снапшота (EXACT, можно доверять как есть); action=resume_brief — обзор для продолжения; get_turn(turn_id, include_content=true) — полный ход (DERIVED); search(query) — гибкий поиск (HINT, требует перепроверки); turns/timeline — последовательность; context_map — карта живого контекста (кто сколько токенов съел); context_stats — исторические цены (типичный раунд, цены инструментов, запас контекста) для ПЛАНИРОВАНИЯ большой задачи; compact(blocks=\"1,3-5\") — освободить отработанные блоки из контекста (текущий ход не сжимается); help — справка. В каждом ответе поле _confidence: EXACT | DERIVED | HINT — отличай точный результат от наметки. Синтаксис прощающий по формату: синонимы (brief/turn/list/find/exact), строковые числа, алиасы (q/id/full), пустой action → resume_brief; неизвестное действие → ambiguous=true со списком вариантов (смысл не подменяется). Поиск: регистр/пробелы не важны, части слов, кириллические окончания, выдаёт файл:строка и время. Каждый ответ содержит совет и блок «Следующие шаги».",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "resume_brief",
+              "summary",
+              "turns",
+              "get_turn",
+              "search",
+              "filter",
+              "timeline",
+              "stats",
+              "chain",
+              "restore",
+              "windows",
+              "context_map",
+              "compact",
+              "context_stats"
+            ],
+            "description": "resume_brief - быстрый сбор сессии для продолжения (задача, состояние, последние ходы), summary - сводка сессии, turns - список обменов, get_turn - конкретный turn, search - поиск по тексту, filter - фильтрация, timeline - хронология, stats - статистика, chain - цепочка turns, restore - точное восстановление из снапшота, windows - окна вызовов модели (дайджест), context_map - карта живого контекста (стоимость каждого блока), compact - запросить сжатие указанных блоков, context_stats - исторические цены для планирования расхода"
+          },
+          "session_path": {
+            "type": "string",
+            "description": "Путь к сессии (опционально, по умолчанию текущая)"
+          },
+          "turn_id": {
+            "type": "integer",
+            "description": "ID turn для get_turn"
+          },
+          "query": {
+            "type": "string",
+            "description": "Строка поиска для search"
+          },
+          "blocks": {
+            "type": "string",
+            "description": "Для compact: id блоков из context_map, формат \"1,3-5\""
+          },
+          "note": {
+            "type": "string",
+            "description": "Для compact: короткая пометка, что было в блоках (попадёт в заглушку)"
+          },
+          "since": {
+            "type": "string",
+            "description": "Фильтр: начальное время (ISO format)"
+          },
+          "until": {
+            "type": "string",
+            "description": "Фильтр: конечное время (ISO format)"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant",
+              "system"
+            ],
+            "description": "Фильтр по роли сообщения"
+          },
+          "has_tool_calls": {
+            "type": "boolean",
+            "description": "Фильтр: только turns с tool_calls"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Лимит результатов (по умолчанию 20)"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Смещение для пагинации"
+          },
+          "include_content": {
+            "type": "boolean",
+            "description": "Включать полный content (иначе только preview)"
+          },
+          "include_thinking": {
+            "type": "boolean",
+            "description": "Включать полный thinking (иначе только preview)"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  }
+}

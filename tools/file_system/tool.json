@@ -1,0 +1,93 @@
+{
+  "name": "file_system",
+  "entry": "file_system_tool",
+  "provides": [
+    "session_path",
+    "dangerous_mode"
+  ],
+  "danger": [
+    "session_write"
+  ],
+  "description": "Файлы и система",
+  "schema": {
+    "type": "function",
+    "function": {
+      "name": "file_system",
+      "description": "Файлы и система. Безопасные read-only действия работают всегда (везде): list/search/grep/read/info/find и inspect (fs.base64, fs.file_type, fs.stat, fs.count, fs.hash, fs.listing, fs.readlink, sys.*, proc.*, svc.*, net.*, git.*, image.meta, text.base64_decode). Подробности и примеры: action=help. Файловые мутации (delete/move/copy/mkdir/chmod/symlink/touch) разрешены внутри папки сессии (вне — dangerous_mode).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "help",
+              "list",
+              "search",
+              "grep",
+              "read",
+              "info",
+              "inspect",
+              "find",
+              "delete",
+              "move",
+              "copy",
+              "mkdir",
+              "chmod",
+              "symlink",
+              "touch"
+            ],
+            "description": "help — каталог безопасных возможностей. Безопасные: list,search,grep,read,info,inspect,find. Мутации: delete,move,copy,mkdir,chmod,symlink,touch (внутри сессии без dangerous_mode)"
+          },
+          "path": {
+            "type": "string",
+            "description": "Исходный путь (для всех команд)"
+          },
+          "dest": {
+            "type": "string",
+            "description": "Целевой путь (для move, copy, symlink)"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Права доступа в octal или символьном виде (для chmod, mkdir)"
+          },
+          "command": {
+            "type": "string",
+            "description": "Подкоманда для action=inspect, напр. fs.base64, fs.file_type, fs.hash, net.ports, git.log, image.meta. Полный список: action=help"
+          },
+          "algo": {
+            "type": "string",
+            "description": "Алгоритм для fs.hash: md5|sha1|sha256|sha512"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Маска ИМЕНИ файла (glob, напр. *.py) для search/grep; по умолчанию *"
+          },
+          "recursive": {
+            "type": "boolean",
+            "description": "Рекурсивно по подкаталогам (search/grep/inspect)"
+          },
+          "content_query": {
+            "type": "string",
+            "description": "grep — regex по содержимому (регистронезависимо; path может быть файлом или каталогом; спецсимволы экранируй). search — если задан, ищет по содержимому. Также имя для net.dns/dev.which, ref для git.grep, base64 для text.base64_decode"
+          },
+          "max_results": {
+            "type": "integer"
+          },
+          "max_bytes": {
+            "type": "integer",
+            "description": "Лимит вывода (для чтения/base64/ls)"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  }
+}

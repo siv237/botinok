@@ -1,0 +1,30 @@
+{
+  "name": "journal",
+  "entry": "journal_tool",
+  "description": "Read-only анализ systemd journal через journalctl",
+  "schema": {
+    "type": "function",
+    "function": {
+      "name": "journal",
+      "description": "Read-only анализ systemd journal через journalctl",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "tail",
+              "unit_tail",
+              "since",
+              "query",
+              "stats"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  }
+}

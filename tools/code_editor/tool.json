@@ -1,0 +1,111 @@
+{
+  "name": "code_editor",
+  "entry": "code_editor",
+  "provides": [
+    "session_path",
+    "dangerous_mode"
+  ],
+  "danger": [
+    "session_write"
+  ],
+  "description": "Единый редактор файлов",
+  "schema": {
+    "type": "function",
+    "function": {
+      "name": "code_editor",
+      "description": "Единый редактор файлов. action=read — чтение с пагинацией (offset/limit, line_numbers), возвращает sha256 и мету; action=write — полная запись (content, атомарно, сохраняет кодировку/EOL); action=replace — одна замена (old_text→new_text, replace_all); action=apply — несколько замен за вызов атомарно (edits=[{old_text,new_text}]); action=undo — откат последней правки из чекпоинта; action=check — проверка синтаксиса без запуска кода (python/json/yaml/toml/xml/bash/js/ts/html), при неоднозначном типе возвращает candidates и kind=; action=help — справка. Инструмент прощает дрейф отступов и переводов строк (fuzzy) и сообщает ближайшее совпадение, если точного нет. Возвращает unified diff; после правок автоматически проверяет синтаксис (поле syntax). Устаревший файл (изменён вне сессии) отклоняется. Запись вне папки сессии требует dangerous mode.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "read",
+              "write",
+              "replace",
+              "apply",
+              "undo",
+              "check",
+              "help"
+            ],
+            "description": "Действие"
+          },
+          "path": {
+            "type": "string",
+            "description": "Путь к файлу (в сессии относительный резолвится в session_path/project/)"
+          },
+          "content": {
+            "type": "string",
+            "description": "Содержимое для action=write"
+          },
+          "old_text": {
+            "type": "string",
+            "description": "Текст для замены (action=replace)"
+          },
+          "new_text": {
+            "type": "string",
+            "description": "Новый текст (action=replace); пустая строка = удаление"
+          },
+          "edits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "old_text": {
+                  "type": "string"
+                },
+                "new_text": {
+                  "type": "string"
+                },
+                "replace_all": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "description": "Список замен для action=apply (атомарно)"
+          },
+          "replace_all": {
+            "type": "boolean",
+            "description": "Заменить все вхождения old_text (по умолчанию false)"
+          },
+          "create": {
+            "type": "boolean",
+            "description": "Создавать файл если не существует (по умолчанию false)"
+          },
+          "expected_sha256": {
+            "type": "string",
+            "description": "Ожидаемый SHA256 файла для проверки перед записью"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Строка начала чтения (action=read, с 0)"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Сколько строк читать (action=read; 0 = все)"
+          },
+          "line_numbers": {
+            "type": "boolean",
+            "description": "Показывать номера строк при чтении"
+          },
+          "checkpoint": {
+            "type": "string",
+            "description": "Путь чекпоинта для action=undo (иначе последний)"
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Для action=undo: откатить даже если файл изменился после правки"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Для action=check: язык/тип вручную (python/json/yaml/toml/xml/bash/javascript/typescript/html), если автоопределение неоднозначно"
+          }
+        },
+        "required": [
+          "action",
+          "path"
+        ]
+      }
+    }
+  }
+}

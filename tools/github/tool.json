@@ -1,0 +1,37 @@
+{
+  "name": "github",
+  "entry": "github",
+  "description": "Работа с GitHub API",
+  "schema": {
+    "type": "function",
+    "function": {
+      "name": "github",
+      "description": "Работа с GitHub API",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "search_repos",
+              "get_repo",
+              "get_readme",
+              "get_file",
+              "get_tags",
+              "get_branches"
+            ]
+          },
+          "query": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    }
+  }
+}
