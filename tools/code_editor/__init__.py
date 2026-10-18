@@ -29,7 +29,7 @@ import tempfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.path_utils import resolve_session_path
+from core.path_utils import install_root, resolve_session_path
 from core.syntax_check import check_syntax, SUPPORTED_KINDS
 
 MAX_BYTES_DEFAULT = 20_000_000
@@ -74,7 +74,9 @@ def normalize_action(action: Any) -> str:
 
 
 def _project_root() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    # Корень установки ботинка (не папка плагина): модуль лежит в
+    # tools/code_editor/, поэтому dirname(__file__)/.. указывал бы на tools/.
+    return install_root()
 
 
 def _safe_path(path: str, root: str) -> str:

@@ -8,7 +8,7 @@ status: legacy
 
 # Инструмент web_search (legacy-обёртка)
 
-`tools/web_search.py` → функция `ddg_search(query, session_path=None)`.
+`tools/web_search/` → функция `ddg_search(query, session_path=None)`.
 **Legacy-алиас** единого веб-кита `entities/tools/web.md`: делегирует в
 `web action=search` (DuckDuckGo HTML через httpx, fallback — lynx).
 

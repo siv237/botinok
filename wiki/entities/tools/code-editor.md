@@ -8,7 +8,7 @@ status: stable
 
 # Инструмент code_editor (edit-кит)
 
-`tools/code_editor.py` → функция `code_editor(...)`. Единый редактор файлов,
+`tools/code_editor/` → функция `code_editor(...)`. Единый редактор файлов,
 приведённый к «помогающей» парадигме (как `web` и `session_memory`).
 Концепция — `concepts/edit_kit.md`.
 

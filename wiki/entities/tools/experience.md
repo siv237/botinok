@@ -8,7 +8,7 @@ status: stable
 
 # Инструмент experience
 
-`tools/experience.py` → функция `experience(...)`. Локальная база «позитивного» и «негативного» опыта: агент **учится на своих ошибках**. → `concepts/experience_learning.md`
+`tools/experience/` → функция `experience(...)`. Локальная база «позитивного» и «негативного» опыта: агент **учится на своих ошибках**. → `concepts/experience_learning.md`
 
 ## Параметры
 - `action` (обязательно): `add_positive` · `add_negative` · `search` · `list` · `check`.

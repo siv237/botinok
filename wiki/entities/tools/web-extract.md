@@ -8,7 +8,7 @@ status: legacy
 
 # Инструмент web_extract (legacy-обёртка)
 
-`tools/web_extract.py` → функция `web_extract(url, extract, ...)`. **Legacy-алиас**
+`tools/web_extract/` → функция `web_extract(url, extract, ...)`. **Legacy-алиас**
 единого веб-кита `entities/tools/web.md`: делегирует в `web action=extract`
 (структура: ссылки, изображения, заголовки, мета-теги, таблицы + `css`-селекторы).
 Алиас `web_extractor` сохранён.

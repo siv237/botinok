@@ -8,7 +8,7 @@ status: stable
 
 # Инструмент audio
 
-`tools/audio.py` → функция `execute(...)`. Анализ аудио мультимодальной (omni) моделью (Qwen3-Omni, Qwen3.5-Omni/27B и др.). Аудиофайл конвертируется в base64 и передаётся в LLM. → `concepts/audio_multimodal.md`
+`tools/audio/` → функция `execute(...)`. Анализ аудио мультимодальной (omni) моделью (Qwen3-Omni, Qwen3.5-Omni/27B и др.). Аудиофайл конвертируется в base64 и передаётся в LLM. → `concepts/audio_multimodal.md`
 
 ## Параметры
 - `audio_path` — локальный файл (wav, mp3, ogg, flac, m4a, webm, aiff).

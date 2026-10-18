@@ -8,7 +8,7 @@ status: legacy
 
 # Инструмент open_url (legacy-обёртка)
 
-`tools/open_url.py` → функция `open_url(url, session_path=None)`. **Legacy-алиас**
+`tools/open_url/` → функция `open_url(url, session_path=None)`. **Legacy-алиас**
 единого веб-кита `entities/tools/web.md`: делегирует в `web action=open`
 (читаемый основной текст страницы в markdown). Если схема опущена — добавляет
 `https://`.

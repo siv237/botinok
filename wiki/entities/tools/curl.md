@@ -8,7 +8,7 @@ status: legacy
 
 # Инструмент curl (legacy-обёртка)
 
-`tools/curl.py` → функция `execute(...)`. **Legacy-алиас** единого веб-кита
+`tools/curl/` → функция `execute(...)`. **Legacy-алиас** единого веб-кита
 `entities/tools/web.md`; нового кода с ним писать не нужно.
 
 ## Делегирование

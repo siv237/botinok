@@ -3,7 +3,7 @@
 Единый реестр безопасных (read-only) операций и подсказок для агента.
 
 Используется:
-  * `tools/file_system.py` — реализует операции (`action=inspect` + `action=help`);
+  * `tools/file_system/` — реализует операции (`action=inspect` + `action=help`);
   * `core/tool_manager.py` — при запрете `shell_exec run` предлагает безопасный
     эквивалент на основе этого же реестра.
 

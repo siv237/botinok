@@ -97,9 +97,13 @@ _JQ_DANGEROUS = (
 
 def _config():
     import configparser
+    from core.path_utils import install_root
     cfg = {"user_agent": DEFAULT_UA, "max_chars": DEFAULT_PREVIEW_CHARS,
            "connect_timeout": 6, "read_timeout": 10}
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.cfg")
+    # config.cfg лежит в корне установки; модуль плагина — в tools/web/, поэтому
+    # путь считаем от install_root, а не от dirname(__file__) (регрессия после
+    # переезда инструментов в папки: читался бы tools/config.cfg).
+    path = os.path.join(install_root(), "config.cfg")
     try:
         parser = configparser.ConfigParser()
         if os.path.exists(path):

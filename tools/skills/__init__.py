@@ -10,13 +10,17 @@ from pathlib import Path
 import io
 from contextlib import redirect_stdout
 
+from core.path_utils import install_root
+
 PERSONAL_DIR = Path.home() / ".botinok" / "skills"
 # Абсолютный путь папки запуска: относительный «skills» модель резолвила
 # как умела и попадала не туда (регресс 2026-10-11).
 PROJECT_DIR = Path("skills").resolve()
 # Вкомпонованные скилы рядом с самим ботинком (поставляются в репозитории):
 # доступны в любом проекте сразу после установки/обновления.
-BUNDLED_DIR = Path(__file__).resolve().parent.parent / "skills"
+# Корень установки берём через core.path_utils: модуль плагина лежит в
+# tools/skills/, поэтому прежний parent.parent указывал на tools/ (регрессия).
+BUNDLED_DIR = Path(install_root()) / "skills"
 
 def ensure_dirs():
     PERSONAL_DIR.mkdir(parents=True, exist_ok=True)

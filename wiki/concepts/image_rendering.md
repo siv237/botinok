@@ -20,7 +20,7 @@ status: stable
 | Маркер | `core/image_refs.py` | разбор `[[image:<id>|alt]]` → сегменты текст/картинка, резолв id → путь |
 | Рендер | `core/image_render.py` | нормализация под размер окна (`prepare_scaled`) + полосовой chafa (`render_image_band`), кэши ANSI/`rich.Text`/полос, бюджет памяти |
 | Виджет | `core/image_block.py` | ленивый `ImageBlock`: фикс. высота + уменьшенная копия под окно + видимый срез |
-| Инструмент | `tools/image_show.py` | `image` — добавить и получить `token` для вставки в ответ |
+| Инструмент | `tools/image_show/` | `image` — добавить и получить `token` для вставки в ответ |
 
 ## Почему идентификаторы, а не картинки
 

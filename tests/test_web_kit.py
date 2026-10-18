@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Smoke-тест единого веб-добывателя (`tools/web.py`) и legacy-обёрток.
+Smoke-тест единого веб-добывателя (`tools/web/`) и legacy-обёрток.
 
 Поднимаем локальный HTTP-сервер (без сети) и проверяем:
   * action=json (проекция и сводка), open, extract, download, auto-роутинг;

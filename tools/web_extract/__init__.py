@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-web_extract — legacy-обёртка над единым веб-добывателем `tools/web.py`.
+web_extract — legacy-обёртка над единым веб-добывателем `tools/web/`.
 
 Делегирует в web action=extract (структурированное извлечение:
 links / images / headings / meta / tables). Новый код должен использовать `web`.

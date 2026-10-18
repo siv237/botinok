@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Тест grep/search в `tools/file_system.py`.
+Тест grep/search в `tools/file_system/`.
 
 Регрессии из живой сессии 20260919_090557:
   * grep по пути-ФАЙЛУ возвращал «Совпадений не найдено» (glob file/*);

@@ -80,7 +80,7 @@ tools/<folder>/
 
 ## Откуда берётся «всегда включённое» и известные имена
 
-`tools/tools_catalog.py` читает манифесты через `tool_discovery.always_on_names()`
+`tools/tools_catalog/` читает манифесты через `tool_discovery.always_on_names()`
 и `known_names()`: каталог, `enable/disable` и фильтр payload следуют за папками,
 а не за списком в коде.
 

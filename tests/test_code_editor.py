@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Тест edit-кита `tools/code_editor.py`.
+Тест edit-кита `tools/code_editor/`.
 
 Проверяем:
   * write (create) + JSON-совместимость ("changed": true);

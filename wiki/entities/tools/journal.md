@@ -8,7 +8,7 @@ status: stable
 
 # Инструмент journal
 
-`tools/journal.py` → функция `journal_tool(...)`. Read-only анализ systemd journal через `journalctl` (и аналог на macOS — `log show`).
+`tools/journal/` → функция `journal_tool(...)`. Read-only анализ systemd journal через `journalctl` (и аналог на macOS — `log show`).
 
 ## Параметры
 - `action` (обязательно): `tail` · `unit_tail` · `since` · `query` · `stats`.

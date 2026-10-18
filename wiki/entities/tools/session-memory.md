@@ -8,7 +8,7 @@ status: stable
 
 # Инструмент session_memory (архивариус-советник)
 
-`tools/session_memory.py` → `session_memory_tool(...)`. **Протокольный доступ к истории сессии**: точные timestamps, строгий порядок ходов (`turn_id` 1..N), полные тексты, указатели на артефакты. Основной инструмент продолжения и поиска — вместо прямого чтения `context.json`/`response.md` через `file_system`. → `concepts/session_resume.md`, `entities/session_directory.md`
+`tools/session_memory/` → `session_memory_tool(...)`. **Протокольный доступ к истории сессии**: точные timestamps, строгий порядок ходов (`turn_id` 1..N), полные тексты, указатели на артефакты. Основной инструмент продолжения и поиска — вместо прямого чтения `context.json`/`response.md` через `file_system`. → `concepts/session_resume.md`, `entities/session_directory.md`
 
 ## Достоверность (`_confidence`)
 Каждый ответ помечает природу данных, чтобы агент отличал точный результат от наметки:

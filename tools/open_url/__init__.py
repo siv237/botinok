@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-open_url — legacy-обёртка над единым веб-добывателем `tools/web.py`.
+open_url — legacy-обёртка над единым веб-добывателем `tools/web/`.
 
 Делегирует в web action=open (читаемый основной текст страницы в markdown).
 Новый код должен использовать `web`.

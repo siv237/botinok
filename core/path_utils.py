@@ -10,6 +10,26 @@ from typing import Optional
 PROJECT_SUBDIR = "project"
 
 
+def install_root() -> str:
+    """Корень установки ботинка (папка с ``botinok.py``).
+
+    Нужен инструментам-плагинам: модуль плагина лежит в своей папке
+    (``tools/<name>/__init__.py``), поэтому ``dirname(__file__)/..`` больше не
+    указывает на корень — только на ``tools/``. Ходим вверх до маркера
+    установки, чтобы путь не зависел от глубины папки плагина.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidate = os.path.dirname(here)          # core/ → корень установки
+    for _ in range(4):
+        if os.path.isfile(os.path.join(candidate, "botinok.py")):
+            return candidate
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+    return os.path.dirname(here)
+
+
 def resolve_session_path(raw_path: str, session_path: Optional[str]) -> str:
     """Резолвит путь для инструментов, работающих с папкой сессии.
 

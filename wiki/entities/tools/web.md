@@ -8,7 +8,7 @@ status: stable
 
 # Инструмент web (единый добыватель данных)
 
-`tools/web.py` → функция `execute(...)`. Один инструмент вместо четырёх:
+`tools/web/` → функция `execute(...)`. Один инструмент вместо четырёх:
 `web_search`, `open_url`, `web_extract`, `curl` остаются **legacy-обёртками**
 поверх этого ядра. → `concepts/web_kit.md`
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-curl — legacy-обёртка над единым веб-добывателем `tools/web.py`.
+curl — legacy-обёртка над единым веб-добывателем `tools/web/`.
 
 Сохраняет прежнюю сигнатуру (включая `jq_filter`) и делегирует в web:
   * `jq_filter`   → web action=json (проекция JSON);

@@ -8,7 +8,7 @@ status: stable
 
 # Инструмент github
 
-`tools/github.py` → функция `github(...)`. Работа с GitHub API.
+`tools/github/` → функция `github(...)`. Работа с GitHub API.
 
 ## Параметры
 - `action` (обязательно): `search_repos` · `get_repo` · `get_readme` · `get_file` · `get_tags` · `get_branches`.

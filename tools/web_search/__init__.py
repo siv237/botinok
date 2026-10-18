@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-web_search — legacy-обёртка над единым веб-добывателем `tools/web.py`.
+web_search — legacy-обёртка над единым веб-добывателем `tools/web/`.
 
 Делегирует в web action=search (DuckDuckGo HTML, fallback lynx).
 Новый код должен использовать `web`.

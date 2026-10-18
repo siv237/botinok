@@ -8,7 +8,7 @@ status: stable
 
 # Инструмент vision
 
-`tools/vision.py` → функция `execute(...)`. Анализ изображений мультимодальной моделью (llava, bakllava, Qwen3.5 и др.). Изображение конвертируется в base64 и передаётся в LLM. → `concepts/vision_multimodal.md`
+`tools/vision/` → функция `execute(...)`. Анализ изображений мультимодальной моделью (llava, bakllava, Qwen3.5 и др.). Изображение конвертируется в base64 и передаётся в LLM. → `concepts/vision_multimodal.md`
 
 ## Параметры
 - `image_path` — локальный файл (jpg, png, gif, webp, bmp).

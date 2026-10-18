@@ -26,7 +26,7 @@ entities/tools/session-memory.md.
   (prompts/context_overflow_*.txt), история очищается до system + протокол.
   Бюджет восстановлений `MAX_AUTO_RECOVERIES_PER_TURN=2`.
 - Stealth/pipe (`botinok.py:453,548`) умеет только тримм, без суммаризации.
-- `session_memory` (`tools/session_memory.py`): объектная модель Turn/ToolCall, 9 действий,
+- `session_memory` (`tools/session_memory/`): объектная модель Turn/ToolCall, 9 действий,
   EXACT/DERIVED/HINT, прощающий синтаксис; поиск — линейный перебор + построчный обход
   файлов сессии (`файл:строка + timestamp`). word-индекс `.index/session_memory.idx`
   декоративный: индексирует только `[a-zA-Z_]`, кириллица не попадает; поиском не используется.
@@ -140,7 +140,7 @@ system-реплик при добавлении (`_append_system_once`); бюд�
 # План доработки (реализован 2026-10-07, см. log.md; коммиты — по решению человека)
 
 Обозначения: **TI** = `core/textual_integration.py`, **SM** = `core/session_manager.py`,
-**SMEM** = `tools/session_memory.py`. Этапы 1–3 — ядро (делать в первую очередь),
+**SMEM** = `tools/session_memory/`. Этапы 1–3 — ядро (делать в первую очередь),
 4–8 — независимые улучшения, порядок внутри произвольный. Каждый этап — отдельный
 коммит с тестом.
 
@@ -208,7 +208,7 @@ system-реплик при добавлении (`_append_system_once`); бюд�
 
 ## Этап 6. `sign_step` — харнес подписаний
 
-- Новый внутренний инструмент (tools/sign_step.py, регистрация в ToolManager, не
+- Новый внутренний инструмент (tools/sign_step/, регистрация в ToolManager, не
   показывать в чате; результат — «ok»). Схема: `goal` (≤15 слов), `done` (≤15 слов),
   `status` enum [progress|blocked|decision|answered], `entities` (список ≤6).
 - Харнес на ходе отслеживает закрытый список observed_entities (пути, URL, имена

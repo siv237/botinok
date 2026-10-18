@@ -8,7 +8,7 @@ status: stable
 
 # Инструмент skills
 
-`tools/skills.py` → функция `skills(...)`. Мощная система расширения функционала — менеджер AI-навыков. → `concepts/skills_system.md`
+`tools/skills/` → функция `skills(...)`. Мощная система расширения функционала — менеджер AI-навыков. → `concepts/skills_system.md`
 
 ## Действия
 - `list` · `get` · `add` · `remove` · `run` — управление навыками.
@@ -19,7 +19,7 @@ status: stable
 - **Project**: `./skills/` — общие навыки проекта (напр. `skills/excel/SKILL.md`).
 
 ## Особенности
-- Каждый навык — папка с `SKILL.md` (описание) и реализацией на Python, подключаемой через `tools/skills.py`.
+- Каждый навык — папка с `SKILL.md` (описание) и реализацией на Python, подключаемой через `tools/skills/`.
 - `_ensure_dirs`, `find_skill`, `get_skill_description`, `get_raw_url`/`fetch_file` (работа с raw GitHub), ClawHub API (`clawhub_search`, `clawhub_explore`, `clawhub_install`).
 - Командные функции `cmd_*` под каждое действие, включая `cmd_run`.
 

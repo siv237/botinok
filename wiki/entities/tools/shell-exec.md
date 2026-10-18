@@ -8,7 +8,7 @@ status: stable
 
 # Инструмент shell_exec
 
-`tools/shell_exec.py` → функция `shell_exec(...)`. «Shell как отдельная
+`tools/shell_exec/` → функция `shell_exec(...)`. «Shell как отдельная
 сессия»: команда запускается в PTY-сессии (`entities/shell_session.md`), которая
 **не держит агента**. Возвращает JSON-строку.
 
