@@ -398,11 +398,16 @@ def _estimate_messages_tokens_raw(msgs: list) -> int:
     return total
 
 
-def calibrate_token_estimator(model, prompt_eval_count, prepared_messages, persist_path=None):
+def calibrate_token_estimator(model, prompt_eval_count, prepared_messages, persist_path=None,
+                              cached_count=None):
     """EMA-поправка оценщика: k ← (1−α)·k + α·(prompt_eval_count / raw_estimate).
 
     Возвращает новый k или None, если замер неприменим (нет метрик/оценка нулевая,
     выброс за пределами 0.2–5.0). Деление на ноль защищено.
+
+    `cached_count` — сколько токенов промпта сервер взял из prompt-cache. Пишется
+    в performance.log рядом с prompt_eval_count: без него видно только полный
+    размер промпта, и обнулённый кеш выглядит как «нормальная» работа.
     """
     try:
         raw_est = _estimate_messages_tokens_raw(prepared_messages or [])
@@ -417,15 +422,22 @@ def calibrate_token_estimator(model, prompt_eval_count, prepared_messages, persi
         _token_k_state["current"] = k
         if persist_path:
             try:
+                entry = {
+                    "type": "token_calibration",
+                    "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "model": model,
+                    "k": round(k, 4),
+                    "prompt_eval_count": int(prompt_eval_count),
+                    "est_raw": int(raw_est),
+                }
+                if cached_count is not None:
+                    cached = max(0, int(cached_count))
+                    entry["prompt_eval_cached_count"] = cached
+                    entry["cached_pct"] = (
+                        int(cached / int(prompt_eval_count) * 100) if prompt_eval_count else 0
+                    )
                 with open(persist_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps({
-                        "type": "token_calibration",
-                        "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "model": model,
-                        "k": round(k, 4),
-                        "prompt_eval_count": int(prompt_eval_count),
-                        "est_raw": int(raw_est),
-                    }, ensure_ascii=False) + "\n")
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             except OSError:
                 pass
         return k
@@ -614,7 +626,20 @@ def _prepare_messages_for_ollama(sm, session_path, messages, num_ctx, reserve_to
                 break
     kept = [m for idx, m in enumerate(other_msgs) if keep[idx]]
     dropped = [m for idx, m in enumerate(other_msgs) if not keep[idx]]
-    trimmed = system_msgs + kept
+    # Порядок сообщений сохраняется: system-реплики остаются на своих местах.
+    # Hoist system в голову ломал prompt-cache сервера — любая новая памятка,
+    # добавленная по ходу (журнал, notice, checkpoint), влезала в середину
+    # головы промпта и обнуляла кеш всего диалога (регресс 2026-10-18: полный
+    # переэвал 8–28k токенов на каждый tool-раунд).
+    trimmed = []
+    _oi = 0
+    for _m in messages:
+        if _m.get("role") == "system":
+            trimmed.append(_m)
+            continue
+        if _oi < len(keep) and keep[_oi]:
+            trimmed.append(_m)
+        _oi += 1
     artifact_path = ""
     if dropped:
         _compression_stats["tokens"] += _estimate_messages_tokens(dropped)
@@ -637,7 +662,9 @@ def _prepare_messages_for_ollama(sm, session_path, messages, num_ctx, reserve_to
         first_kept_ts = max(dts) if dts else ""
     block = _build_forgotten_block(session_path, first_kept_ts)
     if block:
-        trimmed = system_msgs + [{"role": "system", "content": block}] + kept
+        # Блок «забытого» регенерируется на каждый запрос — держим его в хвосте,
+        # иначе он сдвигает префикс промпта и обнуляет кеш.
+        trimmed = trimmed + [{"role": "system", "content": block}]
     elif dropped:
         notice = {
             "role": "system",
@@ -646,7 +673,7 @@ def _prepare_messages_for_ollama(sm, session_path, messages, num_ctx, reserve_to
                 f"Старые сообщения сохранены в артефакт: {artifact_path}"
             )
         }
-        trimmed = system_msgs + [notice] + kept
+        trimmed = trimmed + [notice]
     return trimmed
 
 
@@ -1971,6 +1998,7 @@ def ask_ollama_textual(
             streaming_tool_tokens = 0
             tool_tokens = 0
             prompt_eval_count = 0
+            prompt_eval_cached_count = 0
             eval_count = 0
             last_chunk_time = time.time()
             _stream_buf.clear()
@@ -2057,6 +2085,8 @@ def ask_ollama_textual(
 
                     if "prompt_eval_count" in chunk:
                         prompt_eval_count = chunk.get("prompt_eval_count", 0)
+                    if "prompt_eval_cached_count" in chunk:
+                        prompt_eval_cached_count = chunk.get("prompt_eval_cached_count", 0)
                     if "eval_count" in chunk:
                         eval_count = chunk.get("eval_count", 0)
 
@@ -2140,6 +2170,7 @@ def ask_ollama_textual(
                             "total_duration_ms": chunk.get("total_duration", 0) / 1_000_000,
                             "load_duration_ms": chunk.get("load_duration", 0) / 1_000_000,
                             "prompt_eval_count": chunk.get("prompt_eval_count", 0),
+                            "prompt_eval_cached_count": chunk.get("prompt_eval_cached_count", 0),
                             "eval_count": chunk.get("eval_count", 0),
                             "reasoning_tokens": chunk.get("reasoning_tokens", 0),
                             "eval_duration_ms": chunk.get("eval_duration", 0) / 1_000_000,
@@ -2209,6 +2240,7 @@ def ask_ollama_textual(
                 calibrate_token_estimator(
                     current_model, prompt_eval_count, prepared,
                     persist_path=os.path.join(session_path, "performance.log"),
+                    cached_count=prompt_eval_cached_count,
                 )
             # Тихий срез для калибратора токенов: объёмы текста ↔ точные usage.
             try:

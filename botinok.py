@@ -517,7 +517,24 @@ def _prepare_messages_for_ollama(sm: SessionManager, session_path: str, messages
             dropped.append(m)
 
     kept.reverse()
-    trimmed = system_msgs + kept
+    # Порядок сохраняется: system-реплики не переезжают в голову промпта.
+    # Hoist ломал prompt-cache сервера (новая памятка в середине головы =
+    # полный переэвал всего диалога).
+    kept_flags = [False] * len(other_msgs)
+    _ki = 0
+    for _idx, _m in enumerate(other_msgs):
+        if _ki < len(kept) and kept[_ki] is _m:
+            kept_flags[_idx] = True
+            _ki += 1
+    trimmed = []
+    _oi = 0
+    for _m in messages:
+        if _m.get("role") == "system":
+            trimmed.append(_m)
+            continue
+        if _oi < len(kept_flags) and kept_flags[_oi]:
+            trimmed.append(_m)
+        _oi += 1
 
     if dropped:
         artifact_name = f"context_trim_{int(time.time())}.json"
@@ -533,7 +550,7 @@ def _prepare_messages_for_ollama(sm: SessionManager, session_path: str, messages
                 f"Старые сообщения сохранены в артефакт: {artifact_path}"
             )
         }
-        trimmed = system_msgs + [notice] + kept
+        trimmed = trimmed + [notice]
 
     return trimmed
 
@@ -1032,6 +1049,7 @@ def ask_ollama_stealth(model, messages, session_path, step_num, num_ctx=8192, re
                                 "total_duration_ms": chunk.get("total_duration", 0) / 1_000_000,
                                 "load_duration_ms": chunk.get("load_duration", 0) / 1_000_000,
                                 "prompt_eval_count": chunk.get("prompt_eval_count", 0),
+                                "prompt_eval_cached_count": chunk.get("prompt_eval_cached_count", 0),
                                 "eval_count": chunk.get("eval_count", 0),
                                 "eval_duration_ms": chunk.get("eval_duration", 0) / 1_000_000,
                             }
