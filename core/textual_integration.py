@@ -36,7 +36,8 @@ from core.path_utils import resolve_session_path
 from core.openai_compat import (is_openai_backend, chat_stream_request, chat_once,
                                 apply_native_think, load_cache_entry)
 from core.api_key_gate import is_auth_error, key_entry_url, save_api_key
-from core.textual_app import BotinokTextualApp
+from core.textual_app import BotinokTextualApp, ApiKeyScreen
+from core import server_history
 from core import themes as botinok_themes
 from core.terminal_keys import install as install_terminal_keys
 from core import token_calibrator
@@ -2866,6 +2867,108 @@ def ask_ollama_textual(
             pass
         return []
 
+    def _mask_api_key(key: str) -> str:
+        """Маска ключа для показа в логе/окне (как в истории серверов)."""
+        key = (key or "").strip()
+        if not key:
+            return "не задан"
+        return f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "•" * len(key)
+
+    def _store_api_key(new_key: str, record_history: bool = False) -> str:
+        """Сохранить ключ тем же путём, что и окно 401/403 (save_api_key):
+        персональный конфиг ~/.config/botinok/config.cfg с мержом эффективных
+        настроек; живой sm.config обновляется в той же функции, а заголовки
+        запросов читают конфиг на каждый вызов — новый Bearer подхватывается
+        со следующего запроса без перезапуска.
+
+        CLI --api-key дублирует ключ в env BOTINOK_API_KEY, и созданные дальше
+        SessionManager подняли бы старое значение — синхронизируем и env.
+        record_history — запись в историю серверов, как делает визард, чтобы
+        presets мастера показывали уже новый ключ."""
+        url = (sm.config.get('Ollama', 'BaseUrl', fallback='') or '').strip()
+        path = save_api_key(sm, new_key)
+        if "BOTINOK_API_KEY" in os.environ:
+            os.environ["BOTINOK_API_KEY"] = new_key
+        if record_history:
+            try:
+                server_history.record(sm, "openai", url, new_key)
+            except Exception:
+                pass
+        return path
+
+    def _verify_and_store_key(new_key: str):
+        """Ветка /key: сверить ключ методами визарда (ConfigWizard.check_openai —
+        канонический /v1/models с Bearer, классификация моделей, уточнение
+        api_base) и сохранить только при успехе. Работает в фоне, в чат пишет
+        через _write_log (безопасен из потока)."""
+        if not is_openai_backend(sm):
+            # Как визард: шаг ключа есть только у OpenAI-бэкенда; Ollama
+            # Authorization не отправляет — сохраняем «на будущее».
+            try:
+                path = _store_api_key(new_key)
+                _write_log(f"[green]✅ Ключ сохранён: {path}[/green]")
+                _write_log("[yellow]⚠ Бэкенд Ollama не использует Authorization — "
+                           "ключ пригодится при переключении на OpenAI-совместимый API.[/yellow]")
+            except Exception as e:
+                _write_log(f"[red]Не удалось сохранить API-ключ: {e}[/red]")
+            return
+        url = (sm.config.get('Ollama', 'BaseUrl',
+                             fallback='http://localhost:11434') or '').strip()
+        verify = sm.config.getboolean('Ollama', 'VerifySSL', fallback=True)
+        try:
+            from core.config_wizard import ConfigWizard
+            success, models, cert_error, api_base, net_error = \
+                ConfigWizard(sm).check_openai(url, new_key, verify=verify)
+        except Exception as e:
+            _write_log(f"[red]Ошибка проверки ключа: {e} — ключ не сохранён[/red]")
+            return
+        if success:
+            try:
+                path = _store_api_key(new_key, record_history=True)
+            except Exception as e:
+                _write_log(f"[red]Ключ принят сервером, но не сохранён: {e}[/red]")
+                return
+            _write_log(f"[green]✓ Ключ подтверждён сервером[/green]")
+            _write_log(f"[dim]  {url} · найдено моделей: {len(models)}[/dim]")
+            if api_base and api_base.rstrip('/') != url.rstrip('/'):
+                _write_log(f"[dim]  точка входа уточнена: {api_base}[/dim]")
+            _write_log(f"[green]✅ Ключ сохранён: {path}[/green]")
+            _write_log("[dim]Новый ключ применяется со следующего запроса.[/dim]")
+        elif cert_error:
+            _write_log("[red]✗ Не удалось проверить ключ: SSL-сертификат отклонён "
+                       "— ключ не сохранён[/red]")
+            _write_log(f"[dim]{cert_error}[/dim]")
+        elif net_error:
+            _write_log(f"[red]✗ Сервер не ответил ({net_error}) — ключ не сохранён[/red]")
+        else:
+            _write_log("[red]✗ Сервер не принял ключ: список моделей недоступен "
+                       "— ключ не сохранён[/red]")
+            _write_log("[dim]Проверьте BaseUrl/ключ или заполните настройки через "
+                       "botinok --wizard[/dim]")
+
+    def _prompt_key_change():
+        """Смена ключа: то же окно ввода, что и при 401/403, но своим
+        заголовком — ввод добровольный, сервер ничего не отклонял."""
+        try:
+            current = (sm.config.get('Ollama', 'ApiKey', fallback='') or '').strip()
+        except Exception:
+            current = ""
+        screen = ApiKeyScreen(
+            server_label=_server_label(sm),
+            key_url=key_entry_url(sm),
+            title="🔑 Смена API-ключа",
+            intro=f"Текущий ключ: {_mask_api_key(current)} — вставьте новый и нажмите Enter",
+            on_resolve=_on_key_resolved,
+        )
+        _call_from_thread(app.push_screen, screen)
+
+    def _on_key_resolved(key):
+        if not key:
+            _write_log("[dim]Ввод API-ключа отменён — текущий ключ без изменений[/dim]")
+            return
+        _write_log("[cyan]🔍 Проверяю ключ на сервере (как в мастере)...[/cyan]")
+        threading.Thread(target=_verify_and_store_key, args=(key,), daemon=True).start()
+
     def _handle_slash_command(cmd: str):
         nonlocal _current_model, _current_ctx, _ollama_chat_url
         parts = cmd.strip().split()
@@ -2876,6 +2979,7 @@ def ask_ollama_textual(
             _write_log("  [green]/model <name>[/green]  — сменить модель (например /model qwen3.5:9b)")
             _write_log("  [green]/models[/green]         — список доступных моделей Ollama")
             _write_log("  [green]/ctx <n>[/green]         — сменить размер контекста (например /ctx 32768)")
+            _write_log("  [green]/key[/green]           — ввести или сменить API-ключ")
             _write_log("  [green]/clear[/green]          — очистить экран")
             _write_log("  [green]/dangerous[/green]      — переключить опасный режим")
             _write_log("  [green]/retry[/green]          — повторить последний запрос")
@@ -2928,6 +3032,12 @@ def ask_ollama_textual(
 
         elif command == "/clear":
             app.clear_log()
+
+        elif command == "/key":
+            if len(parts) > 1:
+                _write_log("[yellow]Ключ в команду не передаётся (текстом его видно в "
+                           "истории) — открываю окно ввода.[/yellow]")
+            _prompt_key_change()
 
         elif command == "/dangerous":
             current = os.environ.get("BOTINOK_DANGEROUS", "0") == "1"

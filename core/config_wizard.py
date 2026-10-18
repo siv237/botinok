@@ -28,8 +28,11 @@ _SCHEME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://')
 
 
 class ConfigWizard:
-    def __init__(self):
-        self.sm = SessionManager()
+    def __init__(self, sm=None):
+        # sm=None — запуск из CLI (--wizard): свой SessionManager. TUI передаёт
+        # живого SessionManager сессии, чтобы проверки и запись ключа шли по
+        # текущей конфигурации (та же практика у команды /key).
+        self.sm = sm if sm is not None else SessionManager()
         self.config = self.sm.config
 
     @staticmethod

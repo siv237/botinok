@@ -133,6 +133,55 @@ def test_apikey_screen():
         check("ApiKeyScreen Pilot", False, str(e))
 
 
+def test_apikey_screen_title_intro():
+    """Добровольная смена ключа (/key) переопределяет заголовок/лид; окно
+    401/403 без параметров обязано остаться прежним («отклонил запрос»)."""
+    try:
+        from textual.app import App
+        from core.textual_app import ApiKeyScreen
+    except Exception as e:
+        check("импорт ApiKeyScreen (title/intro)", False, str(e))
+        return
+
+    class CustomApp(App):
+        def on_mount(self):
+            self.push_screen(ApiKeyScreen(
+                "gateway.example", "https://gateway.example", "",
+                title="🔑 Смена API-ключа",
+                intro="Текущий ключ: sk-1...abcd — вставьте новый и нажмите Enter",
+                on_resolve=lambda k: None))
+
+    class DefaultApp(App):
+        def on_mount(self):
+            self.push_screen(ApiKeyScreen(
+                "gateway.example", "https://gateway.example",
+                "No api key passed in.", on_resolve=lambda k: None))
+
+    async def body_text(app_cls):
+        app = app_cls()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            static = app.screen.query_one("#apikey_body")
+            return str(static.render())
+
+    try:
+        custom = asyncio.run(body_text(CustomApp))
+        check("кастомный заголовок", "Смена API-ключа" in custom, custom[:120])
+        check("кастомный лид", "Текущий ключ" in custom, custom[:160])
+        check("нет «отклонил запрос» у /key", "отклонил запрос" not in custom)
+
+        default = asyncio.run(body_text(DefaultApp))
+        check("дефолтный заголовок 401 не изменился",
+              "Требуется API-ключ" in default, default[:120])
+        check("дефолтный лид 401 не изменился",
+              "отклонил запрос" in default, default[:120])
+        check("лид причины 401 сохранился", "No api key passed in." in default)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        check("ApiKeyScreen title/intro", False, str(e))
+
+
 def main() -> int:
     print("=" * 60)
     print("api_key_gate tests")
@@ -141,6 +190,7 @@ def main() -> int:
     test_key_entry_url()
     test_save_api_key()
     test_apikey_screen()
+    test_apikey_screen_title_intro()
     print("-" * 60)
     if FAILURES:
         print(f"FAILED: {len(FAILURES)}: {FAILURES}")

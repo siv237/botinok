@@ -632,22 +632,32 @@ class ApiKeyScreen(ModalScreen):
     """
 
     def __init__(self, server_label: str = "", key_url: str = "", reason: str = "",
-                 on_resolve: Optional[Callable] = None, **kwargs):
+                 on_resolve: Optional[Callable] = None,
+                 title: str = "", intro: Optional[str] = None, **kwargs):
         super().__init__(**kwargs)
         self.server_label = server_label
         self.key_url = key_url
         self.reason = reason
         self.on_resolve = on_resolve
+        # Переопределяемые заголовок/лид для добровольной смены ключа (/key):
+        # по умолчанию — как при 401/403 («сервер отклонил запрос»).
+        self.title_text = title
+        self.intro_text = intro
 
     def compose(self) -> ComposeResult:
         server = (self.server_label or "LLM-сервер").replace("[", r"\[")
+        title = (self.title_text or "🔑 Требуется API-ключ").replace("[", r"\[")
+        if self.intro_text is None:
+            intro = f"{server} отклонил запрос."
+        else:
+            intro = str(self.intro_text).replace("[", r"\[")
         reason = (str(self.reason or '')[:200]).replace("[", r"\[")
         reason = f"\n[dim]{reason}[/dim]" if reason else ""
         link = f'[link="{self.key_url}"]{self.key_url}[/link]' if self.key_url else ""
         link_line = f"Получить ключ (клик откроет браузер): {link}\n" if link else ""
         yield Static(
-            "[bold yellow]🔑 Требуется API-ключ[/bold yellow]\n"
-            f"{server} отклонил запрос.{reason}\n"
+            f"[bold yellow]{title}[/bold yellow]\n"
+            f"{intro}{reason}\n"
             f"{link_line}"
             "[dim]Вставьте ключ и нажмите Enter · esc — отмена[/dim]",
             id="apikey_body")

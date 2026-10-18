@@ -160,6 +160,19 @@ def test_discover_endpoints():
         cw.requests = real
 
 
+def test_init_injects_sm():
+    """ConfigWizard(sm) использует переданный TUI SessionManager (для /key),
+    без sm — как раньше создаёт свой (CLI --wizard)."""
+    import configparser
+    sm = type("FakeSM", (), {})()
+    sm.config = configparser.ConfigParser()
+    sm.config['Ollama'] = {'BaseUrl': 'https://gw.test', 'Backend': 'openai'}
+    w = ConfigWizard(sm)
+    check("принят переданный sm", w.sm is sm)
+    check("config разделяется со sm", w.config is sm.config)
+    check("бэкенд читается из него", ConfigWizard.current_backend(w.config) == 'openai')
+
+
 def main() -> int:
     print("=" * 60)
     print("wizard models/context tests")
@@ -169,6 +182,7 @@ def main() -> int:
     test_check_openai_net_error()
     test_url_smarts()
     test_discover_endpoints()
+    test_init_injects_sm()
     print("-" * 60)
     if FAILURES:
         print(f"FAILED: {len(FAILURES)}: {FAILURES}")

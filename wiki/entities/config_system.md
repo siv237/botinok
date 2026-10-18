@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [config]
-updated: 2026-08-23
-sources: 2
+updated: 2026-10-18
+sources: 3
 status: stable
 ---
 
@@ -26,6 +26,7 @@ status: stable
 ## Работа
 - `--wizard` (`core/config_wizard.py`, класс `ConfigWizard`) — интерактивный мастер: выбор бэкенда (Ollama / OpenAI-совместимый), проверка подключения, список моделей, контекст по умолчанию, `ApiKey`. Для `https` проверяется TLS-сертификат; при ошибке — предупреждение и запрос согласия игнорировать сертификат (тогда `VerifySSL=false` и работа продолжается). → `concepts/config_priority.md`, `entities/openai_compat.md`
 - `save_config()` — запись выбранного пути; обработка ошибок сохранения.
+- `api_key_gate.save_api_key(sm, key)` — **ключ** пишется не в `config_path`, а всегда в личный `~/.config/botinok/config.cfg` (приоритет №1, переживает обновление пакета) с мержом эффективного конфига; триггеры — 401/403 в ходе, первый запуск без ключа и команда TUI `/key` (проверка методом визарда, запись в `server_history`). → `entities/openai_compat.md`, `entities/textual_ui.md`
 - Fallback-дефолты, если файл не найден.
 
 ## Связи

@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [tui]
-updated: 2026-10-10
-sources: 6
+updated: 2026-10-18
+sources: 7
 status: stable
 ---
 
@@ -111,6 +111,11 @@ status: stable
 - `_keep_focus` не отбирает фокус у встроенного терминала, чтобы можно было печатать в него во время стрима.
 
 Подробно: `entities/shell_screen.md`, `entities/shell_session.md`, `concepts/embedded_terminal.md`.
+
+## Slash-команды
+Ввод в Composer, начинающийся с `/`, уходит в `_handle_slash_command` (`core/textual_integration.py`, роутинг `on_composer_submitted` → `on_slash_command`): `/help`, `/model <name>`, `/models`, `/ctx <n>`, `/key`, `/clear`, `/dangerous`, `/retry`, `/vram`, и `exit`/`quit`/`выход`. Ввод во время стрима для обычного текста уходит в очередь, слэш-команды выполняются сразу. → `concepts/dangerous_mode.md`, `entities/config_system.md`
+
+- **`/key`** — ввести или сменить API-ключ. Открывает то же модальное окно `ApiKeyScreen`, что и окошко при 401/403, но со своим заголовком и лидом (новые необязательные параметры `title=`/`intro=`; без них текст 401-потока не изменился — покрыто тестом). Текущий ключ показывается маской (`abcd...wxyz`). Ключ проверяется в фоне **теми же методами визарда** — `ConfigWizard(sm).check_openai(url, key)`: канонический `/v1/models` с Bearer, классификация моделей, уточнение `api_base` — и сохраняется только при успехе: `save_api_key` (персональный `~/.config/botinok/config.cfg` с мержом эффективного конфига, как в 401-потоке), запись в `server_history` (presets мастера видят новый ключ), синхронизация env `BOTINOK_API_KEY`, если он задан `--api-key`. При `backend=ollama` ключ сохраняется без проверки с пометкой, что Authorization этот бэкенд не отправляет. → `entities/openai_compat.md`, `concepts/config_priority.md`
 
 ## Взаимодействие
 Из `botinok.py` интерактивный поток идёт через `ask_ollama_textual` (единственный UI; старый Rich Live удалён в 0.4), а headless — через `ask_ollama_stealth`. → `botinok_cli.md`, `comparisons/rich_vs_textual.md`

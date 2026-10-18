@@ -1,8 +1,8 @@
 ---
 type: entity
 tags: [integration, llm]
-updated: 2026-08-23
-sources: 2
+updated: 2026-10-18
+sources: 3
 status: stable
 ---
 
@@ -19,6 +19,8 @@ baseurl = http://localhost:8080
 При `backend = openai` все запросы идут на `{baseurl}/v1/chat/completions`, а SSE-стрим конвертируется в формат Ollama `/api/chat` на лету. Если в `[Ollama]` указан `ApiKey`, во все запросы добавляется заголовок `Authorization: Bearer <ключ>`. → `concepts/function_calling.md`, `entities/config_system.md`
 
 Бэкенд выбирается мастером настроек (`--wizard`): шаг 0 — тип сервера, для OpenAI дополнительно прописывается `ApiKey` и забирается список моделей из `/v1/models`. Мастер извлекает максимальный контекст модели из полей провайдера (`context_length`, `context_window`, `max_model_len`, вложено в `meta`/`meta.llama`); если провайдер контекст не отдаёт, пробуется эндпоинт llama.cpp `/props`. В шаге выбора модели контекст отображается, а в шаге контекста предлагается рекомендуемый (максимальный) или меньше. → `config_system.md`, `config_priority.md`
+
+Все пути смены ключа сходятся на `core/api_key_gate.py`: `.save_api_key(sm, key)` пишет в персональный `~/.config/botinok/config.cfg` (с мержом эффективного конфига) и обновляет живой `sm.config`; запрос ключа — модальное `ApiKeyScreen` (`core/textual_app.py`) либо getpass в консоли. Три триггера: 401/403 в ходе (`is_auth_error` → проверка → повтор хода), первый запуск без ключа (`require_api_key`) и команда TUI **`/key`** — добровольная смена: проверка `ConfigWizard(sm).check_openai` (метод визарда: канонический `/v1/models` с Bearer) в фоне, сохранение только при успехе + запись в `server_history` / синхронизация env `BOTINOK_API_KEY`. → `entities/textual_ui.md`, `concepts/config_priority.md`
 
 ## Ключевые компоненты
 - `is_openai_backend(sm)` — признак по конфигу (`openai`, `openai-compatible`).
