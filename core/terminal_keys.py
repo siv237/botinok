@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from typing import Iterable
 
 from textual import events
@@ -25,9 +26,61 @@ from textual.keys import _character_to_key
 _MODIFY_OTHER_KEYS = re.compile(r"\x1b\[27;(\d+);(\d+)~")
 _MODIFIERS = ("shift", "alt", "ctrl", "super", "hyper", "meta")
 
+# Ответы терминала на запросы (цвет фона/переднего плана OSC 10/11, DA1/DA2,
+# размер окна/пикселей CSI ..t, XTVERSION). Textual 8.x их не распознаёт:
+# последовательность не совпадает ни с чем, превышает порог поиска и каждый
+# символ «переиздаётся» клавишей — при открытии в поле ввода появлялся мусор
+# вида `^]10;rgb:...^\^]11;...^[8;24;80t^[4;456;720t[?61;...c`. Вырезаем их
+# из потока ввода ДО парсера. DECRPM (`?..$y`) и позицию курсора (`..R`) не
+# трогаем — их парсер обрабатывает сам.
+_RE_TERM_RESPONSE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC ... BEL/ST (цвета и т.п.)
+    r"|\x1b\[\??[0-9;]*c"                 # DA1/DA2 response
+    r"|\x1b\[\??[0-9;]*t"                 # window/pixel/cell size report
+    r"|\x1b>P[^\x1b]*\x1b\\",             # XTVERSION (DCS)
+)
+# Хвост, похожий на НАЧАЛО ответа, пришедший обрывком — придержим до feed-а
+# позже (обычно остаток приходит этим же пакетом).
+_RE_HELD_TAIL = re.compile(r"(?:\x1b\][^\x07\x1b]*|\x1b\[\??[0-9;]*)$")
+
 
 class BotinokXTermParser(XTermParser):
     """XTermParser: Alt+Enter как отдельная клавиша + xterm modifyOtherKeys."""
+
+    RESPONSE_HOLD = 1.0
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._held = ""
+        self._held_at = 0.0
+
+    def feed(self, data: str):
+        incoming = bool(data)
+        if self._held:
+            if time.time() - self._held_at > self.RESPONSE_HOLD:
+                # Просрочка: ответ так и не дошёл — выбрасываем, в клавиши
+                # не отдаём (пользователь CSI-префиксы с цифрами не печатает).
+                self.debug_log("DROP held", repr(self._held))
+            else:
+                data = self._held + data
+            self._held = ""
+        data = _RE_TERM_RESPONSE.sub("", data)
+        tail = _RE_HELD_TAIL.search(data)
+        if tail is not None:
+            self._held = data[tail.start():]
+            self._held_at = time.time()
+            data = data[:tail.start()]
+        if not data and incoming:
+            # Весь пакет — ответы терминала: super().feed("") означало бы EOF
+            # и закрыло бы парсер посреди сессии.
+            return []
+        return super().feed(data)
+
+    def tick(self):
+        if self._held and time.time() - self._held_at > self.RESPONSE_HOLD:
+            self.debug_log("DROP held (tick)", repr(self._held))
+            self._held = ""
+        return super().tick()
 
     def _sequence_to_key_events(
         self, sequence: str, alt: bool = False

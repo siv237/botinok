@@ -2035,7 +2035,16 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                     self._user_scrolled_away = False
             else:
                 if metrics_active:
-                    self.chat.scroll_end(animate=False)
+                    # scroll_end — не бесплатная операция (прокрутка большого
+                    # документа), зовём только когда контент реально вырос,
+                    # а не каждые 100 мс впустую.
+                    try:
+                        vh = self.chat.virtual_size.height
+                    except Exception:
+                        vh = -1
+                    if vh != getattr(self, "_autoscroll_vh", -1):
+                        self._autoscroll_vh = vh
+                        self.chat.scroll_end(animate=False)
         if self._stats_dirty or self._tools_dirty or self._footer_dirty:
             self.update_stats_display()
         # Фоновые веб-задачи живут между ходами: панель обновляется и в покое,
@@ -2429,7 +2438,12 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
     def _update_header(self) -> None:
         if not self.header_display:
             return
-        self.header_display.update(self._render_header_text(), layout=False)
+        text = self._render_header_text()
+        # 10 Гц тик дёргает шапку и в те фазы, где она не меняется; update()
+        # даже без layout перерисовывает виджет — обновляем только по делу.
+        if text != getattr(self, "_header_text_last", None):
+            self._header_text_last = text
+            self.header_display.update(text, layout=False)
         # Цвет шапки — CSS-классы (см. CSS).
         try:
             row = self.header_row or self.header_display
@@ -2986,6 +3000,25 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                     "curl", "skills", "experience", "journal", "session_memory",
                     "web", "web_extract", "image", "vision", "audio"}
 
+    STREAM_TAIL_CHARS = 1500
+
+    @classmethod
+    def _tail_for_stream(cls, text: str) -> str:
+        """Для живого стрима рендерим только ХВОСТ накопленного текста.
+
+        Иначе на длинном ответ Static перерисовывает весь текст 10 раз в
+        секунду (O(n²) за ход), и на фоне занятой локальной модели UI-цикл
+        не успевает обслуживать клавиши — ввод «тормозит». Финальный ответ
+        всё равно рендерится целиком при завершении хода.
+        """
+        if len(text) <= cls.STREAM_TAIL_CHARS:
+            return text
+        tail = text[-cls.STREAM_TAIL_CHARS:]
+        nl = tail.find("\n")
+        if 0 <= nl < 200:
+            tail = tail[nl + 1:]
+        return "… " + tail
+
     @staticmethod
     def _mask_image_tokens(text: str) -> str:
         """В стриме не показываем сырой [[image:<id>]] — только пометку.
@@ -3529,7 +3562,13 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         self._update_queue_placeholder()
 
     def _autosize_composer(self) -> None:
-        """Подогнать высоту композера под число строк (1..8) + рамка."""
+        """Подогнать высоту композера под число строк (1..8) + рамка.
+
+        Стиль трогаем ТОЛЬКО при реальной смене высоты: присваивание того же
+        значения помечает стили грязными и гоняет полный relayout экрана
+        (чат из сотен виджетов) на КАЖДУЮ клавишу — на фоне занятого локальной
+        моделью CPU это и давало «заторможенный» ввод.
+        """
         c = self.input_widget
         if c is None:
             return
@@ -3538,7 +3577,10 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
         except Exception:
             lines = 1
         try:
-            c.styles.height = min(8, lines) + 2
+            height = min(8, lines) + 2
+            if getattr(self, "_composer_height", None) != height:
+                self._composer_height = height
+                c.styles.height = height
         except Exception:
             pass
 
@@ -4190,7 +4232,8 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
             self._stream_ui_last = now
             parts = []
             if self._stream_thinking:
-                t = self._collapse_newlines(self._rich_escape(self._stream_thinking))
+                t = self._collapse_newlines(
+                    self._rich_escape(self._tail_for_stream(self._stream_thinking)))
                 parts.append(f"[#555555]Думает…[/#555555]\n[#555555]{t}[/#555555]")
             if tool_stream_json:
                 tool_display = self._GGUF_TAG_RE.sub("", tool_stream_json)
@@ -4199,10 +4242,11 @@ class BotinokTextualApp(botinok_themes.ThemedAppMixin, App):
                 tool_display = re.sub(r'[\x80-\x9f]', '', tool_display)
                 tool_display = tool_display.replace("[", r"\[")
                 if any(t in tool_display for t in self._KNOWN_TOOLS) or ("call:" in tool_display) or ("{" in tool_display and ":" in tool_display):
+                    tool_display = self._tail_for_stream(tool_display)
                     parts.append(f"[bold magenta]Команда:[/bold magenta]\n{tool_display}")
             if self._stream_content:
-                t = self._collapse_newlines(
-                    self._rich_escape(self._mask_image_tokens(self._stream_content)))
+                t = self._collapse_newlines(self._rich_escape(
+                    self._tail_for_stream(self._mask_image_tokens(self._stream_content))))
                 parts.append(f"[#555555]Ответ:[/#555555]\n[#555555]{t}[/#555555]")
             self.stream_static.update("\n\n".join(parts) if parts else "")
 
